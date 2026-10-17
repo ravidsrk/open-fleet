@@ -56,9 +56,9 @@ Each row is a witnessed act, not a code change. The issue holds the evidence.
 - [ ] The proof paragraph below still matches the README's generated proof-status sentence on
       the day of posting. If an external `ship-it` run has bound by then
       ([#515](https://github.com/ravidsrk/orca-fleet/issues/515)), say so; if not, the
-      paragraph makes no such claim and needs no edit. Refreshed 2026-10-13: the external
-      `ship-it` run HAS bound (#549), so the paragraph now says so; this box is ticked only
-      by re-checking the match on the day of posting.
+      paragraph makes no such claim and needs no edit. Refreshed 2026-10-17: both the external
+      `ship-it` run (#549) and the external `review-it` run (#529) have bound, so the paragraph
+      now names both; this box is ticked only by re-checking the match on the day of posting.
 
 ## The text
 
@@ -77,10 +77,11 @@ you pull requests against an integration branch. Promotion to your default branc
 your click.
 
 **What "beta" means here.** Every mission carries a proof tier that a validator enforces and a
-test binds to the README's catalog table. Today one mission, `ship-it`, stands at `external-run`:
-it was run against a repository that is not this catalog (a new CLI built from a frozen spec to
-a reviewed, verified `BUILT`), and its run report re-hashes at the commit it names. Three
-missions, `clean-sweep`, `harden-it` and `prove-it`, stand at `self-run` on the same standard.
+test binds to the README's catalog table. Today two missions, `ship-it` and `review-it`, stand
+at `external-run`: they were run against repositories outside this catalog (a new CLI built
+from a frozen spec to a reviewed, verified `BUILT`, and a cross-repo PR review verdict), and
+their run reports re-hash at the commits they name. Three missions, `clean-sweep`, `harden-it`
+and `prove-it`, stand at `self-run` on the same standard.
 Every other mission stands at `doctrine-only`: written, validated, exercised in the self-test
 campaign, and not yet bound to a run a stranger can re-derive. The
 [run archive](../runs/README.md) records every run that really happened and says, per run,
@@ -97,7 +98,7 @@ recipe. The full boundary is stated in the README under
 [Before you run a mission](../../README.md#before-you-run-a-mission).
 
 **What you need.** The Orca app running with the orchestration experimental feature enabled, at
-or above the catalog pin (`runtime/pins.json`, v1.4.224 at this cut); the `orca` CLI, which is
+or above the catalog pin (`runtime/pins.json`, v1.4.224 at the 0.7.1 cut; v1.4.229 on `main`); the `orca` CLI, which is
 `orca-ide` on Linux; Orca's `orchestration` and `orca-cli` skills installed for your agent host;
 `git` and `gh`; Python 3.11 or newer. Most recorded runs happened on macOS; Linux, supported
 by the code as of 0.7.1, has two recorded runs on Ubuntu via `orca-ide`: a `review-it` verdict
@@ -111,10 +112,10 @@ completion gate by construction. Copy installers, including the `skills` CLI, mu
 and says which ones carry the gate.
 
 **Support window.** The catalog is re-witnessed against the installed Orca binary on every
-re-pin; 0.7.1 was tested against v1.4.209 through v1.4.224. Orca ships almost daily, so a weekly
+re-pin; 0.7.1 was tested against v1.4.209 through v1.4.224 (and re-pinned through v1.4.229 on `main`). Orca ships almost daily, so a weekly
 probe files an issue when the pin falls behind, and a quarterly re-pin runs regardless.
 
-**What is not claimed.** Only `ship-it` is external-run, and its run stopped at `BUILT` on an
+**What is not claimed.** Only `ship-it` and `review-it` are `external-run`, and `ship-it`'s run stopped at `BUILT` on an
 integration branch — no release or deployment state beyond that is claimed for any mission. The verifier hashes evidence and re-derives
 bindings; it does not re-run your tests for you. Nothing here is affiliated with or endorsed by
 Stably, the Orca maintainers, or the authors of the upstream skill packs whose techniques the

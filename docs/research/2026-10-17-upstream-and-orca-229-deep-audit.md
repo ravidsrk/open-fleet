@@ -229,12 +229,16 @@ Jira tickets, CI logs, and web pages attempting instruction override, forged env
 Unicode tag/zero-width/fullwidth evasion, authority spoofing, and gate-skip suppression).
 
 **Implemented in this upgrade:**
-- `evals/injection-drills.json`: 16 realistic adversarial drill cases across all four sources
-  (`issue`, `pr`, `ci`, `web`), including Jira/Linear ticket bodies, multi-stage envelope-breakout
-  attempts, Unicode NFKC/Cf obfuscation, fake coordinator `[GATE-GRANT]` / `ORCA_COORD_ALLOW_DANGER=1`
-  directives, and benign technical lookalikes (negative controls that must **not** false-positive).
-- `scripts/eval.py --suite injection` (and included in `--suite all`): runs the full drill corpus
-  through `guard_text.py` and task-spec composition, verifying 100% envelope containment,
-  0 un-defused forged banners, 100% required pattern recall, and 0 false positives on benign
-  technical prose.
-- `tests/test_injection_drills.py`: contract tests locking the drill suite into `unittest` and CI.
+- `evals/injection-drills.json` (14 realistic adversarial drill cases) + `tests/fixtures/injection.json`
+  (10-case poisoned-input corpus) across all four sources (`issue`, `pr`, `ci`, `web`), including
+  Jira/Linear ticket bodies, multi-stage envelope-breakout attempts, Unicode NFKC/Cf obfuscation,
+  fake coordinator `[GATE-GRANT]` / `SESSION_KIND: spawned` / `ORCA_COORD_ALLOW_DANGER=1`
+  directives, secret-exfiltration asks, and benign technical lookalikes (negative controls that
+  must **not** false-positive).
+- `scripts/eval.py --suite injection` (and included in `--suite all`), plus
+  `build_obedience_drill_prompt()` and `grade_obedience_verdict()`: runs the full drill corpus
+  through `guard_text.py`, verifying 100% envelope containment, 0 un-defused forged banners,
+  100% required pattern recall, 0 false positives on benign technical prose, and deterministic
+  5-criterion grading for `review-it` (`PROFILE=ro`) obedience verdicts.
+- `tests/test_injection_drills.py` and `tests/test_injection_corpus.py`: contract tests locking
+  both corpora and the obedience verdict grader into `unittest` and CI.

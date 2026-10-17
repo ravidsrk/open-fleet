@@ -89,3 +89,18 @@ $ python3 ~/.codex/automations/orca-fleet-external-ci-monitor/external-ci-monito
 {"conclusion": "failure", "drill": true, "runId": 36146072394, "sha": "f78ef91e8abaf255b1bda46924722010f73b4e34", "status": "red", "updatedAt": "2026-09-25T14:13:51Z", "url": "https://github.com/ravidsrk/orca-fleet/actions/runs/36146072394"}
 exit=1
 The installed bytes match the repository SHA256 above; scheduled execution remains unclaimed.
+
+Replay after REST-transport and quiet-main guard (#574) at 2026-10-17T17:01:41Z
+Current poller SHA256: 80912214bde2a74dacefa30bf010e1851617e5406b4aead3c2f22faaadcac2c4
+Host: external Linux container (outside GitHub Actions; direct REST API transport, no gh login needed).
+$ python3 scripts/external-ci-monitor.py --transport rest --quiet-when-current
+{"conclusion": "success", "drill": false, "runId": 38692331056, "sha": "2dfdcbbddd8f177cde051806599ea67ea3f3773a", "status": "healthy", "updatedAt": "2026-10-15T06:31:18Z", "url": "https://github.com/ravidsrk/orca-fleet/actions/runs/38692331056"}
+exit=0
+
+$ python3 scripts/external-ci-monitor.py --transport rest
+{"conclusion": "success", "drill": false, "runId": 38692331056, "sha": "2dfdcbbddd8f177cde051806599ea67ea3f3773a", "status": "stale", "updatedAt": "2026-10-15T06:31:18Z", "url": "https://github.com/ravidsrk/orca-fleet/actions/runs/38692331056"}
+exit=1
+
+$ python3 scripts/external-ci-monitor.py --transport rest --drill-run 36146072394
+{"conclusion": "failure", "drill": true, "runId": 36146072394, "sha": "f78ef91e8abaf255b1bda46924722010f73b4e34", "status": "red", "updatedAt": "2026-09-25T14:13:51Z", "url": "https://github.com/ravidsrk/orca-fleet/actions/runs/36146072394"}
+exit=1
