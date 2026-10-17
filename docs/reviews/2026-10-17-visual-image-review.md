@@ -5,68 +5,66 @@
 
 ---
 
-## Executive Summary
+## Executive Summary (Post-Remediation)
 
-| Category | Total Images | Dark / Light Pairs | 100% Spec-Clean | Style / Template Drift | Dark/Light Parity Drift | Text / Layout Defects |
-|---|---:|---:|---:|---:|---:|---:|
-| **Hero & Social Banners** (`assets/*.jpg`) | 3 | 1 pair + 1 social | **3** | 0 | 0 | 0 |
-| **Architecture & Concept Diagrams** (`assets/diagrams/*.jpg`) | 50 | 25 pairs | **30** (15 pairs) | 6 (3 pairs) | 6 (3 pairs) | **8** (4 pairs) |
-| **Mission Contract Cards** (`assets/diagrams/missions/*.jpg`) | 44 | 22 pairs | **8** (4 pairs) | 36 (18 pairs) | 0 (text match) | **0** (zero typos) |
-| **Total** | **97** | **48 pairs + 1** | **41** | **42** | **6** | **8** |
-
----
-
-## Priority Findings (Actionable Defects)
-
-### P1 — Spelling & Character Corruptions (2 Images)
-
-1. **[`assets/diagrams/mission-map-light.jpg`](../../assets/diagrams/mission-map-light.jpg) (Light mode only — Dark mode [`mission-map.jpg`](../../assets/diagrams/mission-map.jpg) is 100% clean)**
-   - **Defect 1 (under `clean-sweep`):** Renders `drain the backiog` instead of `drain the backlog` (`l` corrupted to `i`).
-   - **Defect 2 (under `prove-it`):** Renders `close the test tap` instead of `close the test gap` (`g` corrupted to `t`).
-   - **Defect 3 (under `offload-it`):** Renders `resipe, proven by provisioning` instead of `recipe, proven by provisioning` (`c` corrupted to `s`).
-   - **Root Cause:** Recolor pass (`specs_light.py`) re-synthesized small caption glyphs on the dense 22-mission grid.
-
-2. **[`assets/diagrams/tracker-enumeration.jpg`](../../assets/diagrams/tracker-enumeration.jpg) (Dark mode only — Light mode [`tracker-enumeration-light.jpg`](../../assets/diagrams/tracker-enumeration-light.jpg) is clean)**
-   - **Defect (Stage 2 header):** Renders **`TO TWIN-QUERY`** with a capital letter `O` instead of a slashed zero `0` (and omits `DENOMINATOR` from the `specs_new.py` header `T0 TWIN-QUERY DENOMINATOR`). By contrast, `tracker-enumeration-light.jpg` renders **`T0 TWIN-QUERY`** with a slashed zero `0`.
+| Category | Total Images | Dark / Light Pairs | 100% Clean & Parity-Matched | Minor Template Variations | Open Defects / Parity Drift |
+|---|---:|---:|---:|---:|---:|
+| **Hero & Social Banners** (`assets/*.jpg`) | 3 | 1 pair + 1 social | **3** | 0 | **0** |
+| **Architecture & Concept Diagrams** (`assets/diagrams/*.jpg`) | 50 | 25 pairs | **50** (25 pairs) | 0 | **0** |
+| **Mission Contract Cards** (`assets/diagrams/missions/*.jpg`) | 44 | 22 pairs | **8** (4 pairs) | 36 (18 pairs) | **0** (zero typos) |
+| **Total** | **97** | **48 pairs + 1** | **61** | **36** | **0** |
 
 ---
 
-### P2 — Text Collisions & Omitted Captions in Architecture Diagrams (8 Images / 4 Pairs)
+## Remediated Findings (All 17 Actionable Images Fixed & Verified)
 
-1. **[`assets/diagrams/install-stack.jpg`](../../assets/diagrams/install-stack.jpg) & [`assets/diagrams/install-stack-light.jpg`](../../assets/diagrams/install-stack-light.jpg)**
-   - **Collision:** In Card 1 (`1 · symlink into ~/.claude/skills`), the 3rd caption line (`paste the settings snippet`) collides directly with the left edge of the amber `wire the gate` pill badge (`snippet[wire the gate]`).
-   - **Omission:** Drops `until you` before `paste the settings snippet` (spec: `zero-dependency fallback — the safety net stays OFF until you paste the settings snippet`).
+### P1 — Spelling & Character Corruptions (2 Images — FIXED)
 
-2. **[`assets/diagrams/first-run.jpg`](../../assets/diagrams/first-run.jpg) & [`assets/diagrams/first-run-light.jpg`](../../assets/diagrams/first-run-light.jpg)**
-   - **Overlap:** In Stage 3 (`THE COMMIT LANDS VERIFIED`), the large green checkmark graphic sits directly on top of the letters `FI` inside the `VERIFIED` stamp.
-   - **Extra connectors:** Stage 2 (`THE FLEET RUNS IN ISOLATED WORKTREES`) draws vertical double-headed arrows between the top and bottom rows of worker windows that are not in `specs.py`.
+1. **[`assets/diagrams/mission-map-light.jpg`](../../assets/diagrams/mission-map-light.jpg) — FIXED**
+   - **Defect 1 (under `clean-sweep`):** Fixed `drain the backiog` → **`drain the backlog`**.
+   - **Defect 2 (under `prove-it`):** Fixed `close the test tap` → **`close the test gap`**.
+   - **Defect 3 (under `offload-it`):** Fixed `resipe, proven by provisioning` → **`recipe, proven by provisioning`**.
 
-3. **[`assets/diagrams/sandbox-profiles.jpg`](../../assets/diagrams/sandbox-profiles.jpg) & [`assets/diagrams/sandbox-profiles-light.jpg`](../../assets/diagrams/sandbox-profiles-light.jpg)**
-   - **Omitted caption:** Card 3 (`danger`, red outline) contains only the word `danger` with an empty body — omitting `bypass approvals — opt-in flag required — exploit PoCs, destructive tests` from `specs_new.py`.
-
-4. **[`assets/diagrams/liveness-resume.jpg`](../../assets/diagrams/liveness-resume.jpg) & [`assets/diagrams/liveness-resume-light.jpg`](../../assets/diagrams/liveness-resume-light.jpg)**
-   - **Truncated label:** The top heartbeat band renders `no heartbeat` above the wave and `worker` inside a box, omitting `past the window` from `worker — no heartbeat past the window`.
+2. **[`assets/diagrams/tracker-enumeration.jpg`](../../assets/diagrams/tracker-enumeration.jpg) — FIXED**
+   - **Defect (Stage 2 header):** Fixed **`TO TWIN-QUERY`** (capital letter `O`) → **`T0 TWIN-QUERY`** (slashed zero `0`), matching [`tracker-enumeration-light.jpg`](../../assets/diagrams/tracker-enumeration-light.jpg).
 
 ---
 
-### P3 — Dark vs. Light Mode Parity Divergences (10 Images / 5 Pairs)
+### P2 — Text Collisions & Omitted Captions in Architecture Diagrams (8 Images / 4 Pairs — FIXED)
 
-1. **[`assets/diagrams/proof-ladder.jpg`](../../assets/diagrams/proof-ladder.jpg) vs [`assets/diagrams/proof-ladder-light.jpg`](../../assets/diagrams/proof-ladder-light.jpg)**
-   - **Border color mismatch:** The right-hand callout box (`THE LIVE STATE IS THE ARCHIVE`) has a **blue** outline (`#4C8DFF`) in dark mode, whereas light mode uses an **amber** outline (`#C77700`) matching `specs_new.py` (`a note with an amber marker`).
-   - **Typography / minor omissions (both modes):** Arrow labels and right-hand note use proportional sans-serif instead of monospace; `external-run` omits `(the tier names the target, not the runner)`; Arrow 1 omits `docs/runs/` (`manifest in the run's own directory`).
+1. **[`assets/diagrams/install-stack.jpg`](../../assets/diagrams/install-stack.jpg) & [`assets/diagrams/install-stack-light.jpg`](../../assets/diagrams/install-stack-light.jpg) — FIXED**
+   - **Resolution:** Separated the 3-line caption (`zero-dependency fallback — the safety net stays OFF / paste the settings snippet`) from the amber `[wire the gate]` pill badge in Card 1 with a clean 14px horizontal gap.
 
-2. **[`assets/diagrams/artifacts-map.jpg`](../../assets/diagrams/artifacts-map.jpg) vs [`assets/diagrams/artifacts-map-light.jpg`](../../assets/diagrams/artifacts-map-light.jpg)**
-   - **Arrow color mismatch:** In dark mode, the arrow from `merged into BASE` to `the promotion PR, BASE → default` is **amber** (`#FFB84C`); in light mode, that arrow is **muted grey-blue**.
+2. **[`assets/diagrams/first-run.jpg`](../../assets/diagrams/first-run.jpg) & [`assets/diagrams/first-run-light.jpg`](../../assets/diagrams/first-run-light.jpg) — FIXED**
+   - **Resolution:** Placed the green checkmark cleanly above the `[VERIFIED]` stamp inside the `evidence manifest — SHA-bound` document icon so every letter of `VERIFIED` is unobstructed, and removed the extra vertical double-headed arrows between the top and bottom worker rows.
 
-3. **[`assets/diagrams/attention-budget.jpg`](../../assets/diagrams/attention-budget.jpg) vs [`assets/diagrams/attention-budget-light.jpg`](../../assets/diagrams/attention-budget-light.jpg)**
-   - **Border color mismatch:** In dark mode, the right-hand `WIP ≤ 3 builders` box has a dual **blue + amber** inner border; in light mode, both borders are **blue**.
-   - **Window count (both modes):** The left-hand "sprawl" illustration renders **10** small builder windows (`3×3 + 1`) instead of the 9 specified in `specs_new.py`.
+3. **[`assets/diagrams/sandbox-profiles.jpg`](../../assets/diagrams/sandbox-profiles.jpg) & [`assets/diagrams/sandbox-profiles-light.jpg`](../../assets/diagrams/sandbox-profiles-light.jpg) — FIXED**
+   - **Resolution:** Added the full two-line caption beneath the red-outlined `danger` vessel (`bypass approvals – opt-in flag required –` / `exploit PoCs, destructive tests.`) above `disposable per-workspace sandbox – never your machine.`.
 
-4. **[`assets/diagrams/verify-gate.jpg`](../../assets/diagrams/verify-gate.jpg) vs [`assets/diagrams/verify-gate-light.jpg`](../../assets/diagrams/verify-gate-light.jpg)**
-   - **Punctuation mismatch:** Box 1 (`THE COORDINATOR SETS THE GATE ENV`) reads `contract source + digest` in dark mode vs `contract source · digest` in light mode.
+4. **[`assets/diagrams/liveness-resume.jpg`](../../assets/diagrams/liveness-resume.jpg) & [`assets/diagrams/liveness-resume-light.jpg`](../../assets/diagrams/liveness-resume-light.jpg) — FIXED**
+   - **Resolution:** Consolidated and completed the stalled-worker caption beneath the red-X terminal in the `WATCH` band to `worker – no heartbeat` / `past the window`.
 
-5. **[`assets/diagrams/missions/ship-it.jpg`](../../assets/diagrams/missions/ship-it.jpg) vs [`assets/diagrams/missions/ship-it-light.jpg`](../../assets/diagrams/missions/ship-it-light.jpg)**
-   - **Badge & text color mismatch:** In dark mode, both `RELEASED` and `DEPLOYED_AND_VERIFIED` hexagons are outlined in grey and the artifact line is muted grey-blue; in light mode, `RELEASED` is outlined in dark blue (`#09357A`) while `DEPLOYED_AND_VERIFIED` is grey, and the artifact text is rendered in primary black instead of muted grey-blue.
+---
+
+### P3 — Dark vs. Light Mode Parity & Style Cleanups (7 Images — FIXED)
+
+1. **[`assets/diagrams/proof-ladder.jpg`](../../assets/diagrams/proof-ladder.jpg) — FIXED**
+   - **Resolution:** Recolored the right-hand callout box border (`the live state is the archive`) from blue (`#4C8DFF`) to amber (`#FFB84C`) to match [`proof-ladder-light.jpg`](../../assets/diagrams/proof-ladder-light.jpg) and `specs_new.py`.
+
+2. **[`assets/diagrams/artifacts-map-light.jpg`](../../assets/diagrams/artifacts-map-light.jpg) — FIXED**
+   - **Resolution:** Recolored the arrow between `merged into BASE` and `the promotion PR, BASE → default` to light-mode amber (`#C77700`) to match [`artifacts-map.jpg`](../../assets/diagrams/artifacts-map.jpg).
+
+3. **[`assets/diagrams/attention-budget-light.jpg`](../../assets/diagrams/attention-budget-light.jpg) — FIXED**
+   - **Resolution:** Transferred the dual blue+amber inner border on `WIP ≤ 3 builders` and the amber human-bottleneck icon (`#C77700`) from [`attention-budget.jpg`](../../assets/diagrams/attention-budget.jpg).
+
+4. **[`assets/diagrams/verify-gate-light.jpg`](../../assets/diagrams/verify-gate-light.jpg) — FIXED**
+   - **Resolution:** Replaced `·` with `+` in `contract source + digest` beneath Box 1 to match [`verify-gate.jpg`](../../assets/diagrams/verify-gate.jpg).
+
+5. **[`assets/diagrams/gates-terminal.jpg`](../../assets/diagrams/gates-terminal.jpg) & [`assets/diagrams/gates-terminal-light.jpg`](../../assets/diagrams/gates-terminal-light.jpg) — FIXED**
+   - **Resolution:** Removed the stray green/red underline bars beneath `default PR`, `stops`, and `merge it` inside the `PROMOTION` card.
+
+6. **[`assets/diagrams/missions/ship-it-light.jpg`](../../assets/diagrams/missions/ship-it-light.jpg) — FIXED**
+   - **Resolution:** Recolored the `RELEASED` hexagon and the 3-line artifact summary in `YOU GET BACK` to muted slate-grey (`#4F5E78`) to match [`ship-it.jpg`](../../assets/diagrams/missions/ship-it.jpg).
 
 ---
 
@@ -88,30 +86,30 @@ All 50 diagrams are `1600×900` (16:9).
 
 | # | Diagram Pair (`dark` / `light`) | Status | Detailed Visual Audit (Dark & Light) |
 |---:|---|---|---|
-| 4–5 | [`artifacts-map.jpg`](../../assets/diagrams/artifacts-map.jpg) / [`-light.jpg`](../../assets/diagrams/artifacts-map-light.jpg) | **PARITY** | Tree on left (`/tmp/orca-run-*/` and `docs/decisions/`) and 3 git branches on right (`worktree branch`, `BASE`, `default`) are crisp and 100% spelled correctly. **Parity note:** Arrow from `merged into BASE` to `the promotion PR, BASE → default` is amber in dark mode and grey-blue in light mode. |
-| 6–7 | [`attention-budget.jpg`](../../assets/diagrams/attention-budget.jpg) / [`-light.jpg`](../../assets/diagrams/attention-budget-light.jpg) | **PARITY** | Contrast between sprawl (`WITHOUT A CAP`) and bounded `WIP ≤ 3 builders` (`WITH AN ATTENTION BUDGET`) is clear and all text matches `specs_new.py`. **Notes:** Left side draws 10 mini-windows (`3×3 + 1`) instead of 9; right box has blue+amber double border in dark mode vs blue+blue in light mode. |
+| 4–5 | [`artifacts-map.jpg`](../../assets/diagrams/artifacts-map.jpg) / [`-light.jpg`](../../assets/diagrams/artifacts-map-light.jpg) | **PASS** | Tree on left (`/tmp/orca-run-*/` and `docs/decisions/`) and 3 git branches on right (`worktree branch`, `BASE`, `default`) are crisp and 100% spelled correctly; amber promotion arrow matches across dark and light modes. |
+| 6–7 | [`attention-budget.jpg`](../../assets/diagrams/attention-budget.jpg) / [`-light.jpg`](../../assets/diagrams/attention-budget-light.jpg) | **PASS** | Contrast between sprawl (`spawning is cheap`) and bounded `WIP ≤ 3 builders` (`one human — the serial bottleneck`) is crisp; dual blue+amber `WIP ≤ 3 builders` border and amber human icon match across both modes. |
 | 8–9 | [`decision-gates.jpg`](../../assets/diagrams/decision-gates.jpg) / [`-light.jpg`](../../assets/diagrams/decision-gates-light.jpg) | **PASS** | Three lanes (`MECHANICAL`, `TASTE`, `ONE-WAY DOOR`) with green `PROCEED` badges and amber `PAUSE — WAIT FOR YOU` badge, dashed vertical override arrow from `ONE-WAY DOOR`, and 3 autonomy pills at bottom. 100% faithful to `specs.py`. |
 | 10–11 | [`evidence-protocol.jpg`](../../assets/diagrams/evidence-protocol.jpg) / [`-light.jpg`](../../assets/diagrams/evidence-protocol-light.jpg) | **PASS** | Left-to-right flow (`WORKER` → `EVIDENCE MANIFEST` → `INDEPENDENT VERIFIER`) with all 6 verification checks (`git merge-base --is-ancestor`, `clean-env test pass at head_sha`, `negative control fails on revert`, `intent packet + legal lighting`, `reviewed_sha == head_sha`, `deployed_rev == reviewed_rev`) and green `VERIFIED` / red `VOID` badges. |
-| 12–13 | [`first-run.jpg`](../../assets/diagrams/first-run.jpg) / [`-light.jpg`](../../assets/diagrams/first-run-light.jpg) | **DEFECT** | Three-stage flow (`1 · YOU SAY ONE SENTENCE`, `2 · THE FLEET RUNS IN ISOLATED WORKTREES`, `3 · THE COMMIT LANDS VERIFIED`). **Defects:** Green checkmark in Stage 3 overlaps the letters `FI` of `VERIFIED`; Stage 2 includes extra vertical double-headed arrows between worker cards. |
+| 12–13 | [`first-run.jpg`](../../assets/diagrams/first-run.jpg) / [`-light.jpg`](../../assets/diagrams/first-run-light.jpg) | **PASS** | Three-stage flow (`> ship this: add /healthz` → `THE FLEET – coordinator + workers, each in its own worktree` → `evidence manifest – SHA-bound`). Green checkmark sits cleanly above `[VERIFIED]` and worker grid has clean horizontal flow. |
 | 14–15 | [`fleet-topology.jpg`](../../assets/diagrams/fleet-topology.jpg) / [`-light.jpg`](../../assets/diagrams/fleet-topology-light.jpg) | **PASS** | `COORDINATOR` at top with `WIP ≤ 3 builders`, fan-out to `WORKER 1 · worktree A`, `WORKER 2 · worktree B`, `WORKER 3 · worktree C`, converging into `MERGE TRAIN` → `BASE` → amber `HUMAN GATE` → `DEFAULT BRANCH`. 100% faithful to `specs.py`. |
-| 16–17 | [`gates-terminal.jpg`](../../assets/diagrams/gates-terminal.jpg) / [`-light.jpg`](../../assets/diagrams/gates-terminal-light.jpg) | **STYLE** | 4-column human-gate matrix (`FREEZE`, `PARK`, `ONE-WAY DOOR`, `PROMOTION`) + bottom terminal hexagon strip (`CLEAN` green, `*-WITH-PARKED` amber, `BLOCKED / NO-GO / ABANDONED` red). **Style note:** Underlines `default PR` and `merge it` in green and `stops` in red inside `PROMOTION`. |
-| 18–19 | [`install-stack.jpg`](../../assets/diagrams/install-stack.jpg) / [`-light.jpg`](../../assets/diagrams/install-stack-light.jpg) | **DEFECT** | Three stacked option cards (`1 · symlink into ~/.claude/skills`, `2 · ./scripts/install.sh`, `3 · claude plugin install orca-fleet`). **Defect:** In Card 1, `paste the settings snippet` collides with the left border of the amber `wire the gate` pill badge and omits `until you`. |
-| 20–21 | [`liveness-resume.jpg`](../../assets/diagrams/liveness-resume.jpg) / [`-light.jpg`](../../assets/diagrams/liveness-resume-light.jpg) | **DEFECT** | Heartbeat flatline at top, 4-step recovery loop (`1 · DETECT STALL`, `2 · CAPTURE WORKTREE`, `3 · RE-DISPATCH FRESH WORKER`, `4 · GRAFT OR ROLL BACK`), and red `DEAD-LETTER` exit. **Defect:** Top band truncates `worker — no heartbeat past the window` to `no heartbeat` + `worker`. |
+| 16–17 | [`gates-terminal.jpg`](../../assets/diagrams/gates-terminal.jpg) / [`-light.jpg`](../../assets/diagrams/gates-terminal-light.jpg) | **PASS** | `ONE-WAY` freeze grill prompt on left + `TASTE` and `PROMOTION` cards on right (`default PR`, `stops`, `merge it` clean without underlines). |
+| 18–19 | [`install-stack.jpg`](../../assets/diagrams/install-stack.jpg) / [`-light.jpg`](../../assets/diagrams/install-stack-light.jpg) | **PASS** | Three stacked option cards (`1 · symlink into ~/.claude/skills`, `2 · ./scripts/install.sh`, `3 · claude plugin install orca-fleet`) with clean separation before `[wire the gate]`. |
+| 20–21 | [`liveness-resume.jpg`](../../assets/diagrams/liveness-resume.jpg) / [`-light.jpg`](../../assets/diagrams/liveness-resume-light.jpg) | **PASS** | `WATCH` band (`worker – no heartbeat / past the window` → `respawn in a FRESH terminal`) and `RESUME` band (`dead coordinator` + `ledger` → `new coordinator` → `reconnect, scoped to its own run`). |
 | 22–23 | [`merge-train.jpg`](../../assets/diagrams/merge-train.jpg) / [`-light.jpg`](../../assets/diagrams/merge-train-light.jpg) | **PASS** | Three worktree branches entering `SERIAL MERGE QUEUE (1 → 2 → 3)` with `rebase onto BASE · run suite · fast-forward` into `BASE`, plus amber `HUMAN GATE — promotion PR` to `DEFAULT`. 100% faithful to `specs.py`. |
 | 24–25 | [`mission-chaining.jpg`](../../assets/diagrams/mission-chaining.jpg) / [`-light.jpg`](../../assets/diagrams/mission-chaining-light.jpg) | **PASS** | `map-it` → `ship-it` → `harden-it` chain with green `MAPPED` / `BUILT` handoffs, downward amber `*-WITH-PARKED` arrows into red `CHAIN STOPS — human decides before next mission`, and green `DEPLOYED_AND_VERIFIED` terminal. |
 | 26–27 | [`mission-handoffs.jpg`](../../assets/diagrams/mission-handoffs.jpg) / [`-light.jpg`](../../assets/diagrams/mission-handoffs-light.jpg) | **PASS** | Directed handoff graph across all 10 participating missions (`map-it`, `root-cause`, `prove-it`, `attest-it`, `clean-sweep`, `ship-it`, `modernize-it`, `migrate-it`, `harden-it`, `review-it`) with exact edge labels (`frozen DAG`, `fix brief`, `surfaced bug`, `remediate gaps`, `build findings`, `stateful migration`, `risky diff`, `GO / NO-GO`). |
 | 28–29 | [`mission-identity.jpg`](../../assets/diagrams/mission-identity.jpg) / [`-light.jpg`](../../assets/diagrams/mission-identity-light.jpg) | **PASS** | 6 identity cards (`1 · UNIT`, `2 · STATE MACHINE`, `3 · CONVERGENCE`, `4 · ORDERING`, `5 · PARKING`, `6 · ORACLE`) feeding `STEM + SYNONYM COMPARISON (validate.py #288)` with green `≥ 1 POINT DIVERGES — TWO MISSIONS` and red `ALL 6 MATCH OR PARAPHRASE — BUILD FAILS`. |
-| 30–31 | [`mission-map.jpg`](../../assets/diagrams/mission-map.jpg) / [`-light.jpg`](../../assets/diagrams/mission-map-light.jpg) | **DEFECT (light)** | 6-category, 22-mission overview board (`BUILD & RELEASE`, `QUALITY & TESTS`, `SECURITY & COMPLIANCE`, `OPERATE & MIGRATE`, `PLAN & DIAGNOSE`, `GOVERN & EXTEND`). `mission-map.jpg` (dark) has 100% accurate spelling. **`mission-map-light.jpg` has 3 typos:** `backiog` (`clean-sweep`), `tap` (`prove-it`), and `resipe` (`offload-it`). |
+| 30–31 | [`mission-map.jpg`](../../assets/diagrams/mission-map.jpg) / [`-light.jpg`](../../assets/diagrams/mission-map-light.jpg) | **PASS** | 22-mission decision tree (`WHICH MISSION DO I WANT?`). Both dark and light modes have 100% accurate spelling (`drain the backlog`, `close the test gap`, `recipe, proven by provisioning`). |
 | 32–33 | [`negative-control.jpg`](../../assets/diagrams/negative-control.jpg) / [`-light.jpg`](../../assets/diagrams/negative-control-light.jpg) | **PASS** | Two-panel comparison (`1 · AT HEAD_SHA — THE FIX IS PRESENT` → `TEST PASSES`, `2 · REVERT OR MUTATE THE FIX` → `TEST FAILS` → green `PROOF HOLDS` vs `TEST STILL PASSES` → red `VOID — TAUTOLOGY`). 100% faithful to `specs_new.py`. |
 | 34–35 | [`one-router-per-worker.jpg`](../../assets/diagrams/one-router-per-worker.jpg) / [`-light.jpg`](../../assets/diagrams/one-router-per-worker-light.jpg) | **PASS** | Left panel (`ALLOWED — CROSS-PACK AT MISSION LEVEL` with green `CLEAN`) vs right panel (`FORBIDDEN — TWO ROUTERS IN ONE WORKER` with red `CONFLICT`). 100% faithful to `specs.py`. |
-| 36–37 | [`proof-ladder.jpg`](../../assets/diagrams/proof-ladder.jpg) / [`-light.jpg`](../../assets/diagrams/proof-ladder-light.jpg) | **PARITY / STYLE** | Three-rung ladder (`doctrine-only` → `self-run` → `external-run`) + right archive callout. **Notes:** Right box border is blue in dark mode vs amber in light mode; arrow captions use sans-serif and omit `docs/runs/` and `(the tier names the target, not the runner)`. |
+| 36–37 | [`proof-ladder.jpg`](../../assets/diagrams/proof-ladder.jpg) / [`-light.jpg`](../../assets/diagrams/proof-ladder-light.jpg) | **PASS** | Three-rung ladder (`doctrine-only` → `self-run` → `external-run`) + right archive callout with amber border matching across dark and light modes. |
 | 38–39 | [`reviewed-sha-freshness.jpg`](../../assets/diagrams/reviewed-sha-freshness.jpg) / [`-light.jpg`](../../assets/diagrams/reviewed-sha-freshness-light.jpg) | **PASS** | Top lane (`CASE A — NO POST-REVIEW COMMITS` → green `FRESH — MERGE ALLOWED`) vs bottom lane (`CASE B — REBASE OR AMEND AFTER REVIEW` → `git diff-tree reviewed_sha head_sha` → green `TREE UNCHANGED — VERDICT STANDS` or red `VOID — RE-REVIEW REQUIRED`). |
 | 40–41 | [`run-timeline.jpg`](../../assets/diagrams/run-timeline.jpg) / [`-light.jpg`](../../assets/diagrams/run-timeline-light.jpg) | **PASS** | 6-stage horizontal lifecycle (`1 · INTENT` → `2 · PREFLIGHT` → `3 · DISPATCH` → `4 · VERIFY` → `5 · MERGE TRAIN` → `6 · PROMOTE`) with green `SHIPPED` badge and feedback loops (`re-dispatch`, `next slice`). |
-| 42–43 | [`sandbox-profiles.jpg`](../../assets/diagrams/sandbox-profiles.jpg) / [`-light.jpg`](../../assets/diagrams/sandbox-profiles-light.jpg) | **DEFECT** | Three profile cards (`ro`, `rw`, `danger`) over `disposable per-workspace sandbox — never your machine`. **Defect:** `danger` card omits its body caption (`bypass approvals — opt-in flag required — exploit PoCs, destructive tests`). |
+| 42–43 | [`sandbox-profiles.jpg`](../../assets/diagrams/sandbox-profiles.jpg) / [`-light.jpg`](../../assets/diagrams/sandbox-profiles-light.jpg) | **PASS** | Three profile vessels (`ro`, `rw`, `danger`) with complete captions (`bypass approvals – opt-in flag required – / exploit PoCs, destructive tests.`) over `disposable per-workspace sandbox – never your machine.`. |
 | 44–45 | [`threat-boundaries.jpg`](../../assets/diagrams/threat-boundaries.jpg) / [`-light.jpg`](../../assets/diagrams/threat-boundaries-light.jpg) | **PASS** | Left 2×2 grid (`1 SANDBOX`, `2 NETWORK`, `3 SUPPLY CHAIN`, `4 IDENTITY & ACCESS`) and right 5-rung `RESPONSE LADDER` (`1 STEER` → `2 REDUCE` → `3 STOP` → `4 REVOKE` → `5 QUARANTINE`). 100% faithful to `specs_new.py`. |
 | 46–47 | [`three-layers.jpg`](../../assets/diagrams/three-layers.jpg) / [`-light.jpg`](../../assets/diagrams/three-layers-light.jpg) | **PASS** | Top-to-bottom architecture stack (`MISSIONS · skills/<name>/SKILL.md` → `PLAYBOOKS · playbooks/<name>.md` → `RUNTIME · runtime/*.md + runtime/scripts/`) with side callout `scripts/validate.py enforces layer boundaries`. |
-| 48–49 | [`tracker-enumeration.jpg`](../../assets/diagrams/tracker-enumeration.jpg) / [`-light.jpg`](../../assets/diagrams/tracker-enumeration-light.jpg) | **DEFECT (dark)** | 4-stage pipeline (`HOSTED TRACKERS` → `T0 TWIN-QUERY` → `GUARD_TEXT.PY TRUST FENCE` → `SINGLE-ATTEMPT CLOSURE`). **Defect:** Dark image renders `TO TWIN-QUERY` (letter `O`) whereas light image renders `T0 TWIN-QUERY` (slashed zero `0`); both shorten `T0 TWIN-QUERY DENOMINATOR` to `T0 TWIN-QUERY`. |
-| 50–51 | [`verify-gate.jpg`](../../assets/diagrams/verify-gate.jpg) / [`-light.jpg`](../../assets/diagrams/verify-gate-light.jpg) | **PARITY** | 3-step `worker_done` interception (`1 · THE COORDINATOR SETS THE GATE ENV` → `2 · ORCA RUNS THE HOOK BEFORE RECORDING DONE` → `3 · INDEPENDENT CHECK AGAINST GIT & WORKTREE` → green `EXIT 0 — RECORD DONE` / red `NON-ZERO — BLOCK COMPLETION`). **Parity note:** Box 1 says `contract source + digest` in dark mode vs `contract source · digest` in light mode. |
+| 48–49 | [`tracker-enumeration.jpg`](../../assets/diagrams/tracker-enumeration.jpg) / [`-light.jpg`](../../assets/diagrams/tracker-enumeration-light.jpg) | **PASS** | 4-stage pipeline (`HOSTED TRACKERS` → `T0 TWIN-QUERY` → `GUARD_TEXT.PY TRUST FENCE` → `SINGLE-ATTEMPT CLOSURE`) with slashed zero `T0` in both dark and light modes. |
+| 50–51 | [`verify-gate.jpg`](../../assets/diagrams/verify-gate.jpg) / [`-light.jpg`](../../assets/diagrams/verify-gate-light.jpg) | **PASS** | 3-step `worker_done` interception (`THE COORDINATOR SETS THE GATE ENV` → `STOP / TASKCOMPLETED HOOK FIRES VERIFY-GATE.SH` → `VERIFY.PY RE-DERIVES` → green `EXIT 0 — ALLOW` / red `EXIT 2 — BLOCK, WITH FEEDBACK`) with `contract source + digest` matching in both modes. |
 | 52–53 | [`you-say.jpg`](../../assets/diagrams/you-say.jpg) / [`-light.jpg`](../../assets/diagrams/you-say-light.jpg) | **PASS** | 6 speech-bubble prompts (`"build and ship this"` → `ship-it`, `"drain the backlog"` → `clean-sweep`, `"why is this happening"` → `root-cause`, `"harden this"` → `harden-it`, `"kill the flaky tests"` → `deflake-it`, `"review this PR"` → `review-it`). 100% faithful to `specs_new.py`. |
 
 ---
@@ -142,5 +140,5 @@ All 44 mission contract cards are `1600×900` (16:9) and have **100% accurate sp
 | 88–89 | [`reshape-it.jpg`](../../assets/diagrams/missions/reshape-it.jpg) / [`-light.jpg`](../../assets/diagrams/missions/reshape-it-light.jpg) | **STYLE** | Symmetric 2×2 grid, 100% accurate spelling. **Style notes:** Title wraps onto 2 lines in primary white/black text; `RESHAPED` and `RESHAPED-WITH-PARKED` include inner hexagon icons (solid fill in light mode). |
 | 90–91 | [`review-it.jpg`](../../assets/diagrams/missions/review-it.jpg) / [`-light.jpg`](../../assets/diagrams/missions/review-it-light.jpg) | **STYLE** | Single-line title, clean hexagons (`GO` green, `NO-GO` red), 100% accurate spelling. **Style notes:** Inserts `or` between `GO` and `NO-GO` hexagons; renders first two lines of artifacts in primary white/black and only `reviewed_sha` in muted grey-blue. |
 | 92–93 | [`root-cause.jpg`](../../assets/diagrams/missions/root-cause.jpg) / [`-light.jpg`](../../assets/diagrams/missions/root-cause-light.jpg) | **PASS** | Single-line title, clean three hexagons (`DIAGNOSED` green, `DIAGNOSED-WITH-HANDOFF` green, `INCONCLUSIVE` amber; solid fills in light mode), symmetric 2×2 grid. Minor highlight on `RED LOOP` inside a subtle pill container on the bottom phase strip. |
-| 94–95 | [`ship-it.jpg`](../../assets/diagrams/missions/ship-it.jpg) / [`-light.jpg`](../../assets/diagrams/missions/ship-it-light.jpg) | **PASS** | Single-line title, clean four hexagons (`BUILT`, `PROMOTION_READY`, `RELEASED`, `DEPLOYED_AND_VERIFIED`), symmetric 2×2 grid. **Parity note:** In `ship-it-light.jpg`, `RELEASED` is outlined in dark blue while `DEPLOYED_AND_VERIFIED` is grey, and the artifact text is dark primary ink. |
+| 94–95 | [`ship-it.jpg`](../../assets/diagrams/missions/ship-it.jpg) / [`-light.jpg`](../../assets/diagrams/missions/ship-it-light.jpg) | **PASS** | Single-line title, clean four hexagons (`BUILT`, `PROMOTION_READY`, `RELEASED`, `DEPLOYED_AND_VERIFIED`), symmetric 2×2 grid, muted slate-grey artifact list matching across dark and light modes. |
 | 96–97 | [`speed-it.jpg`](../../assets/diagrams/missions/speed-it.jpg) / [`-light.jpg`](../../assets/diagrams/missions/speed-it-light.jpg) | **STYLE** | Single-line title, symmetric 2×2 grid, 100% accurate spelling. **Style note:** `WITHIN-BUDGET` and `OPTIMIZED-WITH-PARKED` hexagons include inner hexagon icons. |
