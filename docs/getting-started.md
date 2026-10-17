@@ -48,7 +48,7 @@ Three hard requirements, without which no mission will start:
 
 2. **`git` and `gh`**, authenticated. Fleets open PRs per unit of work and verify merges by
    ancestry; `gh auth status` must succeed. Repos on a tracker other than GitHub issues can use
-   `orca linear` where a mission supports it.
+   `orca linear` or `orca jira` where a mission supports it.
 
 3. **Python 3.11 or newer** for the catalog gates (`scripts/validate.py`, `tests/`) and for the
    runtime scripts a fleet runs (`runtime/scripts/verify.py` and its neighbours). CI runs the
@@ -59,7 +59,7 @@ Per-mission tooling on top of that — each mission declares its own in `SKILL.m
 
 | If you plan to run | Also install |
 |---|---|
-| any mission | `git` + `gh`, or a tracker reachable via `orca linear` |
+| any mission | `git` + `gh`, or a tracker reachable via `orca linear` / `orca jira` |
 | harden-it | `gitleaks`, plus an ephemeral per-workspace sandbox for exploit PoCs |
 | speed-it | a real measurement path: Lighthouse/DevTools access, or a load/profiler harness |
 | modernize-it | the project's package manager; CI must be green at baseline |

@@ -49,10 +49,12 @@ when one does not.
 
 | Command | Purpose |
 |---|---|
-| `python3 scripts/validate.py` | Catalog structure, composition references, budgets, proof declarations and generated freshness |
+| `python3 scripts/validate.py` | Catalog structure, composition references, budgets, proof declarations and generated freshness (backed by [`scripts/_countlint.py`](../scripts/_countlint.py) and [`scripts/_identity.py`](../scripts/_identity.py)) |
 | `python3 scripts/gen-badges.py --check` | Verify generated counts, activation callouts and proof summary without writing |
 | `python3 scripts/eval.py run --suite routing --threshold 1.0` | Check description-based mission routing |
+| `python3 scripts/eval.py --injection-only` | Run the deterministic VAL-01 prompt-injection and trust-fence drills ([`evals/injection-drills.json`](../evals/injection-drills.json), #560) |
 | `python3 scripts/bundle.py --check` | Build in a temporary directory and check bundled references |
+| `python3 scripts/release_check.py --fast --skip-github` | Verify the local [Release 1.0 checklist](release-1.0-checklist.md) gates |
 | `python3 -m unittest discover -s tests -v` | Run the complete contract and fixture suite |
 | `git diff --check` | Catch whitespace errors in the patch |
 
@@ -111,11 +113,12 @@ If you add a test module, add its measured weight to
 
 ## Local checks and CI
 
-CI adds the reference skill validator, Ruff, secret scanning, the coverage floor and the
-verifier benchmark. Tool versions and hashes live in
-[`.github/ci-tools.lock`](../.github/ci-tools.lock); job commands live in
-[`validate.yml`](../.github/workflows/validate.yml). These extra tools are separate from the
-standard-library setup above. A local test pass is one part of PR validation.
+CI adds the reference skill validator, Ruff ([`ruff.toml`](../ruff.toml)), secret scanning, the
+coverage floor and the verifier benchmark. Gate environment variables are documented in
+[`.env.example`](../.env.example) and [The verify gate](verify-gate.md#native-path--plugin-hooks-set-claude_plugin_root).
+Tool versions and hashes live in [`.github/ci-tools.lock`](../.github/ci-tools.lock); job commands
+live in [`validate.yml`](../.github/workflows/validate.yml). These extra tools are separate from
+the standard-library setup above. A local test pass is one part of PR validation.
 
 Use [Contributing](../CONTRIBUTING.md#commit-and-pr-conventions) for commit and PR conventions.
 Describe the reader problem, the resulting improvement, and the checks you actually ran.

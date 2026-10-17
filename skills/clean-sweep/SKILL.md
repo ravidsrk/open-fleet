@@ -14,8 +14,8 @@ description: >-
 license: MIT
 compatibility: >-
   HARD dependency: Orca runtime + the orchestration skill (Orca CLI). git + gh (or a tracker via
-  orca linear). One worker playbook pack per worker (Matt triage/tdd, or Addy debug/build) — never
-  two routers in one worker.
+  orca linear or orca jira). One worker playbook pack per worker (Matt triage/tdd, or Addy
+  debug/build) — never two routers in one worker.
 metadata:
   proof: self-run
   proof_evidence: docs/runs/2026-09-14-clean-sweep-self-run.md
