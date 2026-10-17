@@ -89,4 +89,26 @@ Right, two example boxes stacked:
 Box 1, with a green check mark at its left: first line in white: audit findings · tracker issues · doc claims = one mission: clean-sweep; second, smaller muted line: same proof shape, same repo-suite oracle
 Box 2, with a red cross at its left: first line in white: a perf breach ≠ a finding → speed-it; second, smaller muted line: a statistical budget over journeys — a different proof, so a different mission
 Footer, small, centred: a different oracle makes a different mission only when it changes the proof's shape or the parking classes"""),
+
+n("threat-boundaries", """Content: the four security boundaries on the left two-thirds as a 2x2 grid of spacious cards, and the five-rung response ladder on the right third as a vertical stack of compact single-line boxes.
+Card 1 (top-left): 1 · SANDBOX, caption: isolated worktree · ro / rw / danger · PreToolUse deny-hook · OS ceilings
+Card 2 (top-right): 2 · NETWORK, caption: hash-chained egress.py receipts · unreceipted gh writes blocked
+Card 3 (bottom-left): 3 · SUPPLY CHAIN, caption: pins.json + pin_review.py audit · one pack per worker · guard_text.py
+Card 4 (bottom-right): 4 · IDENTITY & ACCESS, caption: signed dispatch digest · human gates · independent SHA-bound verifier
+Right third, five compact single-line boxes top to bottom joined by short downward arrows:
+1 STEER — deny-hook nudge (blue outline) → 2 REDUCE — park + ro (blue outline) → 3 STOP — kill worker (amber outline) → 4 REVOKE — rotate creds (red outline) → 5 QUARANTINE — fail-closed (red outline)
+Footer, small, centred: security relies on what the layers below the model make impossible or evident"""),
+
+n("tracker-enumeration", """Content: a spacious left-to-right pipeline showing how hosted trackers feed a fleet run safely.
+Left column, three compact stacked source boxes merging into one right-pointing arrow:
+Box 1 (blue outline): GITHUB, caption: gh issue · pr list
+Box 2 (blue outline): LINEAR, caption: orca linear list
+Box 3 (green outline): JIRA, caption: orca jira list · search
+Followed left-to-right by three spacious rounded stage cards joined by arrows:
+Stage 1 (blue outline): T0 TWIN-QUERY, caption: page until truncated is false · reconcile two independent workers
+Stage 2 (amber outline): TRUST FENCE, caption: guard_text.py normalizes text · ticket text is data, never authority
+Stage 3 (green outline): VERIFIED CLOSURE, caption: single-attempt writeId + reference · proved by merged SHA in manifest
+Footer, small, centred: a ticket reflects closure — it never proves it or authorizes writes"""),
 ]
+
+

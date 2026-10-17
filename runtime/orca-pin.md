@@ -14,67 +14,62 @@ holds its shape. The two never disagree — a run updates both or neither.
 | Field | Value |
 |---|---|
 | Upstream | `stablyai/orca` (`https://github.com/stablyai/orca`) |
-| Installed version | **v1.4.224** (installed app + CLI co-resident 1.4.224 on macOS — app `CFBundleShortVersionString` + `orca --version`, receipt `mac-coresidency.txt`; live mechanics witnessed on the 1.4.224 Linux `orca-ide serve` substrate) |
-| Build commit | `2bb20586ebc39d605e16d95f57420e20a16e7485` (tag `v1.4.224` target commit, "release: v1.4.224"; upstream builds from release branches, so the tag IS the release source) |
-| Witnessed | 2026-10-13 (`live`: DELTA re-dump — guides + help + agent-context from the installed 1.4.224 binary diffed against the frozen 1.4.215 inventory — plus live replay on Linux serve 1.4.224 under a real manual-terminal Dispatch; receipts in the run record) |
-| Upstream HEAD then | `0a1f99fb3a` (main, pulled 2026-10-13; newest tag + latest release both v1.4.224, 2026-10-10) |
-| Run record | docs/runs/2026-10-12-pin-it-224.md (ledger + park register) + docs/runs/2026-10-12-pin-it-224/ (starter diff, delta inventory D224-1…10, receipts) |
-| Prior pin | v1.4.215 `3eb1adec` (2026-09-28, docs/runs/2026-09-28-pin-it-500.md) |
-| Verdict | **PINNED-WITH-PARKED** — two fleet-visible drifts patched (conditional dispatch capability; OMP/OpenCode `--model` roster); fencing paths, `terminal stop`, worker-list, no-sender, and doctor shapes retired live; legacy replay, `caller.orcaSessionId`, agent-owned abandon, send-side `consumer_fenced`, and other-host probes stay parked on named substrates |
+| Installed version | **v1.4.229** (tag `v1.4.229` source-delta re-witness from v1.4.224; live orchestration receipts carried from installed 1.4.224 macOS + Linux `orca-ide serve` witness) |
+| Build commit | `a0cd1644f320f1327f7495650a816111b495f3cd` (tag `v1.4.229` target commit, "release: v1.4.229"; upstream builds from release branches, so the tag IS the release source) |
+| Witnessed | 2026-10-17 (`source`: source-delta re-witness `v1.4.224..v1.4.229` across `skills/`, `skill-guides/`, `src/cli/specs/`, and `src/shared/`, plus carried 2026-10-13 live Linux/macOS receipts for unchanged orchestration paths) |
+| Upstream HEAD then | `38131048b1` (main, pulled 2026-10-17; newest tag + latest release both v1.4.229, 2026-10-17) |
+| Run record | docs/runs/2026-10-17-pin-it-229.md (ledger + park register) + docs/runs/2026-10-17-pin-it-229/ (delta inventory D229-1…7) + docs/runs/2026-10-12-pin-it-224/ (live receipts) |
+| Prior pin | v1.4.224 `2bb20586` (2026-10-13, docs/runs/2026-10-12-pin-it-224.md) |
+| Verdict | **PINNED-WITH-PARKED** — stale "no Jira CLI" claim in `linear-enumeration.md` patched; five additive v1.4.229 surfaces folded in (`orca jira`, `orca agent launch`, `orca reference`, `orca serve` OS containment env vars, `task_not_startable.failureCount`, `automations runs` paging); live v1.4.224 receipts carried for unchanged orchestration paths |
 
-## What moved since v1.4.215 (diff summary)
+## What moved since v1.4.215 & v1.4.224 (diff summary)
 
-Method: DELTA, not re-derivation — the 1.4.224 guides, help root, and agent-context were
-re-dumped from the installed binary and diffed against the frozen 1.4.215 inventory
-(`diff-vs-1.4.215.json`); only changed mechanics were classified (D224-1…10 in the run
-record's delta inventory), and every mechanics-changed row was replayed live on the Linux
-serve substrate. Unchanged fleet-used surface carries the 2026-09-28 receipts.
+Method: DELTA, not re-derivation — at v1.4.224 the guides, help root, and agent-context were
+re-dumped from the installed binary and replayed live on the Linux serve substrate (D224-1…10,
+`docs/runs/2026-10-12-pin-it-224/`); at v1.4.229 (`a0cd1644`) the 5-release source delta
+(`v1.4.224..v1.4.229`) was audited line-by-line (D229-1…7, `docs/runs/2026-10-17-pin-it-229/`).
 
-- **Two fleet-visible drifts, PATCHED:** the canonical worker `send`/`ask` forms now carry
-  `--dispatch-capability` only when the dispatch preamble carries one (an older host adds
-  it); `dispatch-lifecycle.md` + `decompose-dag.md` taught "every send carries it" and now
-  teach the conditional. The flag stays accepted; `dispatch_capability_invalid` stays real.
-- **Replayed live at 224 (receipt `dispatch-probes.txt`):** task lifecycle incl.
-  `task-update --result <text>` stored verbatim (`task_ops.py` JSON text stays parseable;
-  its docstring now says `<text>`); cancel = `--status failed --result cancelled`;
-  wrong-party `worker_done` → `worker_identity_changed`; a consuming `check` from an
-  unbound terminal and post-takeover Run mutations → `consumer_fenced` (plain `status`
-  mail to a Run is NOT fenced — a literal `send`/`ask` → `consumer_fenced` stays parked,
-  D224-2); `worker-abandon` on a manual-terminal Dispatch settles and leaves the terminal
-  live (worker `unsupervised`) — the agent-owned-terminal settle stays parked on agent
-  credentials (D224-4); `terminal stop` EXECUTES (see §correction);
-  `worker-list` returns the full projection; sender-less `send` →
-  `no_active_sender_terminal`; mail to a `dispatch:<id>` whose terminal now coordinates a
-  child Run redirects with `recipient_run_bound_redirect` (the #513 note, shipped v1.4.217);
-  `vm recipe doctor` verdicts are `{recipeId, repoPath, ok, checks[{id,status,message,
-  remediation?}]}` with `pass`/`warn`/`fail` all observed, and `sandbox_doctor.py` judges
-  the real transcripts correctly (P40 retired for shapes; a clean `--provision` pass still
-  needs a real provider — offload-it's self-test, not a pin claim).
-- **Additive only, no doctrine claims:** agent-context 239 → 249 (10 added, 0 removed —
-  `account rm/select`, `environment *`, `repo set`, worktree `--pr/--gitlab-*/--unread`,
-  automations `--extra-agent-args`, metadata `surface`/`runMode`); 7 of 14 guides changed.
-  `worker-start --model` now also covers OMP, and OpenCode accepts it in an existing
-  worktree — the second drift patched this run (the spawn_worker.sh roster comment still
-  had both rejecting it; source-verdict at the tag, D224-3/9). `dsh` joined the upstream `--agent` set at
-  v1.4.218; the fleet roster does not adopt it.
-- **Schema v43** (`contract-constants.ts:23` at the tag): stored `session:<id>` addresses
-  respelled `orca_session_id:<id>`; no fleet code or doctrine keys the old spelling
-  (D224-10; `orca-dag-semantics.md` schema line advanced).
-- **Still parked:** `caller.orcaSessionId` — absent for external CLI and in-terminal shell
-  callers at 224 (both receipts on disk); observing it present needs a structured agent
-  session. No fleet claim reads it.
+- **v1.4.229 delta (D229-1…7, PATCHED):**
+  1. **First-class `orca jira` CLI (19 commands) + `orca-jira` / `jira-tickets` skills (D229-1):**
+     `linear-enumeration.md` previously claimed no Jira CLI existed; now teaches `orca jira list` /
+     `jira search <jql> --site <id> --json`, named workflow transitions (`jira status list/set`),
+     single-attempt write verification, and JQL `--limit` bounding.
+  2. **`orca agent launch` + `worktree create --agent` flags (D229-2):** starts an agent in an
+     existing workspace (structured chat or terminal per settings) with `--model`, `--effort`,
+     `--retry-launch <operationId>`, and `--reference` / `--reference-site` on `worktree create`.
+  3. **`orca reference list|add|remove|find` (D229-3):** workspace link management and cross-workspace
+     agent/liveness lookup (`linked`, `liveness`, `terminal`, `mailbox`).
+  4. **`orca serve --supervise`, `serve service`, `terminal-daemon`, and OS terminal containment (D229-4):**
+     `ORCA_TERMINAL_PROCESS_CEILING` (≥64, Linux systemd scope / Windows Job object) and
+     `ORCA_TERMINAL_MEMORY_MAX` / `ORCA_TERMINAL_MEMORY_SWAP_MAX` (≥256M, Linux cgroup OOM containment)
+     folded into `sandbox-policy.md` and `threat-model.md`.
+  5. **Circuit-breaker `task_not_startable.failureCount` + failed `worker-start` cleanup (D229-5):**
+     failed `worker-start` attempts count across `--retry-of` (a worker's own `failed` report does not),
+     and a `--retry-of` replacement of a `failed` worker releases the terminal it owned (`dispatch-lifecycle.md`).
+  6. **`orca automations runs --limit --cursor` + sleeping finished automation terminals (D229-6):**
+     folded into `mission-scheduling.md`.
+- **v1.4.224 live receipts carried forward (`dispatch-probes.txt`):** conditional `--dispatch-capability`
+  (D224-1); OMP/OpenCode `--model` (D224-3/9); task lifecycle (`task-update --result <text>`,
+  `worker_identity_changed`, `consumer_fenced`, `worker-abandon`, `terminal stop` EXECUTES,
+  `worker-list` projection, `no_active_sender_terminal`, `recipient_run_bound_redirect`, `vm recipe doctor`
+  verdict shapes); and Schema v43 (`orca_session_id:<id>` respell, unchanged through v1.4.229).
+- **Still parked:** `caller.orcaSessionId` (D224-6), `P27` legacy-takeover live replay, agent-owned
+  abandon + send-side `consumer_fenced`, and live CLI replay of the new v1.4.229 `orca jira` /
+  `reference` / `agent launch` verbs against a connected Jira site.
 
 ## Noted since the pin (inherited by the next re-pin)
 
-Both 2026-09-28 compass points (#513) shipped and were dispositioned in this run:
+Both 2026-09-28 compass points (#513) shipped and were dispositioned at v1.4.224:
 `recipient_run_bound_redirect` (v1.4.217) replayed live — `dispatch-lifecycle.md`
 addressing now names it; `dsh` (v1.4.218) is upstream-available and deliberately not on
-the `spawn_worker.sh` roster. New notes at v1.4.224:
+the `spawn_worker.sh` roster. Notes carried at v1.4.229:
 
 - The Linux witness's first `serve` logged `[agent-state-rules] download failed: HTTP 404`
   — witness-first-run noise to watch, not a doctrine claim (relates to #526).
 - `caller.orcaSessionId` (D224-6) waits on a structured agent session in the witness VM
   (an agent account signed in there) — the same substrate the self-run programs need.
+- `ORCA_CHAT_VISUALS_DIR` was renamed to `ORCA_CHAT_SCRATCH_DIR` in v1.4.229 (`orca-chat-visuals`);
+  no fleet script references it.
 - A weekly probe (`runtime/scripts/upstream_probe.py`, `.github/workflows/upstream-drift.yml`,
   #516) files an `upstream-drift` issue when a new minor lands or the pin falls ten patches
   behind, so the date trigger below is no longer the only thing keeping a quiet upstream honest.
@@ -90,7 +85,7 @@ A re-pin fires on whichever comes first:
 Owner: the **pin-it** mission (its coordinator runs the loop; the maintainer files the issue).
 Next trigger: **2026-12-28** (the standing quarterly date, kept) or the next minor / drift
 sighting, whichever first — the successor run inherits this run's park register
-(docs/runs/2026-10-12-pin-it-224.md) and carries #508 forward.
+(docs/runs/2026-10-17-pin-it-229.md) and carries #508 forward.
 
 ## How to re-pin (so a stranger can reproduce the diff)
 

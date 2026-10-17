@@ -27,6 +27,8 @@ NEW_ALT = {
  "proof-ladder": "The proof ladder: doctrine-only, then self-run, then external-run; advancing needs a run report that binds, with a RUN header, a manifest in the run's own directory and an inventory that re-hashes at the named commit; the live state is the archive at docs/runs/README.md, which names each mission's tier as its evidence lands",
  "verify-gate": "The completion gate: the coordinator sets the gate env, a Stop or TaskCompleted hook fires verify-gate.sh, verify.py re-derives scope and review and reads the negative control, replaying it in a throwaway worktree only when ORCA_EXECUTE_NC is set, then exit 0 allows or exit 2 blocks, fail-closed; the verdict is advisory inside the worker's own session and sound where CI, MCP-Task or an SDK subprocess owns the env",
  "mission-identity": "The six-point mission-identity test: unit of work, per-unit state machine, convergence proof, ordering and isolation, parking and failure semantics, and the oracle; audit findings, tracker issues and doc claims are one mission, clean-sweep, while a perf breach is a different proof and therefore a different mission, speed-it",
+ "threat-boundaries": "The four security boundaries from threat-model.md — sandbox with isolated worktree, ro/rw/danger profiles, PreToolUse deny-hook and v1.4.229 OS process/memory ceiling; network with hash-chained egress.py receipts; supply chain with runtime/pins.json, pin_review.py rug-pull audit, one pack per worker and guard_text.py trust envelope; identity and access with ed25519 dispatch-sign.py contract digest, human-only one-way gates and an independent SHA-bound verifier — beside the five-rung response ladder from steer, reduce and stop to revoke and fail-closed quarantine",
+ "tracker-enumeration": "Four-stage pipeline for hosted trackers: GitHub Issues/PRs, Linear via orca linear, and Jira via orca jira at v1.4.229 enter the T0 twin-query denominator paged until truncated is false and reconciled across two independent workers, pass through the guard_text.py trust fence so ticket text remains data rather than authority, and close with single-attempt writeId or read-back plus orca reference add/find backed by a verified merge SHA",
 }
 
 def picture(prefix, name, alt, width):
@@ -121,6 +123,10 @@ def concepts(t):
     t = convert_existing(t)
     t = insert_before(t, "A unit that fails any required check is not done",
         picture("../", "negative-control", NEW_ALT["negative-control"], 820), "concepts")
+    t = insert_after(t, "## Security boundaries and the response ladder",
+        picture("../", "threat-boundaries", NEW_ALT["threat-boundaries"], 820), "concepts")
+    t = insert_after(t, "## Hosted trackers and the trust envelope",
+        picture("../", "tracker-enumeration", NEW_ALT["tracker-enumeration"], 820), "concepts")
     t = insert_after(t, "## Proof status", picture("../", "proof-ladder", NEW_ALT["proof-ladder"], 820), "concepts")
     t = insert_after(t, "## The mission-identity test",
         picture("../", "mission-identity", NEW_ALT["mission-identity"], 820), "concepts")

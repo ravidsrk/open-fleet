@@ -44,7 +44,7 @@ scheduled coordinator on a paired Orca server rather than the mortal desktop —
 `orca environment list`, never the environment's name.
 
 `automations run <id>` fires one now (test a schedule without waiting for it); `automations runs
---id <id>` is the run history, and it is the **cross-run anti-inflation input** the fleet currently
+[--id <id>] [--limit <n>] [--cursor <cursor>] [--json]` (`automations.ts:74-103` at v1.4.229) is the paginated run history, and it is the **cross-run anti-inflation input** the fleet currently
 reconstructs by hand from `docs/runs/` — a recurring mission reads it to see how many of the last N
 fires were `skipped` before believing a streak of green reports.
 
@@ -71,7 +71,9 @@ fires were `skipped` before believing a streak of green reports.
 ## Completion
 
 The automation's run output is the mission's normal completion report plus the run's terminal
-state and the human-owed queue (parked one-way gates, the promotion PR). A scheduled run that
+state and the human-owed queue (parked one-way gates, the promotion PR). At v1.4.229, finished
+automation runs sleep their terminal (`terminal sleep`) instead of closing it (`automations.ts:114-131`),
+keeping output inspectable without holding a live PTY. A scheduled run that
 parked at a gate is a correct outcome, not a failure — the next fire re-enumerates from current
 state.
 

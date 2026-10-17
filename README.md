@@ -37,7 +37,7 @@
 | Improve this catalog or its docs | [Local development](docs/development.md) — Git and Python; no live Orca session needed |
 | Understand what a result proves | [Read a run result](docs/concepts.md#read-a-run-result) and [proof status](#proof-status) |
 
-**Install — one command** (needs `git` + Python ≥ 3.11; to *run* missions add Orca ≥ v1.4.224, `gh`, Claude Code — [pinned list](docs/distribution.md#prerequisites-pinned)):
+**Install — one command** (needs `git` + Python ≥ 3.11; to *run* missions add Orca ≥ v1.4.229, `gh`, Claude Code — [pinned list](docs/distribution.md#prerequisites-pinned)):
 
 ```bash
 git clone https://github.com/ravidsrk/orca-fleet.git && cd orca-fleet && sh scripts/install.sh
@@ -150,9 +150,9 @@ Every mission has a hard dependency on companions not published in this repo
 (the enforced-vs-observed pin table is in [distribution](docs/distribution.md#prerequisites-pinned)):
 
 1. **The Orca app**, running, with the orchestration experimental feature enabled — at or above
-   the catalog pin, currently **v1.4.224** (`runtime/pins.json`; the installer warns below it,
+   the catalog pin, currently **v1.4.229** (`runtime/pins.json`; the installer warns below it,
    and `scripts/validate.py` fails when this number and the pin disagree). Tested against
-   v1.4.209 through v1.4.224; upstream ships almost daily, and a weekly probe files an issue
+   v1.4.209 through v1.4.229; upstream ships almost daily, and a weekly probe files an issue
    when the catalog falls behind (`runtime/orca-pin.md`).
 2. **The `orca` CLI** (`orca-ide` on Linux outside Orca terminals; Linux is exercised by one
    recorded `review-it` run on Ubuntu, [2026-10-13](docs/runs/2026-10-13-review-it-linux.md)).
@@ -160,7 +160,7 @@ Every mission has a hard dependency on companions not published in this repo
    they provide the worktrees, terminals, task DAG, ask/reply and `worker_done` primitives.
    orca-fleet is the *outcome* layer; those two are the *substrate*, and without them no mission
    can dispatch.
-4. **`git` and `gh`**, authenticated — or a tracker reachable via `orca linear`.
+4. **`git` and `gh`**, authenticated — or a tracker reachable via `orca linear` / `orca jira`.
 5. **Python 3.11 or newer** for the catalog gates and the runtime scripts; stdlib only. CI runs
    the suite on 3.11, 3.12 and 3.13; the installer refuses to run below 3.11.
 
@@ -253,8 +253,6 @@ verified terminal state — see [`runtime/mission-chaining.md`](runtime/mission-
     <img src="assets/diagrams/proof-ladder-light.jpg" alt="The proof ladder: doctrine-only, then self-run, then external-run; advancing needs a run report that binds, with a RUN header, a manifest in the run's own directory and an inventory that re-hashes at the named commit; the live state is the archive at docs/runs/README.md, which names each mission's tier as its evidence lands" width="900">
   </picture>
 </p>
-
-*Diagram note (2026-10-14): the image's `external-run` captions ("someone else's repository", "a repository you do not control") predate the tier definition — the tier names a target other than this catalog, whoever owns or runs it ([Proof status](docs/concepts.md#proof-status)). The prompt in `assets/diagrams/generator/specs_new.py` is corrected; the render needs a paid regeneration (#434).*
 
 Every mission's `metadata:` block carries a validator-enforced `proof:` field: `doctrine-only`,
 `self-run`, or `external-run`. A tier cannot be claimed without artifacts that hash true at a

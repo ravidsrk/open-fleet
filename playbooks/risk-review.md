@@ -1,8 +1,6 @@
 # Playbook — risk-review  (REVIEW: scope-gated specialist lenses)
 
-Recipe: Addy specialist skills (security, performance, accessibility, data-migration),
-scope-gated with adaptive suppression as stated below. NOT run on every diff — DISPATCHED when the change surface
-triggers the lens.
+Recipe: Addy specialist skills (security, performance, accessibility, data-migration), scope-gated with adaptive suppression as stated below. NOT run on every diff — DISPATCHED when the change surface triggers the lens.
 
 ## Two invocation modes
 
@@ -21,13 +19,7 @@ A change that stores, logs, exports, or forwards personal data triggers privacy.
 Adaptive gating: a lens with 0 findings across its last 10+ dispatches auto-gates off; security,
 privacy, and data-migration are NEVER_GATE (their value is the miss they'd catch).
 
-The tally is never coordinator memory — it lives in the target repo's DECISIONS log
-(`docs/DECISIONS.md`, ledger-contract.md): committed state that survives a crashed run and is
-shared across runs and coordinators. Every lens dispatch appends one DECISIONS line with id
-`lens-tally:<lens>`, class `mechanical`, and the dispatch's finding count as its answer. The gate
-check runs BEFORE dispatching a lens: read that lens's tally lines newest-first; 10+ consecutive
-zeros → auto-gate off, appended as its own `lens-gate:<lens>` decision line; any nonzero count
-resets the streak. Two coordinators reading the same log reach the same gate verdict.
+The tally is never coordinator memory — it lives in the target repo's DECISIONS log (`docs/DECISIONS.md`, ledger-contract.md): committed state that survives a crashed run and is shared across runs and coordinators. Every lens dispatch appends one DECISIONS line with id `lens-tally:<lens>`, class `mechanical`, and the dispatch's finding count as its answer. The gate check runs BEFORE dispatching a lens: read that lens's tally lines newest-first; 10+ consecutive zeros → auto-gate off, appended as its own `lens-gate:<lens>` decision line; any nonzero count resets the streak. Two coordinators reading the same log reach the same gate verdict.
 
 ## The lenses (each a fresh-context worker, its own protocol)
 
@@ -45,9 +37,9 @@ resets the streak. Two coordinators reading the same log reach the same gate ver
   that can write there can write the marker), so the expected owner must come from authenticated
   state and the marker needs integrity protection; and resolving a path then acting on the NAME is
   a check/use race wherever another process can swap an ancestor — hold the target by descriptor,
-  or prove the hierarchy cannot change. A finding needs a
-  concrete step-by-step exploit scenario; never test live APIs. One verified finding → grep the whole
-  tree for VARIANTS. (Full audit→re-attack loop is `harden-it`; this is the bounded review lens.)
+  or prove the hierarchy cannot change. When path-scoped (`--paths`), report any skipped/missing path
+  in the scope header (never drop silently). Every finding needs a concrete step-by-step exploit
+  scenario (never test live APIs); one verified finding → grep the whole tree for VARIANTS. (Full audit→re-attack loop is `harden-it`; this is the bounded review lens.)
 - **Performance:** measure-first (no optimizing without a baseline); symptom→cause tree (slow load →
   bundle vs TTFB); CWV targets; before→after to its metric contract, and a delta `explain-the-number` calls inconclusive is not measured; add a CI
   regression budget (GUARD). Backend red flags: N+1 fetch patterns; an index added with no query
@@ -65,13 +57,15 @@ resets the streak. Two coordinators reading the same log reach the same gate ver
   code never ship in one deploy (Hyrum's Law + the Churn Rule).
 - **API-contract:** public routes/interfaces changed → breaking-change check (removed/renamed
   fields, tightened validation, changed defaults, error-shape drift); versioning/deprecation path
-  named for every break; consumer-compatibility evidence quoted, not assumed. Idempotency, where a
-  retry can repeat an effect: the key is derived from the INTENT (client- or event-generated, stable
-  across retries, distinct across intents), the claim is ATOMIC (a unique constraint picks the
-  winner — check-then-act is a race), the payload is hashed and a reused key with a different body
-  fails loudly, the in-flight-duplicate policy is stated (reject / bounded wait / pending+status),
-  and retention outlives the LONGEST redelivery chain (dead-letter replays, dispute windows) —
-  a key TTL shorter than the queue that can replay it is a duplicate waiting to happen.
+  named for every break; consumer-compatibility evidence quoted, not assumed. State-machine check:
+  when a diff adds/changes a persisted `status`/`state`/`phase`/`kind` enum or lifecycle transition,
+  verify a `kind × action → expected row` matrix with a test `path:line` per transition and round-trip
+  symmetry (e.g., `pause→resume`, `archive→unarchive`) restoring invariants without stale residue.
+  Idempotency, where a retry can repeat an effect: the key is derived from the INTENT (client- or
+  event-generated, stable across retries, distinct across intents), the claim is ATOMIC (a unique
+  constraint picks the winner — check-then-act is a race), the payload is hashed and a reused key
+  with a different body fails loudly, the in-flight-duplicate policy is stated (reject / bounded wait
+  / pending+status), and retention outlives the LONGEST redelivery chain (dead-letter replays, dispute windows).
 - **Privacy** (NEVER_GATE, paired with security): security asks "can an attacker read it"; privacy
   asks "should we hold it at all, and for how long". Every personal-data field added or moved is
   CLASSIFIED (non-personal / personal / sensitive), collected against a STATED PURPOSE ("might be

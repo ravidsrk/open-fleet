@@ -74,7 +74,7 @@ but no mission will dispatch until they clear.
 |---|---|---|---|
 | `git` | install | present (hard) | 2.47.3 (clean container), 2.55.0 (macOS host) |
 | `python3` | install | ≥ 3.11 (hard; CI runs the suite on 3.11, 3.12 and 3.13, #514) | 3.13.15 |
-| Orca app + CLI | run | ≥ the `runtime/pins.json` pin, currently v1.4.224 (warn; `scripts/validate.py` fails when this number and the pin disagree, #512) | installed app + CLI v1.4.224 at the 2026-10-13 re-pin, live-witnessed on macOS + Linux serve (`pins.json` `witness_binary`) |
+| Orca app + CLI | run | ≥ the `runtime/pins.json` pin, currently v1.4.229 (warn; `scripts/validate.py` fails when this number and the pin disagree, #512) | v1.4.229 source-delta re-witness (2026-10-17) + installed app + CLI live-witnessed on macOS + Linux serve (`pins.json` `witness_binary`) |
 | `gh`, authenticated | run | present + `gh auth status` green (warn) | 2.100.0 |
 | Claude Code | run | present (warn; the symlinked skills load under it) | 2.1.272 |
 

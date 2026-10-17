@@ -14,10 +14,10 @@ worker writes a short PLAN artifact (approach · files · rollback · risks) to 
 ## Per-unit contract (the worker's TASK embeds this)
 
 - **Clean baseline:** `git status --porcelain` empty — refuse to absorb unrelated WIP.
-- **Failing test FIRST** at a pre-agreed seam: red before green, one vertical slice at a time. The
-  expected value comes from an INDEPENDENT source of truth — never recomputed the way the code does
-  (the tautology guard). A bug gets a red reproduction; a new capability gets a failing acceptance
-  test.
+- **Failing test FIRST** at a pre-agreed seam (stating in one line what that seam catches and what it
+  misses): red before green, one vertical slice at a time. The expected value comes from an INDEPENDENT
+  source of truth — never recomputed the way the code does (the tautology guard). A bug gets a red
+  reproduction; a new capability gets a failing acceptance test.
 - **Smallest change** to green. Scope discipline: touch only what the unit requires; adjacent issues
   are NOTICED-BUT-NOT-TOUCHED (noted to backlog, not fixed).
 - **Commits:** bisectable, dependency-ordered, each building alone, author = maintainer, no trailers,

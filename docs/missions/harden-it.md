@@ -3,7 +3,7 @@
 [Documentation](../README.md) · [Mission selector](README.md#choose-by-task) · [Prompt recipes](../recipes.md)
 
 > **Autonomy:** L4 (Osmani L0-L5, parallel delegation) — parallel audit, PoC, and fix workers on isolated findings; PoC routing and the promotion are your one-way gates.
-> **Activation load:** ~33,100 tokens — this SKILL.md plus every playbook and runtime doc its Composes/rides clause makes mandatory, about 17% of a 200k-token context before the first dispatch ([why it is measured](../../ARCHITECTURE.md#instruction-budget))
+> **Activation load:** ~33,400 tokens — this SKILL.md plus every playbook and runtime doc its Composes/rides clause makes mandatory, about 17% of a 200k-token context before the first dispatch ([why it is measured](../../ARCHITECTURE.md#instruction-budget))
 > **Proof:** self-run — the 2026-09-21 run against the catalog's own verification stack (#409) closed CLEAN: six rounds, 11 confirmed findings (3 P0, 1 CI-caught P0-class, 1 P1, residual classes), final re-audit zero unrefuted P0/P1; binding report [`docs/runs/2026-09-21-harden-it-self-run.md`](../runs/2026-09-21-harden-it-self-run.md).
 
 > Fix it, then try to break the fix. Give it a system to harden and come back to a closed threat

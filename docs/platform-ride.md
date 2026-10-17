@@ -38,12 +38,15 @@ budget on B + D, which the platform does not provide.
 | Attention budget | **`TeammateIdle`** hook (exit 2 → keep a teammate working) | the reviewer/builder ratio policy |
 | Evidence freshness | MCP **ETag / content-versioning** (roadmap, 6–12mo) | the ledger was never the moat; negative control + frozen denominator are |
 | Per-worker credentials | MCP **agent-identity / delegation** (roadmap) | one-router-per-worker + sandbox profiles; attest the verifier as a distinct principal |
+| Workspace tracker links & agent lookup | **`orca reference list\|add\|remove\|find`** + **`orca agent launch --retry-launch`** (Orca v1.4.229) | T0 twin-query denominator + single-attempt write verification (`linear-enumeration.md`) |
+| Per-terminal resource ceiling | **`ORCA_TERMINAL_PROCESS_CEILING`** + **`ORCA_TERMINAL_MEMORY_MAX`** cgroup/Job limits on `orca serve` (Orca v1.4.229) | fail-closed PreToolUse deny-hook + `ro`/`rw`/`danger` profiles (`sandbox-policy.md`) |
+| Agent-readable CLI diagnostics | structured JSON + non-interactive error contracts (`gstack` CAP4/CAP6 DX contract) | fail-closed exit codes (`0`/`2`/`3`) with machine-parseable refusal codes (`verify.py`, `guard_text.py`) |
 
 **Load-bearing move:** run the verifier as a *different session/process*, **never as a teammate** —
 teammate/cross-session messages are in-band and self-certifying, which is exactly the trace-as-oracle
 failure the evidence protocol rejects.
 
-## Absorption-risk register (2026-08-28)
+## Absorption-risk register (2026-08-28, refreshed 2026-10-17)
 
 Status: **SHIPPED** (live) · **ANNOUNCED** (public roadmap) · **SPECULATED** (inference).
 
@@ -56,6 +59,7 @@ Status: **SHIPPED** (live) · **ANNOUNCED** (public roadmap) · **SPECULATED** (
 | R5 | agentskills.io standardizes an outcome/verification `metadata` vocabulary | SPECULATED, not on roadmap | Own the runtime behavior, not the metadata; keep `proof:` free-form |
 | R6 | Agent SDK / Managed-Agents **advisor** becomes a git-grounded completion gate | SPECULATED | Watch; independent-session + negative control remain the differentiator |
 | R7 | MCP **ETag + Tasks** make SHA-bound evidence *ledgers* trivial | ANNOUNCED, 6–12mo | Ledger was never the moat; ride the primitive |
+| R8 | Orca v1.4.229 ships native **`orca jira`**, **`orca reference`**, **`orca agent launch`**, and **`orca serve` systemd/Job ceilings** | SHIPPED, 2026-10-17 | Ride all four as substrate (`linear-enumeration.md`, `dispatch-lifecycle.md`, `sandbox-policy.md`); keep T0 twin-query denominator + SHA-bound merge verification |
 
 ## Signals watch-list
 

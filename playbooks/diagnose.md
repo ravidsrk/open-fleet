@@ -19,6 +19,8 @@ Build a tight, red-capable command you have ALREADY RUN — paste the invocation
 drives the real bug path, asserts the user's EXACT symptom, is deterministic, fast, agent-runnable.
 Ranked ways to build it: failing test → curl → CLI snapshot → headless browser → replay a captured
 trace → throwaway harness → property/fuzz → `git bisect run` → differential → HITL bash last resort.
+When a red reproduction is forced by mutating code, fixtures, or config, run `git diff` (or `diff -u`
+against a pristine copy) and paste it so no accidental edit masquerades as the repro.
 For a non-deterministic bug the goal is a HIGHER reproduction rate, not clean repro.
 **No red-capable command, no Phase 2.** If you catch yourself reading code to build a theory before
 this command exists, STOP.

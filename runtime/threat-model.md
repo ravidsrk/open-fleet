@@ -28,12 +28,14 @@ autonomy the fleet runs.
 ### 1. Sandbox — where worker code runs
 
 Today: an isolated git worktree per unit, spawn profiles (`ro`/`rw`/`danger`) with
-fail-closed env opt-ins, and the fail-closed PreToolUse deny-hook refusing the Never
-shapes (`sandbox-policy.md`). The `danger` ephemeral-VM lane exists but is **refused**
-until a prelaunch placement binding proves the worker lands in the validated sandbox.
+fail-closed env opt-ins, the fail-closed PreToolUse deny-hook refusing the Never
+shapes (`sandbox-policy.md`), and `orca serve` per-terminal OS resource ceilings at v1.4.229
+(`ORCA_TERMINAL_PROCESS_CEILING`, `ORCA_TERMINAL_MEMORY_MAX`, `ORCA_TERMINAL_MEMORY_SWAP_MAX` via
+Linux cgroup v2 / Windows Job objects, `terminal-host/containment/`). The `danger` ephemeral-VM lane
+exists but is **refused** until a prelaunch placement binding proves the worker lands in the validated sandbox.
 
-Residue: `rw` containment is a string-matched hook inside the worker's own harness, not
-an OS boundary. It is now probed as one (`tests/test_escape_probe.py`): tool
+Residue: `rw` filesystem containment is a string-matched hook inside the worker's own harness, not
+an OS mount namespace. It is now probed as one (`tests/test_escape_probe.py`): tool
 writes, absolute-path redirects, and absolute `tee` destinations outside the worktree
 are denied; relative redirects, `cp`/`mv`/`dd` and interpreter writes, credential
 reads, network egress, and nested agent spawns are measured open and pinned
@@ -58,13 +60,17 @@ fleet names it a platform gap and does not simulate it in prompts.
 ### 3. Supply chain — which components and sources a worker may use
 
 Today: upstream packs and the Orca runtime are pinned by commit with witness dates
-(`runtime/pins.json`, re-witnessed by `pin-it`); the catalog cannot load an unvalidated
-mission/playbook; one worker-pack router per worker prevents composition clashes;
-external text enters only through the `guard_text.py` fence.
+(`runtime/pins.json`, re-witnessed by `pin-it`) and every pin advance requires a committed
+rug-pull review (`docs/research/pin-reviews/<pack>-<sha>.md`) enforced by `pin_review.py` (#559);
+`runtime/quarantine.json` blocks compromised packs/missions/playbooks fail-closed across
+`validate.py`, `preflight.py --mission`, and the deny-hook (#558); one worker-pack router per
+worker prevents composition clashes; and external text enters only through the `guard_text.py`
+fence, continuously regression-tested against the adversarial prompt-injection drill suite
+(`evals/injection-drills.json`, `scripts/eval.py --suite injection`, `tests/test_injection_drills.py`, #560).
 
-Residue: pin bumps are not reviewed for instruction/permission drift (#559); inputs are
-fenced against instructions but not screened for embedded credentials; and no
-quarantine switch can block a component fleet-wide (#558). *Invariant we owe:*
+Residue: upstream pack reviews rely on commit-pinned static inspection rather than cryptographic
+provenance attestations; inputs are fenced against instructions (`guard_text.py`) but not
+automatically redacted for embedded credentials before the worker context. *Invariant we owe:*
 everything a run is built from comes from pinned, reviewed sources the worker did not
 choose.
 

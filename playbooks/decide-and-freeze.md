@@ -23,7 +23,8 @@ writes it.
 
 On the coordinator terminal, run `grilling` + `domain-modeling` — **round by round**, not
 question-by-question: ask the WHOLE frontier in one round, one bold-titled question + a
-RECOMMENDED answer each (upstream format: ❓ question, ➡️ recommendation) separated by a `---` rule
+RECOMMENDED answer each (upstream format: ❓ question, ➡️ recommendation, phrased so a bare `"yes"`
+accepts the recommendation without ambiguity) separated by a `---` rule
 so no question buries the next, so a taste-class run can auto-pick per `gate-classification.md` and
 a human answers in one pass. After each round, resolve
 what the answers sharpened and ask the next frontier; facts that live in the codebase are
@@ -39,7 +40,8 @@ facts run concurrently, dependent decisions join on them.
 ## Seam-first spec
 
 Before writing the spec, sketch the TEST SEAMS — prefer existing seams, the highest seam, the fewest
-possible (ideal = 1). The test surface is decided before the spec, not after.
+possible (ideal = 1), with one line per seam stating what it **catches** and what it **misses**.
+The test surface is decided before the spec, not after.
 
 ## Freeze (human gate #1)
 

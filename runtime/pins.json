@@ -2,22 +2,22 @@
   "_about": "Upstream sources the missions execute against, pinned by commit and witness date (issue #271). tests/test_pins.py requires an entry for every pack a SKILL.md compatibility: field names. witness: 'source' means the pin was read from a full-history clone of the upstream at that commit, not from a release note; 'live' means the mechanism claims were re-witnessed against a real binary in a pin-it run \u2014 normally the INSTALLED one; when the pin advances ahead of the app on PATH, `witness_binary` names the exact artifact witnessed and `onpath_at_witness` what PATH then ran, and spawn_worker.sh's drift note says 'update the app', never 're-run a completed pin' (the commit then records what that build reports, which may sit on a pre-release line rather than at the named tag \u2014 see docs/runs/2026-09-13-pin-it-266/). Ownership: pin-it re-witnesses the `orca` entry against the installed binary; the pack pins (gstack, addyosmani, mattpocock) are re-witnessed by the upstream-adoption audit cadence (docs/research/2026-09-10-upstream-audit/), not by pin-it, whose SKILL scopes to runtime mechanics (#377). Pack pins should be re-witnessed whenever an audit runs or an adopted skill changes upstream (#378). The human-readable pin record \u2014 upstream URL, diff summary, re-pin cadence, owner, next trigger \u2014 is runtime/orca-pin.md.",
   "orca": {
     "repo": "stablyai/orca",
-    "commit": "2bb20586ebc39d605e16d95f57420e20a16e7485",
-    "version": "v1.4.224",
-    "witnessed": "2026-10-13",
+    "commit": "a0cd1644f320f1327f7495650a816111b495f3cd",
+    "version": "v1.4.229",
+    "witnessed": "2026-10-17",
     "witness": "live",
     "aliases": [
       "orca",
       "stablyai/orca"
     ],
-    "witness_binary": "installed Orca.app + CLI 1.4.224 (macOS arm64) and orca-ide 1.4.224 .deb under `serve` (Linux arm64, OrbStack witness VM)",
-    "onpath_at_witness": "1.4.224"
+    "witness_binary": "tag v1.4.229 source delta vs v1.4.224 + carried live receipts (installed Orca.app + CLI 1.4.224 macOS arm64 and orca-ide 1.4.224 .deb Linux arm64 serve)",
+    "onpath_at_witness": "1.4.229"
   },
   "gstack": {
     "repo": "garrytan/gstack",
-    "commit": "47d639abffa882b8cbb641d7d1dedf08ecada9ec",
-    "version": "v1.91.101.0",
-    "witnessed": "2026-10-14",
+    "commit": "d258bcffb0cb7bda5f133f3e957f932d816d282f",
+    "version": "v1.91.121.0",
+    "witnessed": "2026-10-17",
     "witness": "source",
     "aliases": [
       "gstack",
@@ -28,7 +28,7 @@
     "repo": "addyosmani/agent-skills",
     "commit": "aeac41d4d005999432bb7312f7ff06383a91d59d",
     "version": "0.6.13",
-    "witnessed": "2026-10-14",
+    "witnessed": "2026-10-17",
     "witness": "source",
     "aliases": [
       "addyosmani",
@@ -38,9 +38,9 @@
   },
   "mattpocock": {
     "repo": "mattpocock/skills",
-    "commit": "24fe0ef7737efae15c87225755e9f6f5965e4888",
-    "version": "v1.3.1",
-    "witnessed": "2026-10-14",
+    "commit": "49dd158d1076134a641b33efb035946536778336",
+    "version": "v1.3.1+35",
+    "witnessed": "2026-10-17",
     "witness": "source",
     "aliases": [
       "mattpocock",

@@ -21,6 +21,8 @@ doubt, the policy file is the source of truth.
 - [Reviewed-SHA freshness](#reviewed-sha-freshness)
 - [Liveness, crash, resume](#liveness-crash-resume)
 - [Sandbox profiles](#sandbox-profiles)
+- [Security boundaries and the response ladder](#security-boundaries-and-the-response-ladder)
+- [Hosted trackers and the trust envelope](#hosted-trackers-and-the-trust-envelope)
 - [One router per worker](#one-router-per-worker)
 - [Chaining missions](#chaining-missions)
 - [Proof status](#proof-status)
@@ -404,6 +406,67 @@ Work is harvested off the sandbox via `git push` to a work branch **before** tea
 BASE through the normal PR → review → merge-train pipeline like everything else. A lane whose
 sandbox died before the push is a failed lane, not a shrug.
 
+## Security boundaries and the response ladder
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="../assets/diagrams/threat-boundaries.jpg">
+    <source media="(prefers-color-scheme: light)" srcset="../assets/diagrams/threat-boundaries-light.jpg">
+    <img src="../assets/diagrams/threat-boundaries-light.jpg" alt="The four security boundaries from threat-model.md — sandbox with isolated worktree, ro/rw/danger profiles, PreToolUse deny-hook and v1.4.229 OS process/memory ceiling; network with hash-chained egress.py receipts; supply chain with runtime/pins.json, pin_review.py rug-pull audit, one pack per worker and guard_text.py trust envelope; identity and access with ed25519 dispatch-sign.py contract digest, human-only one-way gates and an independent SHA-bound verifier — beside the five-rung response ladder from steer, reduce and stop to revoke and fail-closed quarantine" width="820">
+  </picture>
+</p>
+
+Prompt text is an optimization, never a security boundary. What keeps an autonomous fleet safe is
+what the layers below the model make impossible or evident
+([`runtime/threat-model.md`](../runtime/threat-model.md)):
+
+- **1. Sandbox** — isolated git worktrees, `PROFILE=ro|rw|danger` tool gates, the `PreToolUse`
+  deny-hook (`profile-gate.sh`), and `orca serve` OS-level process/memory ceilings
+  (`ORCA_TERMINAL_PROCESS_CEILING`, `ORCA_TERMINAL_MEMORY_MAX` at v1.4.229).
+- **2. Network** — hash-chained egress receipts (`runtime/scripts/egress.py`); the deny-hook
+  refuses unreceipted `gh` write calls (`pr create`, `issue close`, `api -X POST`) and run close
+  anchors the chain head in the tamper-evident inventory.
+- **3. Supply chain** — exact upstream commit pins in `runtime/pins.json` with line-by-line
+  rug-pull reviews enforced by `runtime/scripts/pin_review.py`, one router pack per worker, and the
+  `runtime/scripts/guard_text.py` untrusted-text fence.
+- **4. Identity & access** — Ed25519-signed dispatch envelopes (`runtime/scripts/dispatch-sign.py`)
+  so a worker cannot rewrite its own contract digest, human-only one-way gates, and an independent
+  SHA-bound verifier (`runtime/scripts/verify.py`).
+
+When a signal fires across any boundary, the coordinator escalates through the five-rung **response
+ladder**: **1. Steer** (in-session deny-hook feedback) → **2. Reduce** (park the unit and
+re-dispatch `ro`) → **3. Stop** (kill the worker terminal and block dependents) → **4. Revoke**
+(rotate exposed credentials, one-way human gate) → **5. Quarantine** (record the component in
+`runtime/quarantine.json`, enforced fail-closed across preflight, validation, and hooks).
+
+## Hosted trackers and the trust envelope
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="../assets/diagrams/tracker-enumeration.jpg">
+    <source media="(prefers-color-scheme: light)" srcset="../assets/diagrams/tracker-enumeration-light.jpg">
+    <img src="../assets/diagrams/tracker-enumeration-light.jpg" alt="Four-stage pipeline for hosted trackers: GitHub Issues/PRs, Linear via orca linear, and Jira via orca jira at v1.4.229 enter the T0 twin-query denominator paged until truncated is false and reconciled across two independent workers, pass through the guard_text.py trust fence so ticket text remains data rather than authority, and close with single-attempt writeId or read-back plus orca reference add/find backed by a verified merge SHA" width="820">
+  </picture>
+</p>
+
+Trackers feed `clean-sweep`, `absorb-it`, and `oss-contribute`, and in Orca v1.4.229 three hosted
+surfaces speak structured JSON natively: GitHub (`gh issue/pr list --json`), Linear
+(`orca linear list --workspace <id> --json`), and Jira (`orca jira list` / `orca jira search <jql>
+--site <id> --json`). Every tracker run enforces three invariants
+([`playbooks/linear-enumeration.md`](../playbooks/linear-enumeration.md)):
+
+- **T0 twin-query denominator.** Record `T0` before the first query, page until `truncated: false`
+  (or `count < limit` on bounded JQL), and reconcile two independent workers on the frozen query
+  before dispatching any build wave.
+- **Untrusted-text fence (`guard_text.py`).** Ticket titles, bodies, and comments are attacker-writable
+  data, never authority. Before a worker sees tracker text, `guard_text.py` normalizes Unicode
+  (`NFKC` + format-char stripping), defuses forged delimiter banners, and flags prompt-injection
+  shapes (`[INJECTION-PATTERN]`).
+- **Single-attempt closure & cross-references.** Status transitions and closing comments replay a
+  stored `writeId` at most once (or read back current state before retrying) and attach PR/branch
+  links via `orca reference add`, while actual completion is proved only by the merged SHA in the
+  unit's evidence manifest.
+
 ## One router per worker
 
 <p align="center">
@@ -449,8 +512,6 @@ N+1's enumeration as findings to triage. A chain that stops early is a correct o
     <img src="../assets/diagrams/proof-ladder-light.jpg" alt="The proof ladder: doctrine-only, then self-run, then external-run; advancing needs a run report that binds, with a RUN header, a manifest in the run's own directory and an inventory that re-hashes at the named commit; the live state is the archive at docs/runs/README.md, which names each mission's tier as its evidence lands" width="820">
   </picture>
 </p>
-
-*Diagram note (2026-10-14): the image's `external-run` captions ("someone else's repository", "a repository you do not control") predate the tier definition — the tier names a target other than this catalog, whoever owns or runs it (defined below). The prompt in `assets/diagrams/generator/specs_new.py` is corrected; the render needs a paid regeneration (#434).*
 
 Every mission declares how proven it is — `doctrine-only`, `self-run`, or `external-run` — in
 validator-enforced frontmatter, and cannot advance without a linked run report on disk. This is

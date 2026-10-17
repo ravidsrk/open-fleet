@@ -3,7 +3,7 @@
 Ground truth about how Orca's orchestration DAG behaves for fleets that drive it with CLI verbs
 (`run-create` / `task-create` / `worker-start` / `check` / `send`). Sourced from live-DB research
 plus the version-matched guide the binary serves (`orca skills get orchestration`); treat as
-operational contract, not product marketing. Current schema line: v43 at the pin (`db/contract-constants.ts:23` at v1.4.224 / 2bb20586; v42 was the v1.4.215 line — orca-session-id columns — and v43 only respells stored `session:<id>` addresses as `orca_session_id:<id>`, `migrate-v43.ts`).
+operational contract, not product marketing. Current schema line: v43 at the pin (`db/contract-constants.ts:23` at v1.4.229 / a0cd1644, unchanged since v1.4.224 / 2bb20586; v42 was the v1.4.215 line — orca-session-id columns — and v43 only respells stored `session:<id>` addresses as `orca_session_id:<id>`, `migrate-v43.ts`).
 
 ## A Run is the durable scope primitive
 
@@ -78,7 +78,7 @@ eligibility is unread-membership — a fully-read-but-unacked batch does not blo
 
 `tasks.status` is overwritten in place by many writers. `pending → ready` promotion is
 **silent and untimestamped**. Reconstructible facts: creation, each dispatch attempt
-(latest = the active dispatch; `failure_count` carries MAX forward; circuit trips at 3),
+(latest = the active dispatch; failed `worker-start` attempts count across `--retry-of` toward `failure_count` at v1.4.229, and the circuit trips at 3 returning `task_not_startable` with `data.failureCount`, `worker-start-plan.ts:119-145`),
 completion via `worker_done`.
 
 **Fleet rule:** never grade progress from a reconstructed status history. Ledger + git +

@@ -73,8 +73,11 @@ the user's running Orca.
 `danger` profile (bypass approvals/sandbox) on your own machine violates least privilege no matter
 how careful the prompt. The sanctioned home is a disposable per-workspace environment
 (`orca-per-workspace-env` recipes: create/suspend/resume/destroy, `orca serve --recipe-json`
-pairing, validated by `vm recipe doctor <recipe-id> --provision`; `--connect` is a synonym of
-`--provision`).
+pairing — at v1.4.229 supervised via `orca serve --supervise` or `orca serve service install|status|uninstall`,
+with PTY daemon diagnostics on `orca terminal-daemon status|restart --yes` and per-terminal OS containment
+via `ORCA_TERMINAL_PROCESS_CEILING`, `ORCA_TERMINAL_MEMORY_MAX`, and `ORCA_TERMINAL_MEMORY_SWAP_MAX`
+on Linux cgroup v2 / Windows Job objects, `terminal-host/containment/` — validated by
+`vm recipe doctor <recipe-id> --provision`; `--connect` is a synonym of `--provision`).
 
 Two rules the guide states and a lane will otherwise learn the expensive way:
 

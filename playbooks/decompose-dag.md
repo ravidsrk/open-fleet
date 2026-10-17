@@ -20,6 +20,8 @@ evidence · escalation · budget=doctor-attempts} · exact acceptance check · f
 hot-files it must NOT touch · lighting=lit|dark-eligible · worker_done requires an evidence
 manifest + intent packet>" --deps '[...]'`.
 Record every returned id in the ledger (id ↔ slice table = the run scope liveness-resume needs).
+When slices are also filed as external tracker issues from a parent epic/issue (`to-tickets`), link
+each child as a native sub-issue of that parent in the tracker (while Orca DAG edges stay `--deps` only).
 
 **The spec is where the worker learns its `worker_done` contract** — the runtime enforces it and
 will not teach it. Each slice's spec states: `worker_done` requires `--outcome succeeded|failed`

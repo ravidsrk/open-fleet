@@ -51,6 +51,7 @@ kept somewhere even when the mission is not.
 | `blast-it` | pstack blast-radius | one sentence in risk-review, not a mission | "the one safety fact is unproven until a run shows it" is a clearance rule on the existing lens; it does not change review-it's oracle | 2026-10-12 |
 | `eval-it` (blinded A/B of a skill edit) | pstack eval playbook | tests/ and evals/, not a user outcome | same shape as the rejected fault-injection candidate: it tests the fleet, not the user's repo | 2026-10-12 |
 | `visual-parity-it` | pstack visual-parity | field-test-it oracle tier, not added | reproduce on a target, fix, re-verify, revert — the proof shape is field-test-it's; a pixel oracle would be a tier, and no tier was added in this pass | 2026-10-12 |
+| `chief-of-staff` (long-running single-session subagent/schedule coordinator) | mattpocock 49dd158 (`skills/in-progress/chief-of-staff`) | `runtime/mission-chaining.md` + `runtime/mission-scheduling.md`, not a mission | open-ended session with no finite denominator, no per-unit state machine, and no SHA-bound evidence manifest | 2026-10-17 |
 
 The candidates that *passed* on 2026-09-10 (`migrate-it`, `oncall-it`, `absorb-it`,
 `document-it`) are argued in the

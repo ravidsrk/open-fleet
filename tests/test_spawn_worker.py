@@ -784,7 +784,7 @@ esac
             notes, p = self._notes(tmp, "orca 1.5.0 (build abc)")
             self.assertTrue(notes, "a drifted runtime produced no note at all")
             self.assertIn("1.5.0", notes[0])
-            self.assertIn("v1.4.224", notes[0], "the note must name the version it expected")
+            self.assertIn("v1.4.229", notes[0], "the note must name the version it expected")
             self.assertIn("pin-it", notes[0], "the note must arm the mission that re-witnesses")
             self.assertEqual(p.returncode, 0,
                              "drift is a NOTE, not a refusal — an upstream release must not "
@@ -793,33 +793,33 @@ esac
     def test_a_matching_runtime_is_silent(self):
         with tempfile.TemporaryDirectory() as tmp:
             self._stub(tmp)
-            notes, p = self._notes(tmp, "orca v1.4.224")
+            notes, p = self._notes(tmp, "orca v1.4.229")
             self.assertEqual(notes, [], "a matching runtime must say nothing")
 
     def test_an_owed_app_update_advises_the_update_not_a_completed_pin(self):
-        # Review on #501 (pin then v1.4.209; v1.4.215 at the last bump, now v1.4.224):
+        # Review on #501 (pin then v1.4.209; v1.4.224 at the last bump, now v1.4.229):
         # pins.json advanced while PATH still runs an older witnessed build
-        # (1.4.204 was onpath_at_witness at the 215 pin) — the owed-update case.
+        # (1.4.224 is onpath_at_witness at the 229 pin) — the owed-update case.
         # The note must say 'update the app', never 're-run a completed pin-it'. A version
         # that is NOT the recorded one (1.5.0 above) still arms pin-it as fresh drift.
         with tempfile.TemporaryDirectory() as tmp:
             self._stub(tmp)
             notes, p = self._notes(tmp, "orca 1.4.204")
             self.assertTrue(notes, "the owed-update divergence produced no note at all")
-            self.assertIn("update Orca to v1.4.224", notes[0])
+            self.assertIn("update Orca to v1.4.229", notes[0])
             self.assertNotIn("run pin-it to re-witness", notes[0])
             self.assertEqual(p.returncode, 0)
             self.assertEqual(p.returncode, 0, p.stderr)
 
     def test_a_previous_pin_advises_the_update(self):
-        # Review on #507: the pin advanced to v1.4.224 while a host may still run
-        # the previous pin v1.4.215. Older-than-pin is a lagging app, not fresh
+        # Review on #507: the pin advanced to v1.4.229 while a host may still run
+        # the previous pin v1.4.224. Older-than-pin is a lagging app, not fresh
         # drift — the advice is to update, never to re-run the completed pin.
         with tempfile.TemporaryDirectory() as tmp:
             self._stub(tmp)
-            notes, p = self._notes(tmp, "orca 1.4.215")
+            notes, p = self._notes(tmp, "orca 1.4.224")
             self.assertTrue(notes, "the previous pin produced no note at all")
-            self.assertIn("update Orca to v1.4.224", notes[0])
+            self.assertIn("update Orca to v1.4.229", notes[0])
             self.assertNotIn("run pin-it to re-witness", notes[0])
             self.assertEqual(p.returncode, 0)
 
@@ -828,7 +828,7 @@ esac
         # genuinely unwitnessed and must arm pin-it, not advise an update.
         with tempfile.TemporaryDirectory() as tmp:
             self._stub(tmp)
-            notes, p = self._notes(tmp, "orca 1.4.225")
+            notes, p = self._notes(tmp, "orca 1.4.230")
             self.assertTrue(notes, "a newer patch produced no note at all")
             self.assertIn("run pin-it to re-witness", notes[0])
             self.assertEqual(p.returncode, 0)
@@ -836,8 +836,8 @@ esac
     def test_the_v_prefix_is_not_a_difference(self):
         with tempfile.TemporaryDirectory() as tmp:
             self._stub(tmp)
-            self.assertEqual(self._notes(tmp, "orca 1.4.224")[0], [],
-                             "`1.4.224` and `v1.4.224` are the same version")
+            self.assertEqual(self._notes(tmp, "orca 1.4.229")[0], [],
+                             "`1.4.229` and `v1.4.229` are the same version")
 
     def test_an_unreadable_version_says_so_rather_than_passing(self):
         # "Nothing noticed the drift" is the defect this check exists to fix, so a check that

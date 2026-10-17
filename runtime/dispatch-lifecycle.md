@@ -14,7 +14,7 @@ When BASE is CREATED, record its fork-point SHA (`git rev-parse <default>`) in t
 
 The normal supervised spawn is **`orca orchestration worker-start`** with `--task --worktree --name --agent --setup run --json` (worktree → terminal →
 readiness → dispatch). It exits 0 only when the worker is **ready**, read narrowly: at v1.4.199 that meant the preamble WRITE WAS ACCEPTED, not
-that a turn started (`local-worker-start.ts:263`). **v1.4.200** flipped it to an observed turn-start (`worker-start-readiness-settlement.ts:91-129`), else `outcome_unknown`; **v1.4.203 (pinned then, `docs/runs/2026-09-16-pin-it-416`) and v1.4.215 (pin-it-500 P01/P02/P38)** keep it; the v1.4.224 delta changed no `worker-start` usage or flags, and the top-level contract is unchanged, so v5 already branches right (#302).
+that a turn started (`local-worker-start.ts:263`). **v1.4.200** flipped it to an observed turn-start (`worker-start-readiness-settlement.ts:91-129`), else `outcome_unknown`; **v1.4.203 (pinned then, `docs/runs/2026-09-16-pin-it-416`) and v1.4.215 (pin-it-500 P01/P02/P38)** keep it; the v1.4.224 and v1.4.229 deltas changed no `worker-start` flags, and the top-level contract is unchanged, so v5 already branches right (#302).
 
 The receipt carries more than the flat four: `runId, taskId, dispatchId, state, stage, setup, launch{requested,effective}, mode, effects[],
 residualResources[]`, and on a bad start `failedStage, lastError, recovery, nextCommands` (`worker-start-receipt.ts:42-69`). The agent terminal is the
@@ -25,11 +25,11 @@ actually applied. `--worktree current` / an exact worktree id = a fresh agent te
 `worker-start --spec <text>` (inline creation, `orchestration-worker-specs.ts:8`).
 
 **Refusals are typed codes** — branch on `error.code`, never exit status or stderr; `error.data.nextSteps` is the recovery text (older hosts omit it):
-`task_not_found`, `task_not_startable` (+`data.unmetDependencies`, `data.retryOf`), `inject_rejected`, `nested_worker_depth_exceeded`, `consumer_fenced`,
+`task_not_found`, `task_not_startable` (+`data.unmetDependencies`, `data.retryOf`, `data.failureCount` when the 3-failure circuit breaker trips across `--retry-of`; at v1.4.229 a replacement `--retry-of` also auto-releases the failed worker's retained terminal, `worker-start-plan.ts:119-145`), `inject_rejected`, `nested_worker_depth_exceeded`, `consumer_fenced`,
 `dispatch_inactive` are policy; settlement adds `inactive_dispatch`/`stale_dispatch` (`worker-report-settlement.ts:126-156`); `runtime_error` is the catch-all: "do not retry unchanged".
 `orchestration-dispatch-refusal-contract.ts:8` declares the first three ONLY; the rest sit at their own sites, anchored per code beside POLICY_CODES in spawn_worker.sh (#302); recovery `recovery-and-cleanup:96-108`.
 
-`terminal create` + `dispatch --inject` remains the **low-level, deliberately unsupervised** lane: no worker-lifecycle row, so `worker-stop`/`worker-release`
+`terminal create` + `dispatch --inject` (or v1.4.229 `orca agent launch --worktree <sel> --agent <type> [--model <id>] [--effort <lvl>] [--prompt <t>] [--retry-launch <id>]`, `cli/specs/agent.ts:7-38`) remains the **low-level, deliberately unsupervised** lane: no worker-lifecycle row, so `worker-stop`/`worker-release`
 never touch that process. It is NOT invisible — `worker-list` lists it as `unsupervised` with terminal state `retained` (`orchestration-worker-specs.ts:124`).
 Use it for custom argv/topology `worker-start` cannot express (and for `PROFILE=ro`), and record the trade in the ledger. Never `--inject` into the coordinator's own pane — refused as `terminal_is_coordinator` (self-answer loop); context-only self-dispatch stays legal (`dispatch-methods.ts:95-107`). **`--inject` SUBMITS the preamble**
 — it does not merely paste it (`dispatch-methods.ts:155-165`) — and `--json` returns `result.prompt{requestId, stages}` over `input_accepted | turn_started`
@@ -45,7 +45,7 @@ The runtime enforces this and the fleet had none of it written down. Every missi
 - `worker_done` **requires `--outcome succeeded|failed`** and **omits `--to`** — an active Dispatch defaults to its owning Run mailbox, which is the preferred
   address; a terminal handle is not (`cli/specs/orchestration.ts:76-77`, `orchestration/worker-contract:71`).
 - Every worker send carries the preamble's exact flags (`--from <worker_handle>`; `--dispatch-capability`
-  only when the preamble carries it — a current 1.4.224 host's does not) (`worker-contract:5-6,14`).
+  only when the preamble carries it — a 1.4.224+ host's does not) (`worker-contract:5-6,14`).
 - Evidence rides TYPED flags — `--report-path <path>`, `--files-modified <csv>` — not a hand-rolled `--payload` JSON blob, which PowerShell strips quotes from
   (`cli/specs/orchestration.ts:49`).
 - A worker runs `check --terminal <its own handle>` at checkpoints and once before `worker_done`. A `consumer_fenced` from that check means **stop**: it no
@@ -135,9 +135,9 @@ recovery action; the loop is the manual one (task-create → worker-start → `c
 
 ## Progress surface (Orca-native, complements the ledger)
 
-The file ledger is the coordinator's durable brain; the Orca **worktree comment** is the live, human-glanceable status on the workspace card. Workers update
-it at checkpoints — `orca worktree set --worktree active --comment "<what is happening>" --workspace-status <todo|in-progress|in-review|completed>`. It never
-replaces the ledger (comments are best-effort and lossy).
+The file ledger is the coordinator's durable brain; the Orca **worktree comment** and **references** are the live, human-glanceable status on the workspace card. Workers update
+it at checkpoints — `orca worktree set --worktree active --comment "<what is happening>" --workspace-status <todo|in-progress|in-review|completed>` — and attach or look up external links with `orca reference list|add|remove --worktree <sel>` and `orca reference find <url-or-key>` (`cli/specs/references.ts`, v1.4.229). They never
+replace the ledger (comments are best-effort and lossy).
 
 ## Worktree retirement (end-of-unit and end-of-run)
 
@@ -151,6 +151,6 @@ ledger it as a leak, never force it.
 
 ## Live probes owed (pin-it)
 
-The live PIN is v1.4.224 (`docs/runs/2026-10-12-pin-it-224.md` — delta re-witness plus live replay on the Linux `orca-ide serve` substrate; installed app + CLI co-resident 1.4.224). Before it: 1.4.215 `docs/runs/2026-09-28-pin-it-500.md`, 1.4.209 `docs/runs/2026-09-23-pin-it-488.md`, 1.4.204 `docs/runs/2026-09-20-pin-it-427.md`. Every probe the 1.4.203 session parked
+The live PIN is v1.4.229 (`docs/runs/2026-10-17-pin-it-229.md` — delta re-witness across 27 upstream commits; schema v43 unchanged). Before it: 1.4.224 `docs/runs/2026-10-12-pin-it-224.md`, 1.4.215 `docs/runs/2026-09-28-pin-it-500.md`, 1.4.209 `docs/runs/2026-09-23-pin-it-488.md`, 1.4.204 `docs/runs/2026-09-20-pin-it-427.md`. Every probe the 1.4.203 session parked
 for want of a live Orca terminal was retired at 1.4.204 (scratch Run + workers, receipts on disk): MANUAL-host `worker-start` (no args → LAUNCHED_UNUSABLE), inject `input_accepted` (never replayed), `--types` whole-batch wake, `merge_ready --to @all` (resolution error only), bogus-dep refutation, and gate→preamble (resolution NOT injected). The 1.4.224 run retired most of the live queue on a manual-terminal Dispatch: fencing paths, manual-terminal worker-abandon retention, `terminal stop` execute, worker-list content, send-no-sender wording, doctor verdict shapes.
-Still PARKED per the v1.4.224 register: the legacy-takeover live replay (needs a legacy Run), `caller.orcaSessionId` and worker-abandon on agent-owned terminals plus a literal send-side `consumer_fenced` (need an agent-backed Dispatch), and the roster/remote/isolated-runtime probes (other hosts/accounts; Linux arm64 witnessed).
+Still PARKED per the v1.4.229 register: the legacy-takeover live replay (needs a legacy Run), `caller.orcaSessionId` and worker-abandon on agent-owned terminals plus a literal send-side `consumer_fenced` (need an agent-backed Dispatch), and the roster/remote/isolated-runtime probes (other hosts/accounts; Linux arm64 witnessed).
