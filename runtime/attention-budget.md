@@ -55,7 +55,7 @@ Mechanical proof (tests, negative controls, ancestry, reviewed-SHA) is machine-c
 `evidence-manifest.md`. Batch one-way human gates when several park at once — context-switch cost
 dominates. Never spawn more agents to feel busy; throughput equals review+verify throughput.
 There is no CLI pre-wave usage signal: rate-limit windows (5h/7d) exist only as shared types
-(`rate-limit-types.ts`), and `account list` renders no usage numbers (`account.ts:322-331`). Size
+(`rate-limit-types.ts`), and `account list` renders no usage numbers (`account.ts:300-310`). Size
 the wave to the recorded WIP cap, not to a quota check — the quota check does not exist.
 
 ## The WIP-curve protocol (how a cap graduates from asserted to measured)

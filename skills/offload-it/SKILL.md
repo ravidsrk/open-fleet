@@ -57,18 +57,22 @@ REFUSE-IF-QUARANTINED (runtime/scripts/preflight.py --mode readonly --mission of
   straight to the doctor loop, never a rebuild.
 → INTERVIEW, settled FIRST and confirmed back, never picked by the fleet: connection mode
   (Orca-server vs SSH — it changes the create output and half the templates), provider plus
-  scope/project/region/plan, agent CLI plus account, git token source.
+  scope/project/region/plan, agent CLI plus account, git token source. Load `orca skills get
+  orca-per-workspace-env` plus the matching `--references` (`provider-vercel`, `ssh-host`,
+  `docker-ssh`, `windows-scripts`, `failure-modes`).
 → PREREQUISITES: provider CLI installed and authed, caps recorded (a 45-minute sandbox cap
   limits the base build AND the per-workspace runtime); each item marked verified or asserted.
 → SCAFFOLD scripts + state under scripts/orca-vm/, executable, stdout reserved for the final
   JSON object; every script resolves values env → state → fallback and merges outputs back.
 → BASE-SNAPSHOT [CHECKPOINT: explicit OK — paid and slow]: build headless main only, clone via
-  a GIT_ASKPASS helper (rm'd after), trap errors so a crash removes the half-built environment,
-  snapshot the STOPPED machine, parse the id into state. Never snapshot a machine where the
-  runtime already ran — shared pairing identity; delete the verified user-data dir first.
+  a GIT_ASKPASS helper with escaped `\$1`/`\$GH_TOKEN` under `set -u` (rm'd after), trap errors
+  so a crash removes the half-built environment, snapshot the STOPPED machine, parse the id into
+  state. Never snapshot a machine where the runtime already ran — shared pairing identity; delete
+  the verified user-data dir (`ORCA_USER_DATA_PATH` / `~/.config/orca`) first.
 → AGENT-AUTH [CHECKPOINT: the human runs the device-auth login, then says so]: headless means
   device-auth flow only (plain login hangs on an unreachable loopback callback); verify by the
-  status command's EXIT CODE, never grep-for-logged-in; refuse to snapshot unauthenticated.
+  status command's exit code + `ORCA_AGENT_LOGGED_IN` sentinel (provider `exec` may drop remote
+  exit codes; never grep-for-logged-in); refuse to snapshot unauthenticated.
   [CHECKPOINT: explicit OK — the re-snapshot is paid, and the login words above do not cover
   it]: re-snapshot, overwrite snapshotId, record authSourceSnapshotId, remove the auth
   environment.

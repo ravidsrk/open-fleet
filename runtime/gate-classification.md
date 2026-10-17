@@ -20,7 +20,7 @@ policy is enforced, not requested.
 takes a **CSV** (`--options "rollback,patch-forward"`), `gate-create --options` takes a **JSON
 array** (`--options '["rollback","patch-forward"]'`) (`cli/specs/orchestration.ts:205,256` at v1.4.203 — re-witnessed by docs/runs/2026-09-16-pin-it-416/).
 
-**Lifecycle sends refuse with their own codes** (`send-point-to-point.ts:155-207`): `sender_not_assignee` (no
+**Lifecycle sends refuse with their own codes** (`send-point-to-point.ts:154-205`): `sender_not_assignee` (no
 active Dispatch belongs to the sender), `task_dispatch_mismatch`, `dispatch_capability_invalid` (wrong `--dispatch-capability`). A refused `worker_done` never settles — fix the sender or capability, never resend unchanged.
 
 **`gate-resolve` does NOT inject the resolution into the next dispatch preamble.** That injection

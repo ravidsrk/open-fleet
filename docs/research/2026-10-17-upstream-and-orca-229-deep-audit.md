@@ -86,9 +86,9 @@ pins to current upstream `HEAD` / latest releases, with disposition (`ADOPT`, `P
 - **Upstream source:** `src/cli/specs/reference.ts`, `skill-guides/orca-cli.md:105-123`.
 - **What changed:** Four new commands:
   - `orca reference list [--worktree <selector>] [--json]`
-  - `orca reference add [--worktree <selector>] <reference...> [--site <id>] [--json]`
-  - `orca reference remove [--worktree <selector>] <reference...> [--site <id>] [--json]`
-  - `orca reference find <reference> [--repo <selector>] [--site <id>] [--json]`
+  - `orca reference add <url-or-jira-key>... --worktree <selector> [--reference-site <id>] [--json]`
+  - `orca reference remove [<url>...] [--key <key>...] --worktree <selector> [--json]`
+  - `orca reference find <url-or-issue-key> [--worktree <selector>|--repo <selector>] [--include-archived] [--limit <n>] [--json]`
 - **Why it matters to fleets:** `orca reference find <url-or-issue-key> --json` searches across
   workspaces (`linked: true` when attached, `linked: false` when matched by branch name) and
   returns the agents in each matching workspace with `liveness`, `terminal` handle, and `mailbox`
@@ -103,7 +103,7 @@ pins to current upstream `HEAD` / latest releases, with disposition (`ADOPT`, `P
   - `orca serve --supervise [--force]` respawns the headless server with exponential backoff on
     unexpected exits and records crashes under `<userData>/crash-logs/`.
   - `orca serve restore resume [--json]` resumes pending workspace restores after a crash.
-  - `orca serve service install [--force] [--json]`, `status [--json]`, and `uninstall [--json]`
+  - `orca serve service install [--port <port>] [--pairing-address <ws-url>] [--command <path>] [--dry-run] [--json]`, `status [--json]`, and `uninstall [--json]`
     manage a login LaunchAgent (macOS) or systemd user unit (Linux).
   - `orca terminal-daemon status [--json]` and `orca terminal-daemon restart --yes [--json]`
     inspect and recover the out-of-process PTY host without restarting Orca.
@@ -135,7 +135,7 @@ pins to current upstream `HEAD` / latest releases, with disposition (`ADOPT`, `P
 
 ### 2.6 Scheduled automations paging & terminal sleep-on-finish (D229-6)
 
-- **Upstream source:** `src/cli/specs/automations.ts:114-131`, `skill-guides/orca-cli.md:155-162`.
+- **Upstream source:** `src/cli/specs/automations.ts:114-130`, `skill-guides/orca-cli.md:155-162`.
 - **What changed:**
   - `orca automations runs` now accepts `[--id <automation-id>] [--limit <n>] [--cursor <cursor>] [--json]`.
     Without `--limit` or `--cursor` it pages the full history automatically; passing either returns
@@ -151,7 +151,7 @@ pins to current upstream `HEAD` / latest releases, with disposition (`ADOPT`, `P
   `ORCA_CHAT_SCRATCH_DIR` (30-day automatic cleanup). No fleet script references it.
 - **`orca skills install` / `orca skills update`:** Now accept `--agent <name>[,<name>]` and pin
   upstream skill installs to the exact Orca build commit (`<repo>/tree/<commit>`).
-- **Schema version:** `SCHEMA_VERSION` in `src/shared/db/contract-constants.ts` remains `43`
+- **Schema version:** `SCHEMA_VERSION` in `src/main/runtime/orchestration/db/contract-constants.ts` remains `43`
   (unchanged from v1.4.224).
 
 ---

@@ -17,7 +17,7 @@ readiness → dispatch). It exits 0 only when the worker is **ready**, read narr
 that a turn started (`local-worker-start.ts:263`). **v1.4.200** flipped it to an observed turn-start (`worker-start-readiness-settlement.ts:91-129`), else `outcome_unknown`; **v1.4.203 (pinned then, `docs/runs/2026-09-16-pin-it-416`) and v1.4.215 (pin-it-500 P01/P02/P38)** keep it; the v1.4.224 and v1.4.229 deltas changed no `worker-start` flags, and the top-level contract is unchanged, so v5 already branches right (#302).
 
 The receipt carries more than the flat four: `runId, taskId, dispatchId, state, stage, setup, launch{requested,effective}, mode, effects[],
-residualResources[]`, and on a bad start `failedStage, lastError, recovery, nextCommands` (`worker-start-receipt.ts:42-69`). The agent terminal is the
+residualResources[]`, and on a bad start `failedStage, lastError, recovery, nextCommands` (`worker-start-receipt.ts:32-56`). The agent terminal is the
 `effects[]` entry with `kind: terminal, role: agent`. Read `launch.effective`, never `requested` — a model, effort, or permission flag is only what the host
 actually applied. `--worktree current` / an exact worktree id = a fresh agent terminal, no setup rerun; `--terminal <handle>` = reuse an exact idle agent
 (cleanup ownership transfers). Preview before effects with `dispatch --dry-run --return-preamble`
@@ -25,11 +25,11 @@ actually applied. `--worktree current` / an exact worktree id = a fresh agent te
 `worker-start --spec <text>` (inline creation, `orchestration-worker-specs.ts:8`).
 
 **Refusals are typed codes** — branch on `error.code`, never exit status or stderr; `error.data.nextSteps` is the recovery text (older hosts omit it):
-`task_not_found`, `task_not_startable` (+`data.unmetDependencies`, `data.retryOf`, `data.failureCount` when the 3-failure circuit breaker trips across `--retry-of`; at v1.4.229 a replacement `--retry-of` also auto-releases the failed worker's retained terminal, `worker-start-plan.ts:119-145`), `inject_rejected`, `nested_worker_depth_exceeded`, `consumer_fenced`,
+`task_not_found`, `task_not_startable` (+`data.unmetDependencies`, `data.retryOf`, `data.failureCount` when the 3-failure circuit breaker trips across `--retry-of`; at v1.4.229 a replacement `--retry-of` also auto-releases the failed worker's retained terminal, `orchestration-dispatch-refusal-contract.ts:36-53`, `retried-worker-terminal-release.ts:1-57`), `inject_rejected`, `nested_worker_depth_exceeded`, `consumer_fenced`,
 `dispatch_inactive` are policy; settlement adds `inactive_dispatch`/`stale_dispatch` (`worker-report-settlement.ts:126-156`); `runtime_error` is the catch-all: "do not retry unchanged".
 `orchestration-dispatch-refusal-contract.ts:8` declares the first three ONLY; the rest sit at their own sites, anchored per code beside POLICY_CODES in spawn_worker.sh (#302); recovery `recovery-and-cleanup:96-108`.
 
-`terminal create` + `dispatch --inject` (or v1.4.229 `orca agent launch --worktree <sel> --agent <type> [--model <id>] [--effort <lvl>] [--prompt <t>] [--retry-launch <id>]`, `cli/specs/agent.ts:7-38`) remains the **low-level, deliberately unsupervised** lane: no worker-lifecycle row, so `worker-stop`/`worker-release`
+`terminal create` + `dispatch --inject` (or v1.4.229 `orca agent launch --worktree <sel> --agent <type> [--model <id>] [--effort <lvl>] [--prompt <t>] [--retry-launch <id>]`, `cli/specs/agent-launch.ts:6-33`) remains the **low-level, deliberately unsupervised** lane: no worker-lifecycle row, so `worker-stop`/`worker-release`
 never touch that process. It is NOT invisible — `worker-list` lists it as `unsupervised` with terminal state `retained` (`orchestration-worker-specs.ts:124`).
 Use it for custom argv/topology `worker-start` cannot express (and for `PROFILE=ro`), and record the trade in the ledger. Never `--inject` into the coordinator's own pane — refused as `terminal_is_coordinator` (self-answer loop); context-only self-dispatch stays legal (`dispatch-methods.ts:95-107`). **`--inject` SUBMITS the preamble**
 — it does not merely paste it (`dispatch-methods.ts:155-165`) — and `--json` returns `result.prompt{requestId, stages}` over `input_accepted | turn_started`
@@ -136,7 +136,7 @@ recovery action; the loop is the manual one (task-create → worker-start → `c
 ## Progress surface (Orca-native, complements the ledger)
 
 The file ledger is the coordinator's durable brain; the Orca **worktree comment** and **references** are the live, human-glanceable status on the workspace card. Workers update
-it at checkpoints — `orca worktree set --worktree active --comment "<what is happening>" --workspace-status <todo|in-progress|in-review|completed>` — and attach or look up external links with `orca reference list|add|remove --worktree <sel>` and `orca reference find <url-or-key>` (`cli/specs/references.ts`, v1.4.229). They never
+it at checkpoints — `orca worktree set --worktree active --comment "<what is happening>" --workspace-status <todo|in-progress|in-review|completed>` — and attach or look up external links with `orca reference list|add|remove --worktree <sel>` and `orca reference find <url-or-key>` (`cli/specs/reference.ts`, v1.4.229). They never
 replace the ledger (comments are best-effort and lossy).
 
 ## Worktree retirement (end-of-unit and end-of-run)

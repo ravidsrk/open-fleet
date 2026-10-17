@@ -72,7 +72,7 @@ fires were `skipped` before believing a streak of green reports.
 
 The automation's run output is the mission's normal completion report plus the run's terminal
 state and the human-owed queue (parked one-way gates, the promotion PR). At v1.4.229, finished
-automation runs sleep their terminal (`terminal sleep`) instead of closing it (`automations.ts:114-131`),
+automation runs sleep their terminal (`terminal sleep`) instead of closing it (`automations.ts:114-130`),
 keeping output inspectable without holding a live PTY. A scheduled run that
 parked at a gate is a correct outcome, not a failure — the next fire re-enumerates from current
 state.
