@@ -109,14 +109,69 @@ def parse_args(argv):
     return parser.parse_args(argv)
 
 
+def _one_line(text, limit=90):
+    rendered = _visible(str(text or "")).replace("\\n", " ").replace("\\r", " ")
+    collapsed = " ".join(rendered.splitlines()).strip()
+    return collapsed[:limit]
+
+
 def _path_matches(candidate, target):
     c = str(candidate).strip().lstrip("./")
     t = str(target).strip().lstrip("./")
     if not c or not t:
         return False
-    return (c == t or fnmatch.fnmatchcase(c, t) or fnmatch.fnmatchcase(t, c)
+    if (c == t or fnmatch.fnmatchcase(c, t) or fnmatch.fnmatchcase(t, c)
             or c.startswith(t.rstrip("/") + "/")
-            or t.startswith(c.rstrip("/") + "/"))
+            or t.startswith(c.rstrip("/") + "/")):
+        return True
+    cb = os.path.basename(c)
+    tb = os.path.basename(t)
+    if cb and tb and "*" not in tb and "?" not in tb and cb == tb:
+        return True
+    return False
+
+
+def _extract_unit_records(data):
+    if not isinstance(data, dict):
+        return []
+    records = []
+    if isinstance(data.get("units"), list):
+        records.extend(u for u in data["units"] if isinstance(u, dict))
+    if isinstance(data.get("unit"), dict):
+        records.append(data["unit"])
+    elif isinstance(data.get("unit"), str) and data["unit"].strip():
+        records.append(data)
+    return records
+
+
+def _extract_touched_tokens(unit):
+    touched = []
+    for key in ("files_touched", "scope_allow"):
+        val = unit.get(key)
+        if isinstance(val, list):
+            touched.extend(str(x) for x in val)
+    oscope = unit.get("oracle_scope")
+    if isinstance(oscope, dict) and isinstance(oscope.get("files"), list):
+        touched.extend(str(x) for x in oscope["files"])
+    prose_blobs = []
+    for key in ("claim", "parking_reason"):
+        if isinstance(unit.get(key), str):
+            prose_blobs.append(unit[key])
+    for key in ("intent", "negative_control", "touching"):
+        obj = unit.get(key)
+        if isinstance(obj, dict):
+            prose_blobs.extend(str(v) for v in obj.values() if isinstance(v, str))
+        elif isinstance(obj, str):
+            prose_blobs.append(obj)
+    for item in (unit.get("criteria") or []):
+        if isinstance(item, dict) and isinstance(item.get("text"), str):
+            prose_blobs.append(item["text"])
+    for blob in prose_blobs:
+        for tok in blob.replace("'", " ").replace('"', " ").replace("(", " ").replace(")", " ").split():
+            cleaned = tok.strip(",:;`")
+            if "/" in cleaned or cleaned.endswith((".py", ".sh", ".md", ".json", ".ts", ".yml")):
+                touched.append(cleaned.split("@", 1)[0])
+    return touched
 
 
 def build_episodic_hint(paths, runs_dir=None, session_hits=None, max_lines=15):
@@ -127,30 +182,23 @@ def build_episodic_hint(paths, runs_dir=None, session_hits=None, max_lines=15):
     rdir = Path(runs_dir) if runs_dir is not None else DEFAULT_RUNS_DIR
     prior_entries = []
     if rdir.is_dir() and clean_paths:
-        for mf in sorted(rdir.glob("*/manifest.json"), reverse=True):
+        manifests = sorted(rdir.rglob("*manifest*.json"), reverse=True)
+        for mf in manifests:
             try:
                 data = json.loads(mf.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 continue
-            run_id = mf.parent.name
-            units = data.get("units") if isinstance(data, dict) else None
-            if not isinstance(units, list):
-                continue
-            for unit in units:
-                if not isinstance(unit, dict):
-                    continue
-                touched = []
-                for key in ("files_touched", "scope_allow"):
-                    val = unit.get(key)
-                    if isinstance(val, list):
-                        touched.extend(str(x) for x in val)
+            run_id = _one_line(mf.parent.name if mf.parent != rdir else mf.stem, 48)
+            for unit in _extract_unit_records(data):
+                touched = _extract_touched_tokens(unit)
                 if not any(_path_matches(f, p) for f in touched for p in clean_paths):
                     continue
-                uid = _visible(str(unit.get("id") or unit.get("unit_id") or "unit"))
-                status = _visible(str(unit.get("status") or "unknown"))
+                raw_uid = unit.get("id") or unit.get("unit_id") or unit.get("unit") or "unit"
+                uid = _one_line(raw_uid, 40)
+                status = _one_line(unit.get("status") or ("verified" if unit.get("head_sha") else "recorded"), 24)
                 intent = unit.get("intent") if isinstance(unit.get("intent"), dict) else {}
-                inv = _visible(str(intent.get("invariant") or ""))[:90]
-                park = _visible(str(unit.get("parking_reason") or ""))[:90]
+                inv = _one_line(intent.get("invariant") or intent.get("goal") or intent.get("why") or unit.get("claim") or "", 90)
+                park = _one_line(unit.get("parking_reason") or "", 90)
                 detail = f"parked={park}" if park else (f"invariant={inv}" if inv else "touched matching scope")
                 prior_entries.append(f"- [run {run_id} / {uid} ({status})] {detail}")
 
@@ -158,23 +206,26 @@ def build_episodic_hint(paths, runs_dir=None, session_hits=None, max_lines=15):
     for hit in (session_hits or []):
         if not isinstance(hit, dict):
             continue
-        sid = _visible(str(hit.get("sessionId") or "?"))
-        title = _visible(str(hit.get("title") or "(untitled)"))[:60]
+        sid = _one_line(hit.get("sessionId") or "?", 40)
+        title = _one_line(hit.get("title") or "(untitled)", 60)
         ev = hit.get("evidence") if isinstance(hit.get("evidence"), dict) else {}
-        snip = _visible(str(ev.get("snippet") or "")).replace("\n", " ")[:80]
+        snip = _one_line(ev.get("snippet") or "", 80)
         suffix = f" — {snip}" if snip else ""
         hit_entries.append(f"- [session {sid}] {title}{suffix}")
 
     header = [
         "EPISODIC_HINT: Prior Runs & Pitfalls (max 15 lines)",
-        f"PATHS: {', '.join(_visible(p) for p in clean_paths) if clean_paths else '(query-only)'}",
+        f"PATHS: {', '.join(_one_line(p, 80) for p in clean_paths) if clean_paths else '(query-only)'}",
         f"PRIOR_RUNS={len(prior_entries)} SESSION_HITS={len(hit_entries)}",
     ]
     budget = max(1, max_lines - len(header))
     combined = (prior_entries + hit_entries)[:budget]
     if not combined:
         combined = ["- (no prior run manifests or session hits matched this scope)"]
-    return header + combined
+    flat = []
+    for item in header + combined:
+        flat.extend(" ".join(str(item).splitlines()).strip() for _ in (0,))
+    return flat[:max_lines]
 
 
 def build_search_argv(ns):
@@ -299,7 +350,9 @@ def main(argv=None):
                 res = run_orca(search_argv)
                 if not isinstance(res, dict) or res.get("kind") != "results":
                     raise Failed("search receipt is not results")
-                hits = res.get("hits") if isinstance(res.get("hits"), list) else []
+                hits = res.get("hits")
+                if not isinstance(hits, list):
+                    raise Failed("search results answer names no hits")
             lines = build_episodic_hint(
                 ns.path, runs_dir=ns.runs_dir, session_hits=hits)
             print("\n".join(lines))

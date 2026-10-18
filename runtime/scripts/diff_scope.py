@@ -293,6 +293,45 @@ def _normalize_overlap_units(raw):
     return units
 
 
+def _glob_intersects(pa, pb):
+    """True when two glob/path patterns can match at least one common path."""
+    a = pa.strip().lstrip("./")
+    b = pb.strip().lstrip("./")
+    if not a or not b:
+        return False
+    if a == b or fnmatch.fnmatchcase(a, b) or fnmatch.fnmatchcase(b, a):
+        return True
+    if a.startswith(b.rstrip("/") + "/") or b.startswith(a.rstrip("/") + "/"):
+        return True
+    la, lb = len(a), len(b)
+    seen = {(0, 0)}
+    stack = [(0, 0)]
+    while stack:
+        i, j = stack.pop()
+        if i == la and j == lb:
+            return True
+        nxt = []
+        if i < la and a[i] == "*":
+            is_globstar = (i + 1 < la and a[i + 1] == "*") or (i > 0 and a[i - 1] == "*")
+            nxt.append((i + 1, j))
+            if j < lb and (b[j] != "/" or is_globstar):
+                nxt.append((i, j + 1))
+        if j < lb and b[j] == "*":
+            is_globstar = (j + 1 < lb and b[j + 1] == "*") or (j > 0 and b[j - 1] == "*")
+            nxt.append((i, j + 1))
+            if i < la and (a[i] != "/" or is_globstar):
+                nxt.append((i + 1, j))
+        if i < la and j < lb:
+            ca, cb = a[i], b[j]
+            if ca == cb or (ca == "?" and cb != "/") or (cb == "?" and ca != "/"):
+                nxt.append((i + 1, j + 1))
+        for state in nxt:
+            if state not in seen:
+                seen.add(state)
+                stack.append(state)
+    return False
+
+
 def detect_scope_overlaps(units, repo_files=None):
     """Return (overlaps, deps_by_unit) for pre-dispatch hot-file serialization."""
     normalized = _normalize_overlap_units(units)
@@ -309,8 +348,8 @@ def detect_scope_overlaps(units, repo_files=None):
                     shared.add(fpath)
             for pa in ua["scope"]:
                 for pb in ub["scope"]:
-                    if pa == pb or fnmatch.fnmatchcase(pa, pb) or fnmatch.fnmatchcase(pb, pa):
-                        shared.add(pa if len(pa) >= len(pb) else pb)
+                    if _glob_intersects(pa, pb):
+                        shared.add(pa if pa == pb else f"{pa} & {pb}")
             if shared:
                 overlaps.append({
                     "blocker": ua["id"],
@@ -325,7 +364,7 @@ def detect_scope_overlaps(units, repo_files=None):
 def _tracked_files(repo):
     out = git(repo, "ls-files", "-z")
     if out is None:
-        return []
+        raise ScopeError(f"git ls-files failed in {repo}", kind="diff_failed")
     return sorted(name for name in out.split("\0") if name)
 
 

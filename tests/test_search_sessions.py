@@ -279,6 +279,46 @@ class TestEpisodicHint(unittest.TestCase):
         self.assertIn("REFUSED", err)
         self.assertEqual(calls, "")
 
+    def test_episodic_hint_matches_real_archived_manifest(self):
+        lines = self.m.build_episodic_hint(
+            ["runtime/scripts/verify.py"],
+            runs_dir=str(ROOT / "docs" / "runs"),
+        )
+        joined = "\n".join(lines)
+        self.assertLessEqual(len(joined.splitlines()), 15)
+        self.assertIn("prove-it-2026-09-16-PF-2", joined)
+
+    def test_episodic_hint_folds_embedded_newlines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs_dir = Path(tmp) / "runs"
+            r1 = runs_dir / "2026-10-05-run"
+            r1.mkdir(parents=True)
+            (r1 / "manifest.json").write_text(json.dumps({
+                "unit": "U-multi\nline",
+                "files_touched": ["src/app.py"],
+                "parking_reason": "line1\nline2\nline3",
+            }))
+            lines = self.m.build_episodic_hint(
+                ["src/app.py"],
+                runs_dir=str(runs_dir),
+                session_hits=[{
+                    "sessionId": "s1\ns2",
+                    "title": "title1\ntitle2",
+                    "evidence": {"snippet": "snip1\nsnip2"},
+                }],
+            )
+            joined = "\n".join(lines)
+            self.assertEqual(len(joined.splitlines()), len(lines))
+            self.assertLessEqual(len(joined.splitlines()), 15)
+
+    def test_episodic_hint_malformed_hits_fails(self):
+        rc, _out, err, _calls = run_cli(
+            ["--episodic-hint", "flaky", "--path", "src/app.py"],
+            results={"kind": "results", "hits": "not-a-list"},
+        )
+        self.assertEqual(rc, 1, err)
+        self.assertIn("search results answer names no hits", err)
+
 
 if __name__ == "__main__":
     unittest.main()

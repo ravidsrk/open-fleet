@@ -475,6 +475,27 @@ class FailureHandoverPacket(unittest.TestCase):
         self.assertEqual(proc.returncode, 2)
         self.assertIn("reflection", proc.stderr)
 
+    def test_multiline_reflection_and_command_do_not_exceed_40_lines(self):
+        rec = {
+            "task_id": "task_1\ntask_2",
+            "failed_dispatch_id": "disp_1\ndisp_2",
+            "attempt": 1,
+            "failing_command": "pytest\n-k\ntest_auth",
+            "error_token": "AssertionError\nline2",
+            "prior_signatures": [],
+            "stderr": "\n".join(f"frame {i}" for i in range(50)),
+            "reflection": {
+                "what_failed": "first line\nsecond line\nthird line",
+                "fix_change": "change a\nchange b",
+                "repeating_same_approach": False,
+            },
+        }
+        action, lines = watchdog.build_failure_handover(rec)
+        self.assertEqual(action, "RETRY_READY")
+        joined = "\n".join(lines)
+        self.assertEqual(len(joined.splitlines()), len(lines))
+        self.assertLessEqual(len(joined.splitlines()), 40)
+
 
 if __name__ == "__main__":
     unittest.main()

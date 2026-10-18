@@ -467,11 +467,14 @@ def build_failure_handover(record, max_lines=40):
     if not isinstance(repeating, bool):
         raise HeartbeatError("handover: reflection.repeating_same_approach must be a boolean")
 
+    def _one_line(val):
+        return " ".join(_sanitize_untrusted(str(val or "")).splitlines()).strip()
+
     attempt = record.get("attempt", 1)
     if not isinstance(attempt, int) or attempt < 1:
         raise HeartbeatError("handover: attempt must be a positive integer")
-    cmd = str(record.get("failing_command") or "(none)").strip()
-    token = str(record.get("error_token") or "(none)").strip()
+    cmd = _one_line(record.get("failing_command") or "(none)") or "(none)"
+    token = _one_line(record.get("error_token") or "(none)") or "(none)"
     sig = f"{cmd}::{token}"
     prior = record.get("prior_signatures") or []
     if not isinstance(prior, list) or not all(isinstance(s, str) for s in prior):
@@ -483,18 +486,19 @@ def build_failure_handover(record, max_lines=40):
 
     header = [
         f"HANDOVER_ACTION={action}",
-        f"REFLECTION: {what_failed.strip()} · {fix_change.strip()} · repeating={'yes' if repeating else 'no'}",
-        f"PRIOR_DISPATCH: {failed_dispatch.strip()} (task={task_id.strip()}, attempt={attempt})",
+        f"REFLECTION: {_one_line(what_failed)} · {_one_line(fix_change)} · repeating={'yes' if repeating else 'no'}",
+        f"PRIOR_DISPATCH: {_one_line(failed_dispatch)} (task={_one_line(task_id)}, attempt={attempt})",
         f"FAILING_COMMAND: {cmd}",
         f"ERROR_SIGNATURE: {sig}",
     ]
     stderr_raw = _sanitize_untrusted(record.get("stderr") or "").strip()
-    stderr_lines = [f"  {ln}" for ln in stderr_raw.splitlines() if ln.strip()]
+    stderr_lines = [f"  {ln.strip()}" for ln in stderr_raw.splitlines() if ln.strip()]
     budget = max(1, max_lines - len(header) - 1)
     if len(stderr_lines) > budget:
         stderr_lines = stderr_lines[-budget:]
     out = header + ["STDERR_DELTA:"] + (stderr_lines or ["  (none)"])
-    return action, out[:max_lines]
+    flat = [" ".join(str(line).splitlines()) for line in out]
+    return action, flat[:max_lines]
 
 
 def build_parser():

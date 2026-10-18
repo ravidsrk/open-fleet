@@ -433,6 +433,36 @@ class TestScopeOverlaps(ScopeBase):
         self.assertEqual(missing.returncode, 2)
         self.assertIn("SCOPE_ERROR=invalid_overlap", missing.stdout)
 
+    def test_detects_untracked_intersecting_globs(self):
+        spec_file = Path(self.tmp) / "untracked_globs.json"
+        spec_file.write_text(json.dumps({
+            "units": [
+                {"id": "u-reg", "scope": ["src/*registry.py"]},
+                {"id": "u-routes", "scope": ["src/routes*.py"]},
+                {"id": "u-other", "scope": ["lib/billing_*.py"]},
+            ]
+        }), encoding="utf-8")
+        r = self.run_scope("--overlap", str(spec_file), "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        data = json.loads(r.stdout)
+        self.assertEqual(len(data["overlaps"]), 1)
+        self.assertEqual(data["deps"]["u-routes"], ["u-reg"])
+        self.assertEqual(data["deps"]["u-other"], [])
+
+    def test_failed_git_read_exits_2_loudly(self):
+        spec_file = Path(self.tmp) / "slices.json"
+        spec_file.write_text(json.dumps({
+            "units": [{"id": "u1", "scope": ["src/*.py"]}]
+        }), encoding="utf-8")
+        non_repo = Path(self.tmp) / "not-a-repo"
+        non_repo.mkdir()
+        r = subprocess.run(
+            [sys.executable, str(SCOPE), "--repo", str(non_repo), "--overlap", str(spec_file), "--json"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(json.loads(r.stdout)["error"], "diff_failed")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
