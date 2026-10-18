@@ -124,10 +124,11 @@ def _path_matches(candidate, target):
             or c.startswith(t.rstrip("/") + "/")
             or t.startswith(c.rstrip("/") + "/")):
         return True
-    cb = os.path.basename(c)
-    tb = os.path.basename(t)
-    if cb and tb and "*" not in tb and "?" not in tb and cb == tb:
-        return True
+    if "/" not in c or "/" not in t:
+        cb = os.path.basename(c)
+        tb = os.path.basename(t)
+        if cb and tb and "*" not in tb and "?" not in tb and cb == tb:
+            return True
     return False
 
 
@@ -195,7 +196,7 @@ def build_episodic_hint(paths, runs_dir=None, session_hits=None, max_lines=15):
                     continue
                 raw_uid = unit.get("id") or unit.get("unit_id") or unit.get("unit") or "unit"
                 uid = _one_line(raw_uid, 40)
-                status = _one_line(unit.get("status") or ("verified" if unit.get("head_sha") else "recorded"), 24)
+                status = _one_line(unit.get("status") or "recorded", 24)
                 intent = unit.get("intent") if isinstance(unit.get("intent"), dict) else {}
                 inv = _one_line(intent.get("invariant") or intent.get("goal") or intent.get("why") or unit.get("claim") or "", 90)
                 park = _one_line(unit.get("parking_reason") or "", 90)

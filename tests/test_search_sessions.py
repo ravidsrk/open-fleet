@@ -319,6 +319,24 @@ class TestEpisodicHint(unittest.TestCase):
         self.assertEqual(rc, 1, err)
         self.assertIn("search results answer names no hits", err)
 
+    def test_disjoint_directories_with_same_basename_do_not_match(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs_dir = Path(tmp) / "runs"
+            r1 = runs_dir / "2026-10-06-run"
+            r1.mkdir(parents=True)
+            (r1 / "manifest.json").write_text(json.dumps({
+                "unit": "U-billing",
+                "head_sha": "a" * 40,
+                "files_touched": ["services/billing/index.ts"],
+            }))
+            no_match = "\n".join(self.m.build_episodic_hint(
+                ["services/auth/index.ts"], runs_dir=str(runs_dir)))
+            self.assertIn("PRIOR_RUNS=0", no_match)
+            match = "\n".join(self.m.build_episodic_hint(
+                ["services/billing/index.ts"], runs_dir=str(runs_dir)))
+            self.assertIn("U-billing (recorded)", match)
+            self.assertNotIn("(verified)", match)
+
 
 if __name__ == "__main__":
     unittest.main()
