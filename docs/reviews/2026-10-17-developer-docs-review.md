@@ -64,7 +64,7 @@ Five runtime modules/configs added after the initial 2026-09-16 `document-it` ca
 ### 3.3 Developer Onboarding & Contributor Guide Updates (`v1.4.229` & `VAL-01`)
 
 - **[`docs/getting-started.md`](../getting-started.md), [`skills/clean-sweep/SKILL.md`](../../skills/clean-sweep/SKILL.md), and [`docs/missions/clean-sweep.md`](../missions/clean-sweep.md):** Updated tracker prerequisite rows and `clean-sweep`'s `compatibility` / `Needs` line to name `orca jira` alongside `orca linear` (matching `README.md`, `docs/concepts.md`, and `playbooks/linear-enumeration.md` at `v1.4.229`).
-- **[`docs/runtime-scripts.md`](../runtime-scripts.md) (`## \`guard_text.py\``) & [`docs/development.md`](../development.md):** Linked the deterministic `VAL-01` prompt-injection drill suite (`evals/injection-drills.json`, `tests/test_injection_drills.py`, `python3 scripts/eval.py --injection-only`) alongside `tests/fixtures/injection.json`, and added references to `scripts/release_check.py`, `scripts/_countlint.py`, `scripts/_identity.py`, `.env.example`, and `ruff.toml` in `docs/development.md`.
+- **[`docs/runtime-scripts.md`](../runtime-scripts.md) (`## \`guard_text.py\``) & [`docs/development.md`](../development.md):** Linked the deterministic `VAL-01` prompt-injection drill suite (`evals/injection-drills.json`, `tests/test_injection_drills.py`, `python3 scripts/eval.py run --suite injection`) alongside `tests/fixtures/injection.json`, and added references to `scripts/release_check.py`, `scripts/_countlint.py`, `scripts/_identity.py`, `.env.example`, and `ruff.toml` in `docs/development.md`.
 
 ---
 

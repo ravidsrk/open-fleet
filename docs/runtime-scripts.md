@@ -1094,9 +1094,9 @@ Keys:
 
 | `_about` | Contract: how `source` vs `live` witnessing works and which cadence owns each entry |
 | `orca` | `stablyai/orca` runtime + CLI pin (re-witnessed by `pin-it`) |
-| `gstack` | `garrytan/gstack` worker-playbook pack pin (requires a `docs/reviews/pins/gstack-<sha12>.md` rug-pull review on bump) |
-| `addyosmani` | `addyosmani/agent-skills` worker-playbook pack pin (requires a `docs/reviews/pins/addyosmani-<sha12>.md` rug-pull review on bump) |
-| `mattpocock` | `mattpocock/skills` worker-playbook pack pin (requires a `docs/reviews/pins/mattpocock-<sha12>.md` rug-pull review on bump) |
+| `gstack` | `garrytan/gstack` worker-playbook pack pin (requires a `docs/research/pin-reviews/gstack-<full-commit>.md` rug-pull review on bump) |
+| `addyosmani` | `addyosmani/agent-skills` worker-playbook pack pin (requires a `docs/research/pin-reviews/addyosmani-<full-commit>.md` rug-pull review on bump) |
+| `mattpocock` | `mattpocock/skills` worker-playbook pack pin (requires a `docs/research/pin-reviews/mattpocock-<full-commit>.md` rug-pull review on bump) |
 
 > Why: when the pinned Orca floor or upstream pack commit lived in prose, the installer,
 > the validator, and the pin record drifted apart silently. Centralizing `runtime/pins.json:orca`
