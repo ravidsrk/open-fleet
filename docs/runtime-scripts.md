@@ -224,12 +224,15 @@ Fail-loud scope classification: which review lenses a change earns. Emits shell-
 `SCOPE_<FLAG>=true|false` assignments (sourcable) or a JSON object. Source
 `runtime/scripts/diff_scope.py:1-75`; behavior pinned by `tests/test_diff_scope.py`.
 
-Usage: `diff_scope.py [--base REF] [--repo DIR] [--strict] [--json]` (also sourcable as
+Usage: `diff_scope.py [--base REF] [--repo DIR] [--strict] [--overlap FILE] [--json]` (also sourcable as
 `source <(diff_scope.py)`).
 
 Flags: `--base` (default origin/HEAD, then origin/main, origin/master, main, master),
-`--repo` (default `.`), `--strict` (any unmatched path exits nonzero), `--json` (emit an
-object instead of shell assignments).
+`--repo` (default `.`), `--strict` (any unmatched path exits nonzero), `--overlap`
+(pre-dispatch JSON `{units: [{id, scope: [...]}]}` intersecting declared unit globs
+against tracked repo files and pattern prefixes to emit `OVERLAP_COUNT` / `--deps`
+serialization chains for shared hot files), `--json` (emit an object instead of shell
+assignments).
 
 Changed set = committed diff vs merge base + working tree + untracked files. Twelve
 independent flags: `FRONTEND`, `BACKEND`, `PROMPTS`, `TESTS`, `DOCS`, `CONFIG`,
@@ -237,7 +240,7 @@ independent flags: `FRONTEND`, `BACKEND`, `PROMPTS`, `TESTS`, `DOCS`, `CONFIG`,
 content signals (capped at 256 KiB per file; deleted files contribute path signals only).
 Only `BACKEND` is exclusive of frontend view files.
 
-Exits: 0 classified · 2 SCOPE_ERROR=no_base|diff_failed|unmatched.
+Exits: 0 classified · 2 SCOPE_ERROR=no_base|diff_failed|unmatched|invalid_overlap.
 
 > Why: the failure mode that makes a scope gate worthless is silence — a shallow checkout
 > resolves no base, the diff is empty, and a legitimate-looking zero is recorded. So the
@@ -696,7 +699,7 @@ Exits: 0 clear · 1 not clear (reason on stderr) · 2 usage.
 reports broken. Source `runtime/scripts/search_sessions.py:1-23`; behavior pinned by
 `tests/test_search_sessions.py`.
 
-Usage: `search_sessions.py [--precheck-only] [query] [--query TEXT] [--scope conversation|all] [--fresh] [--limit 1-100] [--cursor CURSOR] [--agent A]... [--path P]... [--since ISO] [--sort relevance|newest] [--debug] [--environment E] [--pairing-code C]`
+Usage: `search_sessions.py [--precheck-only] [--episodic-hint] [--runs-dir DIR] [query] [--query TEXT] [--scope conversation|all] [--fresh] [--limit 1-100] [--cursor CURSOR] [--agent A]... [--path P]... [--since ISO] [--sort relevance|newest] [--debug] [--environment E] [--pairing-code C]`
 
 The precheck runs first: `enabled=false` or phase `degraded`/`closed` refuses with
 exit 2 before the query fires; `current`/`idle`/`indexing` proceed (`--fresh` asks
@@ -706,7 +709,11 @@ both; `--limit` caps at 100; `--since` must be ISO 8601 with an offset. Answers 
 `SNIPPET [role]:` (capped at 500 chars; `(none)` when the host sent no evidence).
 Titles and snippets render through pm.py's `_visible`, inertly.
 Stale, malformed, or unavailable are failures, never empty results.
-`--precheck-only` runs just the verdict.
+`--precheck-only` runs just the verdict. `--episodic-hint` (`build_episodic_hint()`)
+scans `docs/runs/*/manifest.json` (or `--runs-dir`) for prior units whose
+`files_touched` or `scope_allow` overlap `--path` (and optionally merges live
+`orca search` hits when a query is passed) to emit a bounded `<= 15`-line
+`EPISODIC_HINT:` block for pre-dispatch task packets.
 
 Exits: 0 ok · 1 runtime/refusal/receipt failure · 2 usage or precheck refusal.
 
@@ -919,10 +926,15 @@ Classifies workers OK/SLOW/HUNG/WEDGED from a heartbeats snapshot, auto-nudges H
 once, recommends stop-redispatch on still-HUNG or WEDGED. Source
 `runtime/scripts/watchdog.py:1-53`; behavior pinned by `tests/test_watchdog.py`.
 
-Usage: `watchdog.py --heartbeats SNAPSHOT [--config FILE] [--state FILE] [--log FILE] [--now ISO] [--dry-run]`
+Usage: `watchdog.py --heartbeats SNAPSHOT [--config FILE] [--state FILE] [--log FILE] [--now ISO] [--dry-run] | watchdog.py --handover ATTEMPT_JSON`
 
-Flags: `--heartbeats` (required JSON snapshot: run id plus per-worker dispatch,
-movement, stop, terminal, wedge markers, nudge history), `--config`
+Flags: `--heartbeats` (JSON snapshot: run id plus per-worker dispatch,
+movement, stop, terminal, wedge markers, nudge history), `--handover`
+(attempt JSON with `task_id`, `failed_dispatch_id`, `reflection`, `failing_command`,
+`error_token`, `prior_signatures`, and `stderr`; sanitizes untrusted stderr via
+`guard_text.py` and prints a bounded `<= 40`-line Failure Handover Packet for
+`worker-start --retry-of`, exiting 0 on `RETRY_READY` or 1 on `KILL_OR_PARK` when
+repeating the same approach, hitting 3 attempts, or matching a prior error signature), `--config`
 (threshold/rate-limit JSON, default `runtime/watchdog.json`), `--state` (nudge-history
 JSON, default .orca/watchdog-state.json), `--log` (JSONL action log, default
 .orca/watchdog.jsonl), `--now` (override the tick timestamp), `--dry-run` (classify

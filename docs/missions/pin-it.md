@@ -3,7 +3,7 @@
 [Documentation](../README.md) · [Mission selector](README.md#choose-by-task) · [Prompt recipes](../recipes.md)
 
 > **Autonomy:** L4 (Osmani L0-L5, parallel delegation) — parallel re-witness probes, one claim each, against the installed binary; doctrine patches land through the normal review + merge gates.
-> **Activation load:** ~31,800 tokens — this SKILL.md plus every playbook and runtime doc its Composes/rides clause makes mandatory, about 16% of a 200k-token context before the first dispatch ([why it is measured](../../ARCHITECTURE.md#instruction-budget))
+> **Activation load:** ~31,900 tokens — this SKILL.md plus every playbook and runtime doc its Composes/rides clause makes mandatory, about 16% of a 200k-token context before the first dispatch ([why it is measured](../../ARCHITECTURE.md#instruction-budget))
 > **Proof:** doctrine-only — it ran twice against Orca 1.4.200 ([PARTIAL-WITNESS](../runs/2026-09-12-runtime-repin/), [PINNED-WITH-PARKED](../runs/2026-09-13-pin-it-266/)) and once against 1.4.203 ([PINNED-WITH-PARKED](../runs/2026-09-16-pin-it-416/)), but no run's tier is re-derivable here; the protocol is mechanism, not yet field-proven.
 
 > Point it at a freshly upgraded Orca runtime — or at the queasy feeling that the dispatch docs

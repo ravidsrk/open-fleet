@@ -9,6 +9,7 @@ the snapshots stay as they were written.
 | Date | Document |
 |------|----------|
 | standing | [Rejected mission candidates — the ledger of what failed the identity test, with source, shape, and reason](REJECTED.md) |
+| 2026-10-18 | [2025–2026 coding agent orchestration space — convergent topology, 6 archetypes vs orca-fleet, and 5 adopted mechanisms (`diff_scope --overlap`, `watchdog --handover`, `search_sessions --episodic-hint`, disposable review probes, `a2a_export.py`)](2026-10-18-orchestration-space-deep-research.md) |
 | 2026-10-17 | [Upstream & Orca v1.4.229 deep audit — Orca 1.4.229 (`orca jira`, `agent launch`, `reference`, `serve` containment), gstack 1.91.121.0, mattpocock 49dd158, and VAL-01 injection drills](2026-10-17-upstream-and-orca-229-deep-audit.md) |
 | 2026-10-14 | [Agent Baseline self-assessment — orca-fleet vs the 35 controls of Agent Baseline v1.0-draft, VERIFIED/GAP per obligation](2026-10-14-agent-baseline-assessment.md) |
 | 2026-10-14 | [Silent-skip gate audit — every gate swept for green-without-running](2026-10-14-silent-skip-audit.md) |

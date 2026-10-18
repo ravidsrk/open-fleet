@@ -394,5 +394,45 @@ class TestScriptShape(unittest.TestCase):
             self.assertIn(flag, text.split('"""')[1])
 
 
+class TestScopeOverlaps(ScopeBase):
+    def test_detects_tracked_and_glob_overlaps_and_builds_deps(self):
+        write(self.repo, "src/routes.py", "ROUTES = []\n")
+        write(self.repo, "src/billing.py", "BILLING = 1\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "add files")
+        spec_file = Path(self.tmp) / "slices.json"
+        spec_file.write_text(json.dumps({
+            "units": [
+                {"id": "slice-auth", "scope": ["src/routes.py", "src/auth/*.py"]},
+                {"id": "slice-billing", "scope": ["src/billing.py"]},
+                {"id": "slice-admin", "scope": ["src/*.py"]},
+            ]
+        }), encoding="utf-8")
+        r = self.run_scope("--overlap", str(spec_file), "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        data = json.loads(r.stdout)
+        self.assertIsNone(data["error"])
+        self.assertEqual(len(data["overlaps"]), 2)
+        self.assertEqual(data["deps"]["slice-auth"], [])
+        self.assertEqual(data["deps"]["slice-billing"], [])
+        self.assertEqual(data["deps"]["slice-admin"], ["slice-auth", "slice-billing"])
+
+        r_txt = self.run_scope("--overlap", str(spec_file))
+        self.assertEqual(r_txt.returncode, 0)
+        self.assertIn("OVERLAP_COUNT=2", r_txt.stdout)
+        self.assertIn("# overlap: slice-auth -> slice-admin", r_txt.stdout)
+
+    def test_invalid_overlap_spec_exits_2_loudly(self):
+        bad_file = Path(self.tmp) / "bad.json"
+        bad_file.write_text(json.dumps({"units": [{"id": "u1", "scope": []}]}), encoding="utf-8")
+        r = self.run_scope("--overlap", str(bad_file), "--json")
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(json.loads(r.stdout)["error"], "invalid_overlap")
+
+        missing = self.run_scope("--overlap", str(Path(self.tmp) / "missing.json"))
+        self.assertEqual(missing.returncode, 2)
+        self.assertIn("SCOPE_ERROR=invalid_overlap", missing.stdout)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

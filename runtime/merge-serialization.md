@@ -59,7 +59,9 @@ Two corrections against v1.4.199, both of which make this rule the FLEET's, not 
 4. VERIFY by ancestry, not grep: `git merge-base --is-ancestor <mergeCommit> origin/<BASE>` AND
    `state=MERGED` AND `baseRefName==BASE`. Then ledger the merge SHA + reply on the thread.
 5. Hot-file ownership: PRs touching the same mount-point file (route registry, DI wiring,
-   migrations, barrels) form a merge CHAIN — build parallel, merge one-at-a-time as a union.
+   migrations, barrels) form a merge CHAIN — pre-partitioned at decompose via
+   `runtime/scripts/diff_scope.py --overlap <slices.json> --json` when scopes are known up front, or
+   merged one-at-a-time as a union when discovered mid-wave.
 
 ## First-merge spot-check (the pipeline inherits it)
 

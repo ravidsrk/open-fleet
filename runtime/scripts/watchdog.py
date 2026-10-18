@@ -425,17 +425,92 @@ def run_tick(args, cfg, data, state, now):
     return exit_code
 
 
+def _sanitize_untrusted(text):
+    import importlib.util
+    guard_path = Path(__file__).resolve().parent / "guard_text.py"
+    if guard_path.is_file():
+        spec = importlib.util.spec_from_file_location("guard_text", guard_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        rendered = []
+        for line in mod.defuse_banners(str(text)).split("\n"):
+            names = mod.line_labels(line)
+            rendered.append(f"[INJECTION-PATTERN:{','.join(names)}] {line}" if names else line)
+        return "\n".join(rendered)
+    return str(text)
+
+
+def build_failure_handover(record, max_lines=40):
+    """Build a sanitized, bounded Failure Handover Packet for worker-start --retry-of.
+
+    Returns (action, lines) where action is 'RETRY_READY' (exit 0) or 'KILL_OR_PARK' (exit 1).
+    Raises HeartbeatError on missing required reflection or dispatch fields.
+    """
+    if not isinstance(record, dict):
+        raise HeartbeatError("handover record must be a JSON object")
+    task_id = record.get("task_id")
+    failed_dispatch = record.get("failed_dispatch_id")
+    if not isinstance(task_id, str) or not task_id.strip():
+        raise HeartbeatError("handover: task_id must be a non-empty string")
+    if not isinstance(failed_dispatch, str) or not failed_dispatch.strip():
+        raise HeartbeatError("handover: failed_dispatch_id must be a non-empty string")
+    refl = record.get("reflection")
+    if not isinstance(refl, dict):
+        raise HeartbeatError("handover: reflection object is required (liveness-resume.md)")
+    what_failed = refl.get("what_failed")
+    fix_change = refl.get("fix_change")
+    repeating = refl.get("repeating_same_approach")
+    if not isinstance(what_failed, str) or not what_failed.strip():
+        raise HeartbeatError("handover: reflection.what_failed must be a non-empty string")
+    if not isinstance(fix_change, str) or not fix_change.strip():
+        raise HeartbeatError("handover: reflection.fix_change must be a non-empty string")
+    if not isinstance(repeating, bool):
+        raise HeartbeatError("handover: reflection.repeating_same_approach must be a boolean")
+
+    attempt = record.get("attempt", 1)
+    if not isinstance(attempt, int) or attempt < 1:
+        raise HeartbeatError("handover: attempt must be a positive integer")
+    cmd = str(record.get("failing_command") or "(none)").strip()
+    token = str(record.get("error_token") or "(none)").strip()
+    sig = f"{cmd}::{token}"
+    prior = record.get("prior_signatures") or []
+    if not isinstance(prior, list) or not all(isinstance(s, str) for s in prior):
+        raise HeartbeatError("handover: prior_signatures must be a list of strings")
+
+    identical_error = (sig in prior and cmd != "(none)")
+    kill = bool(repeating or attempt >= 3 or identical_error)
+    action = "KILL_OR_PARK" if kill else "RETRY_READY"
+
+    header = [
+        f"HANDOVER_ACTION={action}",
+        f"REFLECTION: {what_failed.strip()} · {fix_change.strip()} · repeating={'yes' if repeating else 'no'}",
+        f"PRIOR_DISPATCH: {failed_dispatch.strip()} (task={task_id.strip()}, attempt={attempt})",
+        f"FAILING_COMMAND: {cmd}",
+        f"ERROR_SIGNATURE: {sig}",
+    ]
+    stderr_raw = _sanitize_untrusted(record.get("stderr") or "").strip()
+    stderr_lines = [f"  {ln}" for ln in stderr_raw.splitlines() if ln.strip()]
+    budget = max(1, max_lines - len(header) - 1)
+    if len(stderr_lines) > budget:
+        stderr_lines = stderr_lines[-budget:]
+    out = header + ["STDERR_DELTA:"] + (stderr_lines or ["  (none)"])
+    return action, out[:max_lines]
+
+
 def build_parser():
     ap = argparse.ArgumentParser(
         description="Liveness watchdog: classify workers OK/SLOW/HUNG/WEDGED, "
                     "auto-nudge HUNG once, recommend stop-redispatch on still-HUNG "
                     "or WEDGED. Thresholds come from --config (default "
                     "runtime/watchdog.json); --help shows the effective values.")
-    ap.add_argument("--heartbeats", required=True,
+    ap.add_argument("--heartbeats", default=None,
                     help="JSON snapshot: {run_id, workers: [{worker_id, dispatch_id, "
                          "dispatched_at, last_movement_at, stop_at, reported, "
                          "terminal, wedge_markers, last_nudge_at, "
                          "last_nudge_answered, prior_nudges}]}")
+    ap.add_argument("--handover", default=None,
+                    help="attempt JSON to format as a sanitized, bounded Failure Handover Packet "
+                         "for worker-start --retry-of")
     ap.add_argument("--config", default=str(DEFAULT_CONFIG),
                     help="threshold/rate-limit JSON (default: runtime/watchdog.json)")
     ap.add_argument("--state", default=str(DEFAULT_STATE),
@@ -450,7 +525,19 @@ def build_parser():
 
 
 def main(argv=None):
-    args = build_parser().parse_args(argv)
+    ap = build_parser()
+    args = ap.parse_args(argv)
+    if args.handover is not None:
+        try:
+            raw = json.loads(Path(args.handover).read_text(encoding="utf-8"))
+            action, lines = build_failure_handover(raw)
+        except (OSError, json.JSONDecodeError, HeartbeatError) as exc:
+            print(f"watchdog: {exc}", file=sys.stderr)
+            return 2
+        print("\n".join(lines))
+        return 1 if action == "KILL_OR_PARK" else 0
+    if args.heartbeats is None:
+        ap.error("the following arguments are required: --heartbeats")
     try:
         cfg = load_config(args.config)
     except ConfigError as exc:

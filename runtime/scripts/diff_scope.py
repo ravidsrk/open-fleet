@@ -74,6 +74,7 @@ How to wire
     scheduled sweeps, where nobody is watching the exit code.
 """
 import argparse
+import fnmatch
 import json
 import os
 import re
@@ -268,17 +269,79 @@ def render_flags(flags):
     return [f"SCOPE_{name}={'true' if flags[name] else 'false'}" for name in FLAGS]
 
 
+def _normalize_overlap_units(raw):
+    items = raw.get("units") if isinstance(raw, dict) else raw
+    if not isinstance(items, list) or not items:
+        raise ScopeError("overlap spec must be a non-empty list or {units: [...]}", kind="invalid_overlap")
+    units = []
+    seen = set()
+    for idx, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise ScopeError(f"units[{idx}] must be an object", kind="invalid_overlap")
+        uid = item.get("id")
+        patterns = item.get("scope")
+        if not isinstance(uid, str) or not uid.strip():
+            raise ScopeError(f"units[{idx}].id must be a non-empty string", kind="invalid_overlap")
+        if uid in seen:
+            raise ScopeError(f"duplicate unit id {uid!r}", kind="invalid_overlap")
+        if not isinstance(patterns, list) or not patterns or not all(
+            isinstance(p, str) and p.strip() for p in patterns
+        ):
+            raise ScopeError(f"units[{idx}].scope must be a non-empty list of globs/paths", kind="invalid_overlap")
+        seen.add(uid)
+        units.append({"id": uid.strip(), "scope": [p.strip() for p in patterns]})
+    return units
+
+
+def detect_scope_overlaps(units, repo_files=None):
+    """Return (overlaps, deps_by_unit) for pre-dispatch hot-file serialization."""
+    normalized = _normalize_overlap_units(units)
+    tracked = list(repo_files or [])
+    overlaps = []
+    deps_by_unit = {u["id"]: [] for u in normalized}
+    for i, ua in enumerate(normalized):
+        for ub in normalized[i + 1:]:
+            shared = set()
+            for fpath in tracked:
+                if any(fnmatch.fnmatchcase(fpath, pa) for pa in ua["scope"]) and any(
+                    fnmatch.fnmatchcase(fpath, pb) for pb in ub["scope"]
+                ):
+                    shared.add(fpath)
+            for pa in ua["scope"]:
+                for pb in ub["scope"]:
+                    if pa == pb or fnmatch.fnmatchcase(pa, pb) or fnmatch.fnmatchcase(pb, pa):
+                        shared.add(pa if len(pa) >= len(pb) else pb)
+            if shared:
+                overlaps.append({
+                    "blocker": ua["id"],
+                    "blocked": ub["id"],
+                    "shared": sorted(shared),
+                })
+                if ua["id"] not in deps_by_unit[ub["id"]]:
+                    deps_by_unit[ub["id"]].append(ua["id"])
+    return overlaps, deps_by_unit
+
+
+def _tracked_files(repo):
+    out = git(repo, "ls-files", "-z")
+    if out is None:
+        return []
+    return sorted(name for name in out.split("\0") if name)
+
+
 def build_parser():
     p = argparse.ArgumentParser(
         prog="diff_scope.py",
         description="Classify the changed surface into SCOPE_* review flags, failing loud when it cannot look.",
-        epilog="exit 0 classified / 2 SCOPE_ERROR=no_base|diff_failed|unmatched",
+        epilog="exit 0 classified / 2 SCOPE_ERROR=no_base|diff_failed|unmatched|invalid_overlap",
     )
     p.add_argument("--base", default=None, help="base ref (default: origin/HEAD, then origin/main, origin/master, main, master)")
     p.add_argument("--repo", default=".", help="repository to classify (default: cwd)")
     p.add_argument("--strict", action="store_true",
                    help="exit nonzero when ANY changed path is unmatched, not only when nothing "
                         "matched — for a review lens that gates on the flag set (#314)")
+    p.add_argument("--overlap", default=None,
+                   help="pre-dispatch overlap JSON ({units: [{id, scope: [...]}]}) to serialize shared hot files")
     p.add_argument("--json", action="store_true", help="emit a JSON object instead of shell assignments")
     return p
 
@@ -286,6 +349,33 @@ def build_parser():
 def main(argv=None):
     args = build_parser().parse_args(argv)
     repo = Path(args.repo)
+    if args.overlap is not None:
+        try:
+            raw = json.loads(Path(args.overlap).read_text(encoding="utf-8"))
+            overlaps, deps = detect_scope_overlaps(raw, _tracked_files(repo))
+        except (OSError, json.JSONDecodeError) as exc:
+            err = ScopeError(f"cannot read overlap spec {args.overlap}: {exc}", kind="invalid_overlap")
+            if args.json:
+                print(json.dumps({"overlaps": [], "deps": {}, "error": err.kind}, indent=2))
+            else:
+                print(f"SCOPE_ERROR={err.kind}")
+                print(f"# {err}")
+            return EXIT_SCOPE_ERROR
+        except ScopeError as err:
+            if args.json:
+                print(json.dumps({"overlaps": [], "deps": {}, "error": err.kind}, indent=2))
+            else:
+                print(f"SCOPE_ERROR={err.kind}")
+                print(f"# {err}")
+            return EXIT_SCOPE_ERROR
+        if args.json:
+            print(json.dumps({"overlaps": overlaps, "deps": deps, "error": None}, indent=2))
+        else:
+            print(f"OVERLAP_COUNT={len(overlaps)}")
+            for item in overlaps:
+                print(f"# overlap: {item['blocker']} -> {item['blocked']} ({', '.join(item['shared'])})")
+        return EXIT_OK
+
     try:
         flags, unmatched, base = scope(repo, args.base)
     except ScopeError as err:

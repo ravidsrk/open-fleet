@@ -81,4 +81,4 @@ The tally is never coordinator memory — it lives in the target repo's DECISION
 ## Completion
 
 Every triggered lens ran (or is a recorded gate-off); each finding names its lens, severity, and (for
-security) an exploit scenario. A clearance that rests on one safety fact is unproven until a run shows it; findings emit in the shared schema for the mission's ledger.
+security) an exploit scenario. A clearance that rests on one safety fact is unproven until a run shows it; for a runtime-behavior `BLOCKER`/`Critical` claim, a review worker may run an ephemeral reproduction probe in a disposable `orca sandbox` (`--ephemeral-probe`) without mutating the reviewed worktree, and any runtime `BLOCKER` claim not backed by an executed probe or failing test receipt is labeled `STATIC_ONLY`. Findings emit in the shared schema for the mission's ledger.

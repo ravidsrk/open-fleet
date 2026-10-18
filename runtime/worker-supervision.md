@@ -46,10 +46,13 @@ transcript persists and stays citable):
 3. **Stop:** past one more window with no movement, `worker-stop`. The frozen
    transcript is evidence of the wedge, not a verdict on the work.
 4. **Re-dispatch fresh** with guardrails baked into the new TASK (a timeout on
-   every scratch/test run, a report-by deadline earlier than the box) and the
-   liveness-resume.md reflection line written first. A retry that repeats the
-   same shape without guardrails is the identical-error class: kill it, don't
-   loop it.
+   every scratch/test run, a report-by deadline earlier than the box), the
+   liveness-resume.md reflection line written first, and a sanitized, bounded
+   (`<= 40` lines) Failure Handover Packet built via `runtime/scripts/watchdog.py --handover <attempt>.json`
+   so the replacement worker receives the exact failing command and error delta without
+   inheriting the dead session's noisy transcript. A retry that repeats the
+   same shape without guardrails is the identical-error class (`HANDOVER_ACTION=KILL_OR_PARK`):
+   kill it, don't loop it.
 
 ## Watchdog: what is mechanized, what stays manual
 
@@ -61,9 +64,11 @@ plus an unanswered nudge) is WEDGED, slow-but-alive is not stuck. Every
 threshold lives in `runtime/watchdog.json` — tunable without code edits.
 
 Owned by the watchdog: classification, one auto-nudge per HUNG worker
-(finish-or-report, no new experiments), and the stop-redispatch
+(finish-or-report, no new experiments), the stop-redispatch
 RECOMMENDATION with JSONL evidence (run/worker ids, timestamps) on
-still-HUNG or WEDGED. Nudge rate limits: at most 1 nudge per dispatch, 1
+still-HUNG or WEDGED, and formatting a sanitized Failure Handover Packet
+(`watchdog.py --handover <attempt>.json`, enforcing the reflection gate and
+identical-error kill before `worker-start --retry-of`). Nudge rate limits: at most 1 nudge per dispatch, 1
 per worker per hour, one window between nudges — a flapping worker cannot
 cause a nudge storm.
 

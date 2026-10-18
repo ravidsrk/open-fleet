@@ -33,6 +33,8 @@ there means STOP and send nothing (dispatch-lifecycle.md).
 
 Hot mount-point files (route registry, DI wiring, migrations, barrels) → mark each a merge-chain
 (merge-serialization.md): slices touching one share a dependency chain, never run in parallel.
+Compute scope intersections mechanically before dispatch with `runtime/scripts/diff_scope.py --overlap <slices.json> --json`
+and feed its `deps` map into `--deps` so shared files serialize in the DAG instead of colliding at the merge train.
 
 ## Verify the DAG before dispatching anything
 
