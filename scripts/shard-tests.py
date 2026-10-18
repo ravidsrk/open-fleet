@@ -50,6 +50,7 @@ DEFAULT_SHARDS = 4
 # Module -> seconds. Single-pass `python3 -m unittest tests.<mod>` walls,
 # repo root cwd, 2026-10-14. Balance-only: correctness never reads this.
 WEIGHTS = {
+    "test_a2a_export": 0.2,
     "test_architecture": 37.5,
     "test_bind_check": 5.7,
     "test_bundle": 61.8,
