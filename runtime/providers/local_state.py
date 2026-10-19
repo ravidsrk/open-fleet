@@ -42,6 +42,7 @@ class LocalStateStore:
     """Thread-safe / process-safe SQLite WAL state engine for runs, tasks, dispatches, mailbox, and file touches."""
 
     def __init__(self, db_path: str | Path | None = None, env: dict[str, str] | None = None):
+        self.env = dict(os.environ if env is None else env)
         self.db_path = Path(db_path) if db_path else default_db_path(env)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
@@ -474,13 +475,36 @@ class LocalStateStore:
 
         with self._connect() as conn:
             self._fence_consumer(conn, run_id, terminal)
+            coord_row = conn.execute("SELECT coordinator_handle FROM runs WHERE id = ?", (run_id,)).fetchone()
+            fenced_coord = coord_row["coordinator_handle"] if coord_row else None
+            env_coord = self.env.get("OPEN_FLEET_COORDINATOR_HANDLE") or self.env.get("ORCA_COORDINATOR_HANDLE")
+            is_coord = bool(
+                terminal
+                and (
+                    terminal == "coordinator"
+                    or terminal.startswith("coord")
+                    or terminal.startswith("orchestrator")
+                    or (fenced_coord and terminal == fenced_coord)
+                    or (env_coord and terminal == env_coord)
+                )
+            )
+            allowed_recipients: list[str] | None = None
+            if terminal:
+                allowed_recipients = [terminal, "coordinator"] if is_coord and terminal != "coordinator" else [terminal]
+
             if ack_ids:
                 now = time.time()
                 for aid in ack_ids:
-                    conn.execute(
-                        "UPDATE deliveries SET acked = 1, acked_at = ? WHERE delivery_id = ? OR message_id = ?",
-                        (now, aid, aid),
-                    )
+                    ack_q = "UPDATE deliveries SET acked = 1, acked_at = ? WHERE (delivery_id = ? OR message_id = ?)"
+                    ack_params: list[Any] = [now, aid, aid]
+                    if run:
+                        ack_q += " AND run_id = ?"
+                        ack_params.append(run_id)
+                    if allowed_recipients:
+                        placeholders = ",".join("?" for _ in allowed_recipients)
+                        ack_q += f" AND recipient IN ({placeholders})"
+                        ack_params.extend(allowed_recipients)
+                    conn.execute(ack_q, ack_params)
 
         while True:
             with self._connect() as conn:
@@ -494,9 +518,10 @@ class LocalStateStore:
                 if run:
                     query += " AND d.run_id = ?"
                     params.append(run_id)
-                if terminal:
-                    query += " AND (d.recipient = ? OR d.recipient = 'coordinator')"
-                    params.append(terminal)
+                if allowed_recipients:
+                    placeholders = ",".join("?" for _ in allowed_recipients)
+                    query += f" AND d.recipient IN ({placeholders})"
+                    params.extend(allowed_recipients)
                 if mode != "all":
                     query += " AND d.acked = 0"
                 query += " ORDER BY m.created_at ASC"
@@ -513,6 +538,7 @@ class LocalStateStore:
                             "type": r["msg_type"],
                             "subject": r["subject"],
                             "from": r["sender"],
+                            "from_handle": r["sender"],
                             "to": r["recipient"],
                             "outcome": r["outcome"],
                             "payload": r["payload"],
@@ -525,8 +551,11 @@ class LocalStateStore:
                     return {
                         "messages": items,
                         "deliveries": items,
+                        "count": len(items),
+                        "deliveryId": items[-1]["deliveryId"] if items else None,
                         "acked": len(ack_ids),
                         "waited": bool(wait),
+                        "timedOut": bool(wait and not items),
                     }
             now = time.time()
             if now - last_keepalive >= 15.0:
@@ -559,7 +588,12 @@ class LocalStateStore:
             run=run_id,
             attrs={"replyTo": msg_id},
         )
-        return {"replied": True, "replyMessageId": sent["messageId"], "to": recipient}
+        return {
+            "replied": True,
+            "messageId": sent["messageId"],
+            "replyMessageId": sent["messageId"],
+            "to": recipient,
+        }
 
     # --- HITL Gate Transport ---
     def ask_human(
@@ -581,12 +615,15 @@ class LocalStateStore:
                 row = conn.execute("SELECT * FROM gates WHERE gate_id = ?", (resume,)).fetchone()
                 if not row:
                     raise ProviderError("gate_not_found", f"gate {resume!r} not found")
+                ans = row["answer"]
                 return {
                     "gateId": row["gate_id"],
                     "requestId": row["gate_id"],
+                    "messageId": row["gate_id"],
                     "state": row["status"],
                     "status": row["status"],
-                    "answer": row["answer"],
+                    "answer": ans,
+                    "timedOut": ans is None,
                     "question": row["question"],
                 }
             gate_id = retry_request or f"gate_{uuid.uuid4().hex[:10]}"
@@ -598,11 +635,38 @@ class LocalStateStore:
                 """,
                 (gate_id, run_id, sender or "coordinator", to or "human", question or "", json.dumps(opts), now),
             )
+        self.send_message(
+            subject=question or "HITL gate question",
+            msg_type="question",
+            to=to or "coordinator",
+            sender=sender or "worker",
+            payload=json.dumps({"gateId": gate_id, "question": question or "", "options": opts}),
+            run=run_id,
+            attrs={"gateId": gate_id},
+        )
+        preset_answer = self.env.get("OPEN_FLEET_ASK_ANSWER") or self.env.get("ORCA_ASK_ANSWER")
+        if preset_answer is not None:
+            self.resolve_gate(gate_id, preset_answer, status="answered")
+        elif timeout_ms and int(timeout_ms) > 0:
+            wait_deadline = time.time() + min(int(timeout_ms) / 1000.0, 0.2)
+            while time.time() < wait_deadline:
+                with self._connect() as conn:
+                    r = conn.execute("SELECT status, answer FROM gates WHERE gate_id = ?", (gate_id,)).fetchone()
+                    if r and r["answer"] is not None:
+                        break
+                time.sleep(0.02)
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM gates WHERE gate_id = ?", (gate_id,)).fetchone()
+        ans = row["answer"] if row else None
+        status = row["status"] if row else "pending"
         return {
             "gateId": gate_id,
             "requestId": gate_id,
-            "state": "pending",
-            "status": "pending",
+            "messageId": gate_id,
+            "state": status,
+            "status": status,
+            "answer": ans,
+            "timedOut": ans is None,
             "question": question or "",
             "options": opts,
         }

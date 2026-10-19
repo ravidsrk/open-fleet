@@ -39,8 +39,10 @@ import { spawnSync } from "node:child_process";
 
 export default function registerOpenFleetDenyBridge(pi: any) {
   const hookPath = process.env.OPEN_FLEET_DENY_HOOK || process.env.ORCA_DENY_HOOK_PATH || "";
-  if (!hookPath) return;
   pi.on("tool_call", async (event: any) => {
+    if (!hookPath) {
+      return { block: true, reason: "OPEN_FLEET_DENY_HOOK is not configured (fail-closed)" };
+    }
     const payload = JSON.stringify({
       tool_name: event.toolName || event.name || "unknown",
       tool_input: event.input || event.args || {},
@@ -75,8 +77,11 @@ import { spawnSync } from "node:child_process";
 
 export const OpenFleetDenyPlugin = async (ctx: any) => {
   const hookPath = process.env.OPEN_FLEET_DENY_HOOK || process.env.ORCA_DENY_HOOK_PATH || "";
-  if (!hookPath || !ctx?.tool?.hook) return;
+  if (!ctx?.tool?.hook) return;
   ctx.tool.hook("execute.before", async (call: any) => {
+    if (!hookPath) {
+      throw new Error("OPEN_FLEET_DENY_HOOK is not configured (fail-closed)");
+    }
     const payload = JSON.stringify({
       tool_name: call.name || call.tool || "unknown",
       tool_input: call.args || call.input || {},
@@ -459,31 +464,7 @@ class PosixWorktreeProvider(RuntimeProvider):
             log_file.write_text(json.dumps({"type": "turn_started", "dispatchId": dispatch_id}) + "\n", encoding="utf-8")
             return {"pid": 99999, "backend": "dry-run"}
 
-        if self.backend == "cmux":
-            chan = f"orca-done-{dispatch_id}"
-            wrapped = f"cd {shlex.quote(wt_path)} && ({command}) >> {shlex.quote(str(log_file))} 2>&1; cmux wait-for -S {shlex.quote(chan)}"
-            proc = subprocess.run(
-                ["cmux", "new-workspace", "--cwd", wt_path, "--command", wrapped],
-                capture_output=True,
-                text=True,
-                env=merged_env,
-            )
-            if proc.returncode == 0:
-                return {"pid": 0, "backend": "cmux", "channel": chan}
-
-        if self.backend == "tmux":
-            sess_name = f"openfleet-{term_handle}"
-            wrapped = f"cd {shlex.quote(wt_path)} && ({command}) >> {shlex.quote(str(log_file))} 2>&1"
-            proc = subprocess.run(
-                ["tmux", "new-session", "-d", "-s", sess_name, "-c", wt_path, wrapped],
-                capture_output=True,
-                text=True,
-                env=merged_env,
-            )
-            if proc.returncode == 0:
-                return {"pid": 0, "backend": "tmux", "session": sess_name}
-
-        # Default setsid background process with synthetic worker_died monitor
+        chan = f"orca-done-{dispatch_id}"
         monitor_py = f"""
 import json, os, subprocess, sys
 sys.path.insert(0, {repr(str(Path(__file__).resolve().parent.parent))})
@@ -516,9 +497,37 @@ store.ensure_terminal_or_died(
     last_tail=tail,
     run_id={repr(run_id)},
 )
+if {repr(self.backend)} == "cmux":
+    subprocess.run(["cmux", "wait-for", "-S", {repr(chan)}], capture_output=True)
 """
+        runner_script = lane_dir / "run_worker.py"
+        runner_script.write_text(monitor_py, encoding="utf-8")
+        py_bin = os.environ.get("PYTHON", "python3")
+        wrapped_monitor = f"{shlex.quote(py_bin)} {shlex.quote(str(runner_script))}"
+
+        if self.backend == "cmux":
+            proc = subprocess.run(
+                ["cmux", "new-workspace", "--cwd", wt_path, "--command", wrapped_monitor],
+                capture_output=True,
+                text=True,
+                env=merged_env,
+            )
+            if proc.returncode == 0:
+                return {"pid": 0, "backend": "cmux", "channel": chan}
+
+        if self.backend == "tmux":
+            sess_name = f"openfleet-{term_handle}"
+            proc = subprocess.run(
+                ["tmux", "new-session", "-d", "-s", sess_name, "-c", wt_path, wrapped_monitor],
+                capture_output=True,
+                text=True,
+                env=merged_env,
+            )
+            if proc.returncode == 0:
+                return {"pid": 0, "backend": "tmux", "session": sess_name}
+
         proc = subprocess.Popen(
-            [os.environ.get("PYTHON", "python3"), "-c", monitor_py],
+            [py_bin, str(runner_script)],
             cwd=wt_path,
             env=merged_env,
             stdout=subprocess.DEVNULL,
@@ -569,10 +578,13 @@ store.ensure_terminal_or_died(
 
         wt_path = self._resolve_worktree_path(worktree, name or task_id)
         Path(wt_path).mkdir(parents=True, exist_ok=True)
-        lane_dir = self.state.db_path.parent / "lanes" / f"disp_{uuid.uuid4().hex[:10]}"
+        dispatch_id = f"disp_{uuid.uuid4().hex[:10]}"
+        term_handle = f"term_{uuid.uuid4().hex[:8]}"
+        lane_dir = self.state.db_path.parent / "lanes" / dispatch_id
         lane_dir.mkdir(parents=True, exist_ok=True)
 
         hooks_map = install_worktree_hooks(wt_path, agent, profile)
+        hook_script = str(Path(__file__).resolve().parent.parent / "scripts" / "deny-hook.sh")
         launch = build_harness_command(
             agent=agent,
             profile=profile,
@@ -588,10 +600,10 @@ store.ensure_terminal_or_died(
                 f"{shlex.quote(sandbox_recipe)} sh -c {shlex.quote(full_command)}"
             )
 
-        dispatch_id = f"disp_{uuid.uuid4().hex[:10]}"
-        term_handle = f"term_{uuid.uuid4().hex[:8]}"
         env_vars = {
             **launch["env"],
+            "OPEN_FLEET_DENY_HOOK": hook_script,
+            "ORCA_DENY_HOOK_PATH": hook_script,
             "OPEN_FLEET_DISPATCH_ID": dispatch_id,
             "ORCA_DISPATCH_ID": dispatch_id,
             "OPEN_FLEET_WORKER_ID": dispatch_id,
@@ -604,15 +616,6 @@ store.ensure_terminal_or_died(
             "ORCA_FLEET_STATE_DB": str(self.state.db_path),
         }
 
-        spawn_info = self._spawn_process(
-            dispatch_id=dispatch_id,
-            term_handle=term_handle,
-            wt_path=wt_path,
-            command=full_command,
-            env_vars=env_vars,
-            lane_dir=lane_dir,
-            run_id=run_id,
-        )
         now = time.time()
         eff_json = json.dumps(
             {
@@ -624,21 +627,28 @@ store.ensure_terminal_or_died(
             },
             sort_keys=True,
         )
+        # Claim task and insert dispatch/terminal BEFORE spawning so concurrent callers
+        # or fast-exiting workers always find the dispatch record (#591 review).
         with self.state._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            conn.execute("UPDATE tasks SET status = 'dispatched', updated_at = ? WHERE id = ?", (now, task_id))
+            cur = conn.execute(
+                "UPDATE tasks SET status = 'dispatched', updated_at = ? WHERE id = ? AND status = 'ready'",
+                (now, task_id),
+            )
+            if cur.rowcount != 1:
+                conn.execute("ROLLBACK")
+                raise ProviderError("task_not_startable", f"task {task_id!r} was already claimed concurrently")
             conn.execute(
                 """
                 INSERT INTO terminals(handle, worktree, title, command, pid, backend, log_path, state, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?)
+                VALUES (?, ?, ?, ?, 0, ?, ?, 'running', ?)
                 """,
                 (
                     term_handle,
                     wt_path,
                     name or task_id,
                     full_command,
-                    spawn_info.get("pid", 0),
-                    spawn_info.get("backend", self.backend),
+                    self.backend,
                     str(lane_dir / "events.jsonl"),
                     now,
                 ),
@@ -646,7 +656,7 @@ store.ensure_terminal_or_died(
             conn.execute(
                 """
                 INSERT INTO dispatches(dispatch_id, task_id, run_id, worktree, agent, profile, terminal_handle, state, terminal_state, pid, backend, launch_effective, lane_dir, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'ready', 'active', ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'ready', 'active', 0, ?, ?, ?, ?, ?)
                 """,
                 (
                     dispatch_id,
@@ -656,8 +666,7 @@ store.ensure_terminal_or_died(
                     agent,
                     profile,
                     term_handle,
-                    spawn_info.get("pid", 0),
-                    spawn_info.get("backend", self.backend),
+                    self.backend,
                     eff_json,
                     str(lane_dir),
                     now,
@@ -665,6 +674,35 @@ store.ensure_terminal_or_died(
                 ),
             )
             conn.execute("COMMIT")
+
+        try:
+            spawn_info = self._spawn_process(
+                dispatch_id=dispatch_id,
+                term_handle=term_handle,
+                wt_path=wt_path,
+                command=full_command,
+                env_vars=env_vars,
+                lane_dir=lane_dir,
+                run_id=run_id,
+            )
+        except Exception:
+            with self.state._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute("UPDATE tasks SET status = 'ready', updated_at = ? WHERE id = ?", (time.time(), task_id))
+                conn.execute("DELETE FROM dispatches WHERE dispatch_id = ?", (dispatch_id,))
+                conn.execute("DELETE FROM terminals WHERE handle = ?", (term_handle,))
+                conn.execute("COMMIT")
+            raise
+
+        with self.state._connect() as conn:
+            conn.execute(
+                "UPDATE terminals SET pid = ?, backend = ? WHERE handle = ?",
+                (spawn_info.get("pid", 0), spawn_info.get("backend", self.backend), term_handle),
+            )
+            conn.execute(
+                "UPDATE dispatches SET pid = ?, backend = ?, updated_at = ? WHERE dispatch_id = ?",
+                (spawn_info.get("pid", 0), spawn_info.get("backend", self.backend), time.time(), dispatch_id),
+            )
 
         res = {
             "state": "ready",
@@ -775,11 +813,28 @@ store.ensure_terminal_or_died(
             r = conn.execute("SELECT * FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)).fetchone()
             if not r:
                 raise ProviderError("dispatch_not_found", f"dispatch {dispatch_id!r} not found")
-            if verb in ("stop", "abandon", "release") and r["pid"] and r["pid"] > 0:
-                try:
-                    os.killpg(int(r["pid"]), signal.SIGTERM)
-                except OSError:
-                    pass
+            if verb in ("stop", "abandon", "release"):
+                backend = r["backend"] or self.backend
+                handle = r["terminal_handle"]
+                if backend == "tmux" and handle:
+                    subprocess.run(
+                        ["tmux", "kill-session", "-t", f"openfleet-{handle}"],
+                        capture_output=True,
+                        text=True,
+                    )
+                elif backend == "cmux" and handle:
+                    subprocess.run(
+                        ["cmux", "close-workspace", "--workspace", handle],
+                        capture_output=True,
+                        text=True,
+                    )
+                if r["pid"] and r["pid"] > 0:
+                    try:
+                        os.killpg(int(r["pid"]), signal.SIGTERM)
+                    except OSError:
+                        pass
+                if handle:
+                    conn.execute("UPDATE terminals SET state = ? WHERE handle = ?", (term_state, handle))
             conn.execute(
                 "UPDATE dispatches SET state = ?, terminal_state = ?, updated_at = ? WHERE dispatch_id = ?",
                 (new_state, term_state, time.time(), dispatch_id),
