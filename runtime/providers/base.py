@@ -579,80 +579,86 @@ class RuntimeProvider:
     def status(self) -> dict[str, Any]:
         return {"ready": True, "provider": self.name, "version": self.version()}
 
+    def _unsupported(self, method: str, kwargs: dict[str, Any]) -> dict[str, Any]:
+        raise ProviderError(
+            "unsupported_operation",
+            f"provider '{self.name}' does not support '{method}' (args={sorted(kwargs.keys())})",
+        )
+
     def task_create(self, **kwargs: Any) -> dict[str, Any]:
-        raise NotImplementedError
+        return self._unsupported("task_create", kwargs)
 
     def task_update(self, **kwargs: Any) -> dict[str, Any]:
-        raise NotImplementedError
+        return self._unsupported("task_update", kwargs)
 
     def task_list(self, **kwargs: Any) -> dict[str, Any]:
-        raise NotImplementedError
+        return self._unsupported("task_list", kwargs)
 
     def worker_start(self, **kwargs: Any) -> dict[str, Any]:
-        raise NotImplementedError
+        return self._unsupported("worker_start", kwargs)
 
     def worker_list(self, **kwargs: Any) -> dict[str, Any]:
-        raise NotImplementedError
+        return self._unsupported("worker_list", kwargs)
 
     def worker_show(self, **kwargs: Any) -> dict[str, Any]:
-        raise NotImplementedError
+        return self._unsupported("worker_show", kwargs)
 
     def worker_read(self, **kwargs: Any) -> dict[str, Any]:
-        raise NotImplementedError
+        return self._unsupported("worker_read", kwargs)
 
     def worker_fence(self, **kwargs: Any) -> dict[str, Any]:
-        raise NotImplementedError
+        return self._unsupported("worker_fence", kwargs)
 
     def dispatch_inject(self, **kwargs: Any) -> dict[str, Any]:
-        raise NotImplementedError
+        return self._unsupported("dispatch_inject", kwargs)
 
     def request_show(self, **kwargs: Any) -> dict[str, Any]:
-        raise NotImplementedError
+        return self._unsupported("request_show", kwargs)
 
     def send_message(self, **kwargs: Any) -> dict[str, Any]:
-        raise NotImplementedError
+        return self._unsupported("send_message", kwargs)
 
     def check_messages(self, **kwargs: Any) -> dict[str, Any]:
-        raise NotImplementedError
+        return self._unsupported("check_messages", kwargs)
 
     def reply_message(self, **kwargs: Any) -> dict[str, Any]:
-        raise NotImplementedError
+        return self._unsupported("reply_message", kwargs)
 
     def ask_human(self, **kwargs: Any) -> dict[str, Any]:
-        raise NotImplementedError
+        return self._unsupported("ask_human", kwargs)
 
     def worktree_list(self, **kwargs: Any) -> dict[str, Any]:
-        raise NotImplementedError
+        return self._unsupported("worktree_list", kwargs)
 
     def worktree_show(self, **kwargs: Any) -> dict[str, Any]:
-        raise NotImplementedError
+        return self._unsupported("worktree_show", kwargs)
 
     def worktree_create(self, **kwargs: Any) -> dict[str, Any]:
-        raise NotImplementedError
+        return self._unsupported("worktree_create", kwargs)
 
     def worktree_rm(self, **kwargs: Any) -> dict[str, Any]:
-        raise NotImplementedError
+        return self._unsupported("worktree_rm", kwargs)
 
     def terminal_create(self, **kwargs: Any) -> dict[str, Any]:
-        raise NotImplementedError
+        return self._unsupported("terminal_create", kwargs)
 
     def terminal_read(self, **kwargs: Any) -> dict[str, Any]:
-        raise NotImplementedError
+        return self._unsupported("terminal_read", kwargs)
 
     def terminal_list(self, **kwargs: Any) -> dict[str, Any]:
-        raise NotImplementedError
+        return self._unsupported("terminal_list", kwargs)
 
     def terminal_show(self, **kwargs: Any) -> dict[str, Any]:
-        raise NotImplementedError
+        return self._unsupported("terminal_show", kwargs)
 
     def terminal_wait(self, **kwargs: Any) -> dict[str, Any]:
-        raise NotImplementedError
+        return self._unsupported("terminal_wait", kwargs)
 
     def terminal_send(self, **kwargs: Any) -> dict[str, Any]:
-        raise NotImplementedError
+        return self._unsupported("terminal_send", kwargs)
 
     def search(self, **kwargs: Any) -> dict[str, Any]:
-        raise NotImplementedError
+        return self._unsupported("search", kwargs)
 
     def vm_recipe_doctor(self, recipe_id: str) -> dict[str, Any]:
         return {

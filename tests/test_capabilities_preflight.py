@@ -74,10 +74,21 @@ EXPECTED_PROVIDERS = {
 
 
 def run_preflight(*argv, cwd=None, env=None):
+    import contextlib
+    import io
+    from unittest import mock
+
     run_env = dict(os.environ if env is None else env)
     if env is None:
         run_env.pop("OPEN_FLEET_RUNTIME", None)
         run_env.pop("ORCA_FLEET_RUNTIME", None)
+    with mock.patch.dict(os.environ, run_env, clear=True):
+        buf_out, buf_err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
+            try:
+                preflight.main(list(argv))
+            except SystemExit:
+                pass
     return subprocess.run(
         [sys.executable, str(PREFLIGHT), *argv],
         capture_output=True,

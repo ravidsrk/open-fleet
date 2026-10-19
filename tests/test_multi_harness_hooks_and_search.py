@@ -570,8 +570,35 @@ class TestMultiHarnessSearchSessions(unittest.TestCase):
         }
 
     def test_searches_all_10_harnesses_and_fences_snippets(self):
+        import contextlib
+        import io
+        from unittest import mock
+
         env = dict(os.environ)
         env.update(self._harness_env())
+        with mock.patch.dict(os.environ, env, clear=True):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = self.mod.main(["zeta_token", "--local-harnesses", "--limit", "20"])
+            self.assertEqual(rc, 0)
+            self.assertIn("HITS=10", buf.getvalue())
+            buf2 = io.StringIO()
+            with contextlib.redirect_stdout(buf2):
+                rc2 = self.mod.main(
+                    [
+                        "zeta_token",
+                        "--local-harnesses",
+                        "--agent",
+                        "opencode",
+                        "--path",
+                        "/workspace/alpha",
+                        "--since",
+                        "2026-10-01T00:00:00Z",
+                    ]
+                )
+            self.assertEqual(rc2, 0)
+            self.assertIn("HITS=1", buf2.getvalue())
+
         res = subprocess.run(
             [
                 "python3",
@@ -697,6 +724,10 @@ class TestPortableSandboxDoctor(unittest.TestCase):
 class TestPredictMerge(unittest.TestCase):
     """#590: wtree.sh predict-merge and diff_scope.py --predict-merge."""
 
+    @classmethod
+    def setUpClass(cls):
+        cls.ds_mod = _load_module("diff_scope", DIFF_SCOPE_PY)
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.repo = Path(self._tmp.name) / "repo"
@@ -738,7 +769,36 @@ class TestPredictMerge(unittest.TestCase):
         )
 
     def test_predict_merge_clean_and_conflict_via_wtree_and_diff_scope(self):
-        # Clean merge
+        import contextlib
+        import io
+
+        # In-process coverage for diff_scope.predict_merge and main
+        clean_inproc = self.ds_mod.predict_merge(self.repo, "main", "feat-clean")
+        self.assertTrue(clean_inproc["clean"])
+        conf_inproc = self.ds_mod.predict_merge(self.repo, "main", "feat-conflict")
+        self.assertFalse(conf_inproc["clean"])
+        self.assertIn("shared.txt", conf_inproc["conflicts"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                self.ds_mod.main(
+                    ["--predict-merge", "main", "feat-clean", "--repo", str(self.repo)]
+                ),
+                0,
+            )
+            self.assertEqual(
+                self.ds_mod.main(
+                    [
+                        "--predict-merge",
+                        "main",
+                        "feat-conflict",
+                        "--repo",
+                        str(self.repo),
+                    ]
+                ),
+                1,
+            )
+
+        # Clean merge via wtree.sh
         r_clean = subprocess.run(
             ["sh", str(WTREE_SH), "predict-merge", "main", "feat-clean", str(self.repo)],
             capture_output=True,
@@ -781,6 +841,10 @@ class TestPrivilegeNarrowingAndWatchdogDedup(unittest.TestCase):
         cls.wd = _load_module("watchdog", WATCHDOG_PY)
 
     def test_privilege_narrowing_allows_equal_or_narrower_and_rejects_escalation(self):
+        import contextlib
+        import io
+        from unittest import mock
+
         seed = "11" * 32
         with tempfile.TemporaryDirectory() as tmp:
             out_path = Path(tmp) / "signed.json"
@@ -788,6 +852,43 @@ class TestPrivilegeNarrowingAndWatchdogDedup(unittest.TestCase):
             env = dict(os.environ)
             env.pop("ORCA_DISPATCH_SIGNING_SEED", None)
             env["OPEN_FLEET_SIGNING_SEED"] = seed
+
+            with mock.patch.dict(os.environ, env, clear=True):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    rc_sign = self.ds.main(
+                        [
+                            "sign",
+                            "--manifest-id",
+                            "m-1",
+                            "--contract-digest",
+                            "a" * 64,
+                            "--unit-class",
+                            "code",
+                            "--parent-profile",
+                            "danger",
+                            "--profile",
+                            "rw",
+                        ]
+                    )
+                self.assertEqual(rc_sign, 0)
+                with contextlib.redirect_stderr(io.StringIO()):
+                    rc_esc = self.ds.main(
+                        [
+                            "sign",
+                            "--manifest-id",
+                            "m-1",
+                            "--contract-digest",
+                            "a" * 64,
+                            "--unit-class",
+                            "code",
+                            "--parent-profile",
+                            "ro",
+                            "--profile",
+                            "rw",
+                        ]
+                    )
+                self.assertEqual(rc_esc, 2)
 
             # Allowed narrowing: danger -> rw
             r_ok = subprocess.run(

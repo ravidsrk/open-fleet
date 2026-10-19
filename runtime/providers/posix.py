@@ -53,14 +53,18 @@ export default function registerOpenFleetDenyBridge(pi: any) {
     if (res.status !== 0) {
       return { block: true, reason: (res.stderr || res.stdout || "blocked by deny-hook.sh").trim() };
     }
+    const rawOut = (res.stdout || "").trim();
+    if (!rawOut) return undefined;
     try {
-      const parsed = JSON.parse(res.stdout || "{}");
+      const parsed = JSON.parse(rawOut);
       const decision = parsed.decision || parsed.hookSpecificOutput?.permissionDecision;
       if (decision === "deny" || decision === "block" || decision === "ask") {
         const reason = parsed.reason || parsed.hookSpecificOutput?.permissionDecisionReason || "blocked by deny-hook.sh";
         return { block: true, reason };
       }
-    } catch {}
+    } catch (err: any) {
+      return { block: true, reason: String(err?.message || err || "invalid deny-hook JSON") };
+    }
     return undefined;
   });
 }
