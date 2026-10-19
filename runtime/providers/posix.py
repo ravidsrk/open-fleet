@@ -242,13 +242,21 @@ class PosixWorktreeProvider(RuntimeProvider):
         self.state = state or LocalStateStore(env=self.env)
         self.repo_root = Path(
             repo_root
-            or env_get("OPEN_FLEET_REPO_ROOT", "ORCA_CLI_CWD", self.env, os.getcwd())
+            or self.env.get("OPEN_FLEET_REPO_ROOT")
+            or env_get("OPEN_FLEET_CLI_CWD", "ORCA_CLI_CWD", self.env, os.getcwd())
         ).resolve()
         self.runner = runner
         self.backend = self._resolve_backend(backend)
 
     def _resolve_backend(self, requested: str | None = None) -> str:
-        req = (requested or env_get("OPEN_FLEET_POSIX_BACKEND", "ORCA_POSIX_BACKEND", self.env, "auto")).lower()
+        req = (
+            requested
+            or self.env.get("OPEN_FLEET_POSIX_BACKEND")
+            or self.env.get("OPEN_FLEET_POSIX_MUX")
+            or self.env.get("ORCA_POSIX_BACKEND")
+            or self.env.get("ORCA_POSIX_MUX")
+            or "auto"
+        ).lower()
         if req in ("tmux", "cmux", "setsid", "dry-run"):
             return req
         if self.env.get("CMUX_SOCKET_PATH") and shutil.which("cmux"):
@@ -307,12 +315,20 @@ class PosixWorktreeProvider(RuntimeProvider):
         if not wt_path.exists():
             git_dir = root / ".git"
             if git_dir.exists():
+                subprocess.run(
+                    ["git", "-C", str(root), "worktree", "prune"],
+                    capture_output=True,
+                    text=True,
+                )
                 cmd = ["git", "-C", str(root), "worktree", "add", "-B", branch, str(wt_path)]
                 if base:
                     cmd.append(base)
                 proc = subprocess.run(cmd, capture_output=True, text=True)
                 if proc.returncode != 0:
-                    wt_path.mkdir(parents=True, exist_ok=True)
+                    raise ProviderError(
+                        "worktree_create_failed",
+                        (proc.stderr or proc.stdout or f"git worktree add failed for {slug}").strip(),
+                    )
             else:
                 wt_path.mkdir(parents=True, exist_ok=True)
         wt_id = f"{root.name}::{wt_path}"
@@ -389,7 +405,12 @@ class PosixWorktreeProvider(RuntimeProvider):
             if force:
                 cmd.append("--force")
             cmd.append(str(wt_path))
-            subprocess.run(cmd, capture_output=True, text=True)
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            if proc.returncode != 0 and not force:
+                raise ProviderError(
+                    "worktree_dirty",
+                    (proc.stderr or proc.stdout or f"git worktree remove refused dirty worktree {wt_path}").strip(),
+                )
         if wt_path.exists() and wt_path != self.repo_root:
             shutil.rmtree(wt_path, ignore_errors=True)
         return {"removed": True, "id": shown["id"]}
@@ -521,8 +542,15 @@ store.ensure_terminal_or_died(
         retry_request: str | None = None,
         profile: str = "rw",
         parent_profile: str | None = None,
+        prompt: str | None = None,
     ) -> dict[str, Any]:
         check_monotonic_profile(parent_profile, profile)
+        sandbox_recipe = on_env or env_get("OPEN_FLEET_SANDBOX_RECIPE", "ORCA_SANDBOX_RECIPE", self.env, "")
+        if profile == "danger" and not sandbox_recipe:
+            raise ProviderError(
+                "danger_requires_sandbox",
+                "profile='danger' requires --on <env> or OPEN_FLEET_SANDBOX_RECIPE isolated sandbox placement",
+            )
         cached = self.state.get_or_record_request(retry_request, "worker-start")
         if cached:
             return cached
@@ -537,7 +565,7 @@ store.ensure_terminal_or_died(
                     "task_not_startable",
                     f"task {task_id!r} has status {t_row['status']!r} (must be 'ready')",
                 )
-            spec_text = t_row["spec"]
+            spec_text = prompt if prompt is not None else t_row["spec"]
 
         wt_path = self._resolve_worktree_path(worktree, name or task_id)
         Path(wt_path).mkdir(parents=True, exist_ok=True)
@@ -552,12 +580,24 @@ store.ensure_terminal_or_died(
             prompt=spec_text,
             bridge_dir=str(Path(wt_path) / ".open-fleet" / "bridges"),
         )
+        full_command = " ".join(shlex.quote(str(a)) for a in launch["argv"])
+        if profile == "danger" and sandbox_recipe:
+            full_command = (
+                f"docker run --rm -w {shlex.quote(wt_path)} "
+                f"-v {shlex.quote(wt_path)}:{shlex.quote(wt_path)} "
+                f"{shlex.quote(sandbox_recipe)} sh -c {shlex.quote(full_command)}"
+            )
 
         dispatch_id = f"disp_{uuid.uuid4().hex[:10]}"
         term_handle = f"term_{uuid.uuid4().hex[:8]}"
         env_vars = {
             **launch["env"],
             "OPEN_FLEET_DISPATCH_ID": dispatch_id,
+            "ORCA_DISPATCH_ID": dispatch_id,
+            "OPEN_FLEET_WORKER_ID": dispatch_id,
+            "ORCA_WORKER_ID": dispatch_id,
+            "OPEN_FLEET_RUN_ID": run_id,
+            "ORCA_RUN_ID": run_id,
             "ORCA_TERMINAL_HANDLE": term_handle,
             "OPEN_FLEET_TERMINAL_HANDLE": term_handle,
             "OPEN_FLEET_STATE_DB": str(self.state.db_path),
@@ -568,7 +608,7 @@ store.ensure_terminal_or_died(
             dispatch_id=dispatch_id,
             term_handle=term_handle,
             wt_path=wt_path,
-            command=launch["command"],
+            command=full_command,
             env_vars=env_vars,
             lane_dir=lane_dir,
             run_id=run_id,
@@ -578,8 +618,9 @@ store.ensure_terminal_or_died(
             {
                 "agent": agent,
                 "args": launch["profile_flag"],
-                "command": launch["command"],
+                "command": full_command,
                 "hooks": hooks_map.get(agent, ""),
+                "sandbox": sandbox_recipe if profile == "danger" else "",
             },
             sort_keys=True,
         )
@@ -595,7 +636,7 @@ store.ensure_terminal_or_died(
                     term_handle,
                     wt_path,
                     name or task_id,
-                    launch["command"],
+                    full_command,
                     spawn_info.get("pid", 0),
                     spawn_info.get("backend", self.backend),
                     str(lane_dir / "events.jsonl"),
@@ -784,6 +825,20 @@ store.ensure_terminal_or_died(
         return {"terminal": {"handle": handle, "id": handle, "title": title or handle, "worktree": wt_path}}
 
     def terminal_wait(self, terminal: str, condition: str = "tui-idle", timeout_ms: int = 90000) -> dict[str, Any]:
+        with self.state._connect() as conn:
+            r = conn.execute("SELECT * FROM terminals WHERE handle = ?", (terminal,)).fetchone()
+            if not r:
+                raise ProviderError("terminal_not_found", f"terminal {terminal!r} not found")
+        if r["state"] != "running":
+            raise ProviderError("terminal_not_running", f"terminal {terminal!r} is in state {r['state']!r}")
+        normalized_cond = condition.replace("-", "_")
+        satisfied = False
+        if r["log_path"] and Path(r["log_path"]).is_file():
+            content = Path(r["log_path"]).read_text(encoding="utf-8", errors="replace")
+            if normalized_cond in content or condition in content or "tui_idle" in content or "turn_started" in content:
+                satisfied = True
+        if not satisfied:
+            raise ProviderError("terminal_wait_timeout", f"terminal {terminal!r} did not reach {condition!r}")
         return {"wait": {"satisfied": True, "condition": condition, "terminal": terminal}}
 
     def terminal_read(
@@ -839,14 +894,56 @@ store.ensure_terminal_or_died(
             }
         }
 
+    def _deliver_terminal_input(self, term_row: Any, text: str, enter: bool = True) -> None:
+        if term_row["state"] != "running":
+            raise ProviderError("terminal_not_running", f"terminal {term_row['handle']!r} is not running")
+        handle = term_row["handle"]
+        backend = term_row["backend"] or self.backend
+        payload = text + ("\n" if enter else "")
+        if self.runner is not None:
+            self.runner(
+                action="terminal_send",
+                term_handle=handle,
+                backend=backend,
+                text=payload,
+                worktree=term_row["worktree"],
+            )
+        elif backend == "tmux":
+            sess_name = f"openfleet-{handle}"
+            cmd = ["tmux", "send-keys", "-t", sess_name, text]
+            if enter:
+                cmd.append("Enter")
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            if proc.returncode != 0:
+                raise ProviderError("terminal_send_failed", (proc.stderr or "tmux send-keys failed").strip())
+        elif backend == "cmux":
+            proc = subprocess.run(
+                ["cmux", "send", "--workspace", handle, payload],
+                capture_output=True,
+                text=True,
+            )
+            if proc.returncode != 0:
+                raise ProviderError("terminal_send_failed", (proc.stderr or "cmux send failed").strip())
+        elif backend == "setsid" and int(term_row["pid"] or 0) > 0:
+            try:
+                os.kill(int(term_row["pid"]), 0)
+            except OSError as exc:
+                raise ProviderError("terminal_not_running", f"process {term_row['pid']} is not running: {exc}") from exc
+        if term_row["worktree"]:
+            inbox_dir = Path(term_row["worktree"]) / ".open-fleet"
+            inbox_dir.mkdir(parents=True, exist_ok=True)
+            with open(inbox_dir / "inbox.jsonl", "a", encoding="utf-8") as inf:
+                inf.write(json.dumps({"handle": handle, "text": text, "ts": time.time()}) + "\n")
+        if term_row["log_path"]:
+            with open(term_row["log_path"], "a", encoding="utf-8") as lf:
+                lf.write(payload)
+
     def terminal_send(self, terminal: str, text: str, enter: bool = True) -> dict[str, Any]:
         with self.state._connect() as conn:
             r = conn.execute("SELECT * FROM terminals WHERE handle = ?", (terminal,)).fetchone()
             if not r:
                 raise ProviderError("terminal_not_found", f"terminal {terminal!r} not found")
-        if r["log_path"]:
-            with open(r["log_path"], "a", encoding="utf-8") as lf:
-                lf.write(text + ("\n" if enter else ""))
+        self._deliver_terminal_input(r, text, enter=enter)
         req_id = f"req_{uuid.uuid4().hex[:10]}"
         return {"send": {"accepted": True, "prompt": {"requestId": req_id, "stages": ["input_accepted", "turn_started"]}}}
 
@@ -866,9 +963,8 @@ store.ensure_terminal_or_died(
             if not term_row:
                 raise ProviderError("inject_rejected", f"terminal {to_handle!r} not found")
             conn.execute("UPDATE tasks SET status = 'dispatched', updated_at = ? WHERE id = ?", (time.time(), task_id))
-            if term_row["log_path"]:
-                with open(term_row["log_path"], "a", encoding="utf-8") as lf:
-                    lf.write(json.dumps({"type": "injected_prompt", "taskId": task_id, "spec": t_row["spec"]}) + "\n")
+        injected_line = json.dumps({"type": "injected_prompt", "taskId": task_id, "spec": t_row["spec"]})
+        self._deliver_terminal_input(term_row, injected_line, enter=True)
         return {
             "injected": True,
             "prompt": {

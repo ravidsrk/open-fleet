@@ -88,8 +88,23 @@ class MulticlaudeProvider(RuntimeProvider):
         return {"result": res}
 
     def mark_verified(self, dispatch_id: str) -> None:
-        """Record that `verify.py` has verified `dispatch_id` so `complete_agent` may safely remove its worktree."""
+        """Record durably that `verify.py` has verified `dispatch_id` so `complete_agent` may safely remove its worktree."""
         self.verified_dispatches.add(dispatch_id)
+        with self.state._connect() as conn:
+            conn.execute(
+                "UPDATE dispatches SET terminal_state = 'verified', updated_at = ? WHERE dispatch_id = ?",
+                (time.time(), dispatch_id),
+            )
+
+    def _is_dispatch_verified(self, dispatch_id: str) -> bool:
+        if dispatch_id in self.verified_dispatches:
+            return True
+        with self.state._connect() as conn:
+            row = conn.execute(
+                "SELECT terminal_state FROM dispatches WHERE dispatch_id = ?",
+                (dispatch_id,),
+            ).fetchone()
+            return bool(row and row["terminal_state"] == "verified")
 
     def worker_start(
         self,
@@ -213,7 +228,7 @@ class MulticlaudeProvider(RuntimeProvider):
         verified: bool = False,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        is_verified = verified or (dispatch_id in self.verified_dispatches)
+        is_verified = verified or self._is_dispatch_verified(dispatch_id)
         if verb in ("release", "complete") and not is_verified:
             raise ProviderError(
                 "unverified_release_blocked",

@@ -289,13 +289,18 @@ def nudge_allowed(worker_id, dispatch_id, worker, state, now, cfg):
     return True, "within budget"
 
 
-def record_nudge(state, worker_id, dispatch_id, at):
+def record_nudge(state, worker_id, dispatch_id, at, ci_signature=None):
     workers = state.setdefault("workers", {})
     entry = workers.setdefault(worker_id, {"dispatch_id": dispatch_id, "nudges": []})
     if entry.get("dispatch_id") != dispatch_id:
         entry["dispatch_id"] = dispatch_id
         entry["nudges"] = []
+        entry["ci_signatures"] = []
     entry["nudges"].append(at.isoformat())
+    if ci_signature:
+        sigs = entry.setdefault("ci_signatures", [])
+        if ci_signature not in sigs:
+            sigs.append(ci_signature)
 
 
 def build_nudge_argv(cfg, run_id, worker_id, dispatch_id):
@@ -317,12 +322,27 @@ def decide(worker, now, cfg, state):
     """
     wid = worker.get("worker_id", "?")
     dispatch_id = worker.get("dispatch_id", "?")
+    waiting_input = bool(worker.get("waiting_input"))
+    if waiting_input:
+        return "OK", "none", {"waiting_input": True}, "waiting on human gate (nudge suppressed)"
     classification, evidence = classify(worker, now, cfg)
     if classification in ("OK", "SLOW", "SETTLED"):
         return classification, "none", evidence, "slow-but-alive is not stuck"
     if classification == "WEDGED":
         return classification, "recommend", evidence, \
             "wedged: stop + re-dispatch fresh (coordinator decision)"
+    ci_checks = worker.get("ci_checks")
+    if isinstance(ci_checks, list) and ci_checks:
+        entry = state.get("workers", {}).get(wid, {})
+        if isinstance(entry, dict) and entry.get("dispatch_id") == dispatch_id:
+            prior_sigs = set(entry.get("ci_signatures") or [])
+        else:
+            prior_sigs = set()
+        seen_map = {wid: prior_sigs}
+        ok_ci, sig = should_nudge_ci(wid, ci_checks, seen_map, waiting_input=waiting_input)
+        evidence = {**evidence, "ci_signature": sig}
+        if not ok_ci:
+            return classification, "none", evidence, f"duplicate CI failure signature {sig[:12]} suppressed"
     allowed, reason = nudge_allowed(wid, dispatch_id, worker, state, now, cfg)
     if allowed:
         return classification, "nudge", evidence, reason
@@ -401,7 +421,13 @@ def run_tick(args, cfg, data, state, now):
             if not ok:
                 print(f"{res['worker_id']} HUNG NUDGE-FAILED :: {detail}", file=sys.stderr)
                 return 2
-            record_nudge(state, res["worker_id"], res["dispatch_id"], now)
+            record_nudge(
+                state,
+                res["worker_id"],
+                res["dispatch_id"],
+                now,
+                ci_signature=(res.get("evidence") or {}).get("ci_signature"),
+            )
             # Durable at send time, before any fallible follow-up: a later log
             # or transport failure must never make a retry resend this nudge.
             save_state(args.state, state)

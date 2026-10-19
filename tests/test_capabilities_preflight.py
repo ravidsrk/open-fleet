@@ -172,9 +172,14 @@ class TestPreflightCapabilitiesEnforcement(unittest.TestCase):
         self.assertIn("preflight: OK", r.stdout)
 
     def test_ship_it_on_posix_passes(self):
-        r = run_preflight("--mission", "ship-it", "--runtime", "posix")
+        r = run_preflight("--mission", "ship-it", "--runtime", "posix", "--mode", "readonly")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("preflight: OK", r.stdout)
+
+    def test_runtime_write_mode_still_requires_base(self):
+        r = run_preflight("--mission", "ship-it", "--runtime", "posix", "--mode", "write")
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("--base", r.stderr)
 
     def test_all_general_missions_pass_across_all_providers(self):
         data = json.loads(CAPABILITIES_JSON.read_text(encoding="utf-8"))
@@ -191,7 +196,9 @@ class TestPreflightCapabilitiesEnforcement(unittest.TestCase):
 
     def test_strict_native_capabilities_mode(self):
         # offload-it requires cap:sandbox-vm: fallback on posix, native on openhands/orca
-        r_fallback = run_preflight("--mission", "offload-it", "--runtime", "posix")
+        r_fallback = run_preflight(
+            "--mission", "offload-it", "--runtime", "posix", "--mode", "readonly"
+        )
         self.assertEqual(r_fallback.returncode, 0, r_fallback.stderr)
 
         r_strict_fail = run_preflight(
@@ -201,7 +208,13 @@ class TestPreflightCapabilitiesEnforcement(unittest.TestCase):
         self.assertIn("missing_capability: cap:sandbox-vm", r_strict_fail.stderr)
 
         r_strict_ok = run_preflight(
-            "--mission", "offload-it", "--runtime", "openhands", "--strict-native-capabilities"
+            "--mission",
+            "offload-it",
+            "--runtime",
+            "openhands",
+            "--strict-native-capabilities",
+            "--mode",
+            "readonly",
         )
         self.assertEqual(r_strict_ok.returncode, 0, r_strict_ok.stderr)
 

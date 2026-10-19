@@ -329,8 +329,8 @@ def format_results(result, fenced=False):
                     source=str(hit.get("agent") or "session"),
                     label=str(hit.get("sessionId") or "?"),
                 )
-                lines.append(f"SNIPPET [{_visible(ev.get('role', '?'))}]: "
-                             f"{bounded_snip}\n{fenced_snip}")
+                lines.append(f"SNIPPET [{_visible(ev.get('role', '?'))}]:\n"
+                             f"{fenced_snip}")
             else:
                 lines.append(f"SNIPPET [{_visible(ev.get('role', '?'))}]: "
                              f"{bounded_snip}")

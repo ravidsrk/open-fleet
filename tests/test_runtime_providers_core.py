@@ -263,6 +263,26 @@ class TestPosixProviderAndSpawnIntegration(unittest.TestCase):
             self.assertEqual(len(workers), 1)
             self.assertEqual(workers[0]["dispatchId"], ws["dispatchId"])
 
+            handle = ws["agentTerminalHandle"]
+            ts = prov.terminal_send(handle, text="turn_started", enter=True)
+            self.assertTrue(ts["send"]["accepted"])
+            tw = prov.terminal_wait(handle, timeout_ms=100)
+            self.assertTrue(tw["wait"]["satisfied"])
+            di = prov.dispatch_inject(task["id"], handle)
+            self.assertTrue(di["injected"])
+            wt_dir = Path(prov.terminal_show(handle)["terminal"]["worktree"])
+            self.assertTrue((wt_dir / ".open-fleet" / "inbox.jsonl").is_file())
+
+            with self.assertRaises(self.providers.ProviderError) as ctx:
+                prov.worker_start(
+                    task_id=task["id"],
+                    worktree="current",
+                    name="danger-no-env",
+                    agent="claude",
+                    profile="danger",
+                )
+            self.assertEqual(ctx.exception.code, "danger_requires_sandbox")
+
     def test_spawn_worker_sh_runs_end_to_end_on_posix_provider_with_multi_harness(self):
         state_db = Path(self.tmp.name) / "state.db"
         scratch = Path(self.tmp.name) / "scratch"

@@ -127,13 +127,20 @@ class EmdashProvider(RuntimeProvider):
             return cached
 
         check_monotonic_profile(parent_profile, profile)
+        resolved_prompt = prompt
+        if not resolved_prompt and task_id:
+            with self.state._connect() as conn:
+                t_row = conn.execute("SELECT spec, title FROM tasks WHERE id = ?", (task_id,)).fetchone()
+                if t_row:
+                    resolved_prompt = str(t_row["spec"] or t_row["title"] or "")
+
         if worktree in ("new-child", ""):
             wt_res = self.worktree_create(name=name or f"emdash-{task_id or 'worker'}")
             wt_path = str(wt_res["worktree"]["path"])
         else:
             wt_path = worktree
 
-        harness = build_harness_command(agent, profile, wt_path, prompt=prompt)
+        harness = build_harness_command(agent, profile, wt_path, prompt=resolved_prompt)
         auto_approve = profile != "ro"
         extra_args = list(harness["argv"][1:]) if profile == "ro" else []
 
@@ -145,7 +152,7 @@ class EmdashProvider(RuntimeProvider):
             "autoApprove": auto_approve,
             "extraArgs": extra_args,
             "command": harness["command"],
-            "prompt": prompt or "",
+            "prompt": resolved_prompt or "",
         }
         raw = self._rpc("agent.startStream", stream_params)
         stream_id = str(raw.get("streamId") or raw.get("ptyId") or raw.get("id") or f"em_{uuid.uuid4().hex[:10]}")

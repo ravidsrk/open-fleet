@@ -477,20 +477,35 @@ class RuntimeProvider:
                     brief=bool(flags.get("brief")),
                 )
             if sub == "worker-start":
-                return self.worker_start(
-                    task_id=flags.get("task", ""),
-                    worktree=flags.get("worktree", "new-child"),
-                    agent=flags.get("agent", "claude"),
-                    name=flags.get("name"),
-                    run=flags.get("run"),
-                    sender=flags.get("from"),
-                    timeout_ms=int(flags["timeout-ms"]) if "timeout-ms" in flags else None,
-                    on_env=flags.get("on"),
-                    retry_of=flags.get("retry-of"),
-                    retry_request=flags.get("retry-request"),
-                    profile=env_get("OPEN_FLEET_SANDBOX_PROFILE", "ORCA_SANDBOX_PROFILE", env, os.environ.get("PROFILE", "rw")),
-                    parent_profile=env_get("OPEN_FLEET_PARENT_PROFILE", "ORCA_PARENT_PROFILE", env, ""),
+                raw_prof = flags.get("profile") or env_get(
+                    "OPEN_FLEET_SANDBOX_PROFILE",
+                    "ORCA_SANDBOX_PROFILE",
+                    env,
+                    os.environ.get("PROFILE", "rw"),
                 )
+                raw_parent = flags.get("parent-profile") or env_get(
+                    "OPEN_FLEET_PARENT_PROFILE",
+                    "ORCA_PARENT_PROFILE",
+                    env,
+                    "",
+                )
+                kw: dict[str, Any] = {
+                    "task_id": flags.get("task", ""),
+                    "worktree": flags.get("worktree", "new-child"),
+                    "agent": flags.get("agent", "claude"),
+                    "name": flags.get("name"),
+                    "run": flags.get("run"),
+                    "sender": flags.get("from"),
+                    "timeout_ms": int(flags["timeout-ms"]) if "timeout-ms" in flags else None,
+                    "on_env": flags.get("on"),
+                    "retry_of": flags.get("retry-of"),
+                    "retry_request": flags.get("retry-request"),
+                    "profile": str(raw_prof),
+                    "parent_profile": str(raw_parent),
+                }
+                if "prompt" in flags:
+                    kw["prompt"] = str(flags["prompt"])
+                return self.worker_start(**kw)
             if sub == "worker-list":
                 return self.worker_list(
                     run=flags.get("run"),
@@ -508,11 +523,14 @@ class RuntimeProvider:
                 )
             if sub in ("worker-stop", "worker-abandon", "worker-release", "worker-retain"):
                 verb = sub.split("-", 1)[1]
-                return self.worker_fence(
-                    verb=verb,
-                    dispatch_id=flags.get("dispatch", ""),
-                    reason=flags.get("reason"),
-                )
+                fence_kw: dict[str, Any] = {
+                    "verb": verb,
+                    "dispatch_id": flags.get("dispatch", ""),
+                    "reason": flags.get("reason"),
+                }
+                if "verified" in flags:
+                    fence_kw["verified"] = flags["verified"] is True or str(flags["verified"]).lower() in ("1", "true", "yes")
+                return self.worker_fence(**fence_kw)
             if sub == "dispatch":
                 return self.dispatch_inject(
                     task_id=flags.get("task", ""),

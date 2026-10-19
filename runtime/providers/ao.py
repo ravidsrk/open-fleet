@@ -99,10 +99,33 @@ class ComposioAOProvider(RuntimeProvider):
             return res
         return {"result": res}
 
-    def preserve_worktree_ref(self, session_id: str, head_sha: str = "HEAD") -> str:
-        """Preserve the worktree HEAD commit under `refs/ao/preserved/<id>` before cleanup."""
+    def preserve_worktree_ref(
+        self,
+        session_id: str,
+        head_sha: str | None = None,
+        worktree_path: str | None = None,
+    ) -> str:
+        """Preserve the worker worktree HEAD commit under `refs/ao/preserved/<id>` before cleanup."""
         ref_name = f"refs/ao/preserved/{session_id}"
-        self._invoke(["git", "update-ref", ref_name, head_sha])
+        wt_dir = worktree_path
+        if not wt_dir:
+            with self.state._connect() as conn:
+                row = conn.execute(
+                    "SELECT worktree FROM dispatches WHERE dispatch_id = ? OR session_id = ? LIMIT 1",
+                    (session_id, session_id),
+                ).fetchone()
+                if row and row["worktree"] and row["worktree"] not in ("new-child", "new-top-level", "current", "active"):
+                    wt_dir = str(row["worktree"])
+        target_sha = head_sha or "HEAD"
+        if wt_dir and (not head_sha or head_sha == "HEAD"):
+            rev = self._invoke(["git", "-C", str(wt_dir), "rev-parse", "HEAD"])
+            resolved = str(rev.get("stdout") or rev.get("sha") or rev.get("result") or "").strip()
+            if resolved:
+                target_sha = resolved
+        if wt_dir:
+            self._invoke(["git", "-C", str(wt_dir), "update-ref", ref_name, target_sha])
+        else:
+            self._invoke(["git", "update-ref", ref_name, target_sha])
         self.preserved_refs[session_id] = ref_name
         return ref_name
 

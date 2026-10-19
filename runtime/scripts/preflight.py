@@ -281,7 +281,9 @@ def _capabilities_refusal(
 
     provider_name = runtime.strip().lower()
     if provider_name == "auto":
-        provider_name = "orca" if _which("orca") else "posix"
+        override = (os.environ.get("OPEN_FLEET_CLI_COMMAND") or os.environ.get("ORCA_CLI_COMMAND") or "").strip()
+        platform_bin = "orca" if sys.platform == "darwin" else "orca-ide"
+        provider_name = "orca" if (override or _which(platform_bin)) else "posix"
     if provider_name not in providers:
         known = ", ".join(sorted(providers))
         msg = f"unknown_runtime: {runtime!r} is not a registered RPI provider (known: {known})"
@@ -381,9 +383,20 @@ def main(argv: list[str]) -> int:
 
     runtime_provider = _active_runtime(args.runtime)
     effective_mode = args.mode
-    if effective_mode == "write" and not args.base and not args.offline:
-        if args.runtime or (args.mission and runtime_provider):
-            effective_mode = "readonly"
+
+    # Capability check (#586): when --runtime (or OPEN_FLEET_RUNTIME /
+    # ORCA_FLEET_RUNTIME) is active, validate provider and mission capabilities
+    # fail-closed before usage/branch checks so incompatible missions exit 2.
+    cap_info: dict[str, Any] | None = None
+    if runtime_provider:
+        cap_refusal, cap_info = _capabilities_refusal(
+            args.mission, runtime_provider, strict_native=args.strict_native
+        )
+        if cap_refusal:
+            if args.json:
+                print(json.dumps(cap_info))
+            print(f"preflight: ERROR: {cap_refusal}", file=sys.stderr)
+            return 2
 
     # Usage errors are exit 1 (contract: 0=OK, 1=usage/dependency, 2=invariant).
     # _UsageExit1Parser remaps argparse's own SystemExit(2) the same way.
@@ -427,19 +440,6 @@ def main(argv: list[str]) -> int:
         refusal = _quarantine_refusal(args.mission)
         if refusal:
             print(f"preflight: ERROR: QUARANTINED {refusal}", file=sys.stderr)
-            return 2
-
-    # 2c. Capability check (#586): when --runtime (or OPEN_FLEET_RUNTIME /
-    #     ORCA_FLEET_RUNTIME) is active, validate provider and mission capabilities.
-    cap_info: dict[str, Any] | None = None
-    if runtime_provider:
-        cap_refusal, cap_info = _capabilities_refusal(
-            args.mission, runtime_provider, strict_native=args.strict_native
-        )
-        if cap_refusal:
-            if args.json:
-                print(json.dumps(cap_info))
-            print(f"preflight: ERROR: {cap_refusal}", file=sys.stderr)
             return 2
 
     if effective_mode == "readonly":

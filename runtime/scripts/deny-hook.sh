@@ -1043,8 +1043,16 @@ if db_path and (repo_root / "runtime" / "providers" / "local_state.py").is_file(
         sys.path.insert(0, str(repo_root))
     mod = importlib.import_module("runtime.providers.local_state")
     store = mod.LocalStateStore(db_path)
-    worker_id = os.environ.get("OPEN_FLEET_WORKER_ID") or os.environ.get("ORCA_WORKER_ID") or "worker"
-    run_id = os.environ.get("OPEN_FLEET_RUN_ID") or os.environ.get("ORCA_RUN_ID") or ""
+    worker_id = (
+        os.environ.get("OPEN_FLEET_WORKER_ID")
+        or os.environ.get("ORCA_WORKER_ID")
+        or os.environ.get("OPEN_FLEET_DISPATCH_ID")
+        or os.environ.get("ORCA_DISPATCH_ID")
+        or os.environ.get("OPEN_FLEET_TERMINAL_HANDLE")
+        or os.environ.get("ORCA_TERMINAL_HANDLE")
+        or "worker"
+    )
+    run_id = os.environ.get("OPEN_FLEET_RUN_ID") or os.environ.get("ORCA_RUN_ID") or "default"
     op = sys.argv[2].lower()
     paths = [sys.argv[3]]
     for ln in sys.argv[4].splitlines()[3:]:

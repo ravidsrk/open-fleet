@@ -92,18 +92,32 @@ class VibeKanbanProvider(RuntimeProvider):
         self,
         worktree: str,
         *,
-        head_subject: str,
+        head_subject: str | None = None,
         strip_auto_commit: bool = True,
     ) -> dict[str, Any]:
         """Detect and strip/reject Vibe-Kanban's `Changes from coding agent` auto-commit (`container.rs:570`)."""
-        is_auto = head_subject.strip().startswith(VIBE_KANBAN_AUTO_COMMIT_PREFIX)
+        subj = head_subject
+        if subj is None and worktree and worktree not in ("new-child", "new-top-level", "current", "active"):
+            wt_p = Path(worktree)
+            if (wt_p / ".git").exists():
+                import subprocess
+
+                proc = subprocess.run(
+                    ["git", "-C", str(wt_p), "log", "-1", "--format=%s"],
+                    capture_output=True,
+                    text=True,
+                )
+                if proc.returncode == 0:
+                    subj = proc.stdout.strip()
+        subj = subj or ""
+        is_auto = subj.strip().startswith(VIBE_KANBAN_AUTO_COMMIT_PREFIX)
         if not is_auto:
-            return {"autoCommitDetected": False, "stripped": False, "headSubject": head_subject}
+            return {"autoCommitDetected": False, "stripped": False, "headSubject": subj}
         if not strip_auto_commit:
             raise ProviderError(
                 "unverified_auto_commit",
-                f"Vibe-Kanban spawn_exit_monitor auto-commit {head_subject!r} is not a worker-verified commit",
-                {"worktree": worktree, "headSubject": head_subject},
+                f"Vibe-Kanban spawn_exit_monitor auto-commit {subj!r} is not a worker-verified commit",
+                {"worktree": worktree, "headSubject": subj},
             )
         self._request(
             "POST",
@@ -191,6 +205,7 @@ class VibeKanbanProvider(RuntimeProvider):
             "profile_flag": harness["profile_flag"],
             "attemptId": attempt_id,
             "executionProcessId": proc_id,
+            "stripAutoCommit": strip_auto_commit,
             "autoCommitGuard": auto_commit_status,
         }
         now = time.time()
@@ -218,29 +233,74 @@ class VibeKanbanProvider(RuntimeProvider):
         self.state.save_request(retry_request, "worker-start", "ready", res)
         return res
 
+    def _resolve_dispatch_meta(self, dispatch_id: str) -> tuple[str, str, bool]:
+        proc_id = dispatch_id
+        wt = ""
+        strip_auto = True
+        with self.state._connect() as conn:
+            row = conn.execute(
+                "SELECT worktree, session_id, launch_effective FROM dispatches WHERE dispatch_id = ?",
+                (dispatch_id,),
+            ).fetchone()
+            if row:
+                if row["session_id"]:
+                    proc_id = str(row["session_id"])
+                wt = str(row["worktree"] or "")
+                try:
+                    eff = json.loads(row["launch_effective"] or "{}")
+                    if "stripAutoCommit" in eff:
+                        strip_auto = bool(eff["stripAutoCommit"])
+                except json.JSONDecodeError:
+                    strip_auto = True
+        return proc_id, wt, strip_auto
+
     def worker_read(self, *, dispatch_id: str = "", source: str = "transcript", limit: int = 50, **kwargs: Any) -> dict[str, Any]:
-        raw = self._request("GET", f"/api/execution-processes/{dispatch_id}/NormalizedLogs")
+        proc_id, _, _ = self._resolve_dispatch_meta(dispatch_id)
+        raw = self._request("GET", f"/api/execution-processes/{proc_id}/NormalizedLogs")
         logs = raw.get("logs", raw.get("items", []))
         if limit and isinstance(logs, list):
             logs = logs[-limit:]
-        return {"dispatchId": dispatch_id, "source": source, "logs": logs, "upstream": raw}
+        return {"dispatchId": dispatch_id, "executionProcessId": proc_id, "source": source, "logs": logs, "upstream": raw}
 
     def worker_list(self, **kwargs: Any) -> dict[str, Any]:
         raw = self._request("GET", "/api/task-attempts")
         return {"workers": raw.get("attempts", raw.get("items", [])), "upstream": raw}
 
-    def worker_show(self, *, dispatch_id: str = "", **kwargs: Any) -> dict[str, Any]:
+    def worker_show(
+        self,
+        *,
+        dispatch_id: str = "",
+        head_subject: str | None = None,
+        strip_auto_commit: bool | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        _, wt, saved_strip = self._resolve_dispatch_meta(dispatch_id)
         raw = self._request("GET", f"/api/task-attempts/{dispatch_id}")
-        return {"dispatchId": dispatch_id, "worker": raw}
+        subj = head_subject if head_subject is not None else raw.get("head_subject")
+        strip_flag = saved_strip if strip_auto_commit is None else strip_auto_commit
+        guard = self.inspect_or_strip_auto_commit(wt, head_subject=subj, strip_auto_commit=strip_flag)
+        return {"dispatchId": dispatch_id, "worker": raw, "autoCommitGuard": guard}
 
-    def worker_fence(self, *, verb: str, dispatch_id: str = "", reason: str | None = None, **kwargs: Any) -> dict[str, Any]:
+    def worker_fence(
+        self,
+        *,
+        verb: str,
+        dispatch_id: str = "",
+        reason: str | None = None,
+        head_subject: str | None = None,
+        strip_auto_commit: bool | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        _, wt, saved_strip = self._resolve_dispatch_meta(dispatch_id)
+        strip_flag = saved_strip if strip_auto_commit is None else strip_auto_commit
+        guard = self.inspect_or_strip_auto_commit(wt, head_subject=head_subject, strip_auto_commit=strip_flag)
         raw = self._request("POST", f"/api/task-attempts/{dispatch_id}/stop", {"verb": verb, "reason": reason})
         with self.state._connect() as conn:
             conn.execute(
                 "UPDATE dispatches SET state = ?, terminal_state = 'fenced', updated_at = ? WHERE dispatch_id = ?",
                 (verb, time.time(), dispatch_id),
             )
-        return {"dispatchId": dispatch_id, "verb": verb, "state": verb, "reason": reason, "upstream": raw}
+        return {"dispatchId": dispatch_id, "verb": verb, "state": verb, "reason": reason, "autoCommitGuard": guard, "upstream": raw}
 
     # --- Task DAG, Mailbox & Gates (`LocalStateStore`) ---
     def task_create(self, **kwargs: Any) -> dict[str, Any]:

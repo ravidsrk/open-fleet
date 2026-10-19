@@ -124,6 +124,12 @@ class OpenHandsProvider(RuntimeProvider):
             return cached
 
         check_monotonic_profile(parent_profile, profile)
+        resolved_prompt = prompt
+        if not resolved_prompt and task_id:
+            with self.state._connect() as conn:
+                t_row = conn.execute("SELECT spec, title FROM tasks WHERE id = ?", (task_id,)).fetchone()
+                if t_row:
+                    resolved_prompt = str(t_row["spec"] or t_row["title"] or "")
 
         hooks_cfg: dict[str, Any] = {}
         if profile == "ro":
@@ -165,7 +171,7 @@ class OpenHandsProvider(RuntimeProvider):
             "tools": tools,
             "disabled_tools": disabled_tools,
             "hooks": hooks_cfg,
-            "initial_prompt": prompt or "",
+            "initial_prompt": resolved_prompt or "",
         }
         created = self._request("POST", "/api/conversations", conv_payload)
         conv_id = str(created.get("conversation_id") or created.get("id") or f"oh_conv_{uuid.uuid4().hex[:10]}")
