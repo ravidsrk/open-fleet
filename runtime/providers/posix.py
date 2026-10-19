@@ -594,9 +594,20 @@ if {repr(self.backend)} == "cmux":
         )
         full_command = " ".join(shlex.quote(str(a)) for a in launch["argv"])
         if profile == "danger" and sandbox_recipe:
+            extra_mounts = ""
+            if (Path(wt_path) / ".git").is_file():
+                gp = subprocess.run(
+                    ["git", "-C", wt_path, "rev-parse", "--git-common-dir"],
+                    capture_output=True,
+                    text=True,
+                )
+                if gp.returncode == 0 and gp.stdout.strip():
+                    common_dir = str((Path(wt_path) / gp.stdout.strip()).resolve())
+                    extra_mounts = f"-v {shlex.quote(common_dir)}:{shlex.quote(common_dir)} "
             full_command = (
                 f"docker run --rm -w {shlex.quote(wt_path)} "
                 f"-v {shlex.quote(wt_path)}:{shlex.quote(wt_path)} "
+                f"{extra_mounts}"
                 f"{shlex.quote(sandbox_recipe)} sh -c {shlex.quote(full_command)}"
             )
 
@@ -1017,9 +1028,10 @@ if {repr(self.backend)} == "cmux":
             term_row = conn.execute("SELECT * FROM terminals WHERE handle = ?", (to_handle,)).fetchone()
             if not term_row:
                 raise ProviderError("inject_rejected", f"terminal {to_handle!r} not found")
-            conn.execute("UPDATE tasks SET status = 'dispatched', updated_at = ? WHERE id = ?", (time.time(), task_id))
         injected_line = json.dumps({"type": "injected_prompt", "taskId": task_id, "spec": t_row["spec"]})
         self._deliver_terminal_input(term_row, injected_line, enter=True)
+        with self.state._connect() as conn:
+            conn.execute("UPDATE tasks SET status = 'dispatched', updated_at = ? WHERE id = ?", (time.time(), task_id))
         return {
             "injected": True,
             "prompt": {

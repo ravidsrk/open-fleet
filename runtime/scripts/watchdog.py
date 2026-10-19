@@ -326,13 +326,8 @@ def decide(worker, now, cfg, state):
     if waiting_input:
         return "OK", "none", {"waiting_input": True}, "waiting on human gate (nudge suppressed)"
     classification, evidence = classify(worker, now, cfg)
-    if classification in ("OK", "SLOW", "SETTLED"):
-        return classification, "none", evidence, "slow-but-alive is not stuck"
-    if classification == "WEDGED":
-        return classification, "recommend", evidence, \
-            "wedged: stop + re-dispatch fresh (coordinator decision)"
     ci_checks = worker.get("ci_checks")
-    if isinstance(ci_checks, list) and ci_checks:
+    if isinstance(ci_checks, list) and ci_checks and classification in ("OK", "SLOW"):
         entry = state.get("workers", {}).get(wid, {})
         if isinstance(entry, dict) and entry.get("dispatch_id") == dispatch_id:
             prior_sigs = set(entry.get("ci_signatures") or [])
@@ -340,9 +335,16 @@ def decide(worker, now, cfg, state):
             prior_sigs = set()
         seen_map = {wid: prior_sigs}
         ok_ci, sig = should_nudge_ci(wid, ci_checks, seen_map, waiting_input=waiting_input)
-        evidence = {**evidence, "ci_signature": sig}
-        if not ok_ci:
+        if sig:
+            evidence = {**evidence, "ci_signature": sig}
+            if ok_ci:
+                return classification, "nudge", evidence, f"new CI failure signature {sig[:12]}"
             return classification, "none", evidence, f"duplicate CI failure signature {sig[:12]} suppressed"
+    if classification in ("OK", "SLOW", "SETTLED"):
+        return classification, "none", evidence, "slow-but-alive is not stuck"
+    if classification == "WEDGED":
+        return classification, "recommend", evidence, \
+            "wedged: stop + re-dispatch fresh (coordinator decision)"
     allowed, reason = nudge_allowed(wid, dispatch_id, worker, state, now, cfg)
     if allowed:
         return classification, "nudge", evidence, reason
