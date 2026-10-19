@@ -34,10 +34,30 @@
 # value binds a run to COMMITTABLE content only; the coordinator's clean-env re-run at head_sha is
 # what catches a pass that leaned on anything else.
 #
-# Usage: wtree.sh [repo-dir]        # default: the current directory
+# Usage:
+#   wtree.sh [repo-dir]                            # default: the current directory
+#   wtree.sh predict-merge <base> <branch> [repo]  # 3-way merge conflict prediction in memory
 # Exit 1 outside a git repo, or in a repo with no commits and no usable index — callers MUST treat
 # a non-zero exit as "no fingerprint" and fail closed, never as an empty one.
 set -eu
+
+if [ "${1:-}" = "predict-merge" ]; then
+  if [ $# -lt 3 ]; then
+    echo "usage: wtree.sh predict-merge <base> <branch> [repo-dir]" >&2
+    exit 2
+  fi
+  _BASE="$2"
+  _BRANCH="$3"
+  _REPO="${4:-.}"
+  exec python3 "$(dirname -- "$0")/diff_scope.py" --repo "$_REPO" --predict-merge "$_BASE" "$_BRANCH"
+fi
+if [ "${2:-}" = "predict-merge" ]; then
+  if [ $# -lt 4 ]; then
+    echo "usage: wtree.sh <repo-dir> predict-merge <base> <branch>" >&2
+    exit 2
+  fi
+  exec python3 "$(dirname -- "$0")/diff_scope.py" --repo "$1" --predict-merge "$3" "$4"
+fi
 
 TARGET="${1:-.}"
 TOP=$(git -C "$TARGET" rev-parse --show-toplevel 2>/dev/null) || exit 1

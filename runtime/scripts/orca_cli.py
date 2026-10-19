@@ -45,9 +45,34 @@ import shutil
 import subprocess
 import sys
 
+from pathlib import Path
+
 LINUX_COMMAND = "orca-ide"
 DEFAULT_COMMAND = "orca"
 DEV_COMMAND = "orca-dev"
+
+_PROVIDER_DOMAINS = frozenset({
+    "orchestration", "worktree", "terminal", "vm",
+    "search", "environment", "linear", "jira", "reference",
+})
+
+
+def _active_non_orca_runtime(env=None) -> str:
+    env = os.environ if env is None else env
+    if (env.get("OPEN_FLEET_CLI_COMMAND") or env.get("ORCA_CLI_COMMAND") or "").strip():
+        return ""
+    rt = (env.get("OPEN_FLEET_RUNTIME") or env.get("ORCA_FLEET_RUNTIME") or "").strip().lower()
+    if rt and rt != "orca":
+        return rt
+    return ""
+
+
+def _load_providers():
+    root = str(Path(__file__).resolve().parent.parent.parent)
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    from runtime import providers
+    return providers
 
 
 def resolve(env=None, system=None) -> str:
@@ -56,9 +81,11 @@ def resolve(env=None, system=None) -> str:
     `env` and `system` are injectable for tests; production callers pass nothing.
     """
     env = os.environ if env is None else env
-    configured = (env.get("ORCA_CLI_COMMAND") or "").strip()
+    configured = (env.get("OPEN_FLEET_CLI_COMMAND") or env.get("ORCA_CLI_COMMAND") or "").strip()
     if configured:
         return configured
+    if _active_non_orca_runtime(env):
+        return str(Path(__file__).resolve())
     if (env.get("ORCA_DEV_REPO_ROOT") or "").strip():
         return DEV_COMMAND
     system = platform.system() if system is None else system
@@ -69,6 +96,16 @@ def resolve(env=None, system=None) -> str:
 
 def run_json(argv, *, timeout, error, nonzero="strict"):
     """Run `<resolved cli> *argv --json`; return the envelope's result object or raise `error`."""
+    if _active_non_orca_runtime():
+        providers = _load_providers()
+        try:
+            clean = [a for a in argv if a != "--json"]
+            res = providers.get_provider().dispatch(clean)
+            return res if isinstance(res, dict) else {}
+        except providers.ProviderError as exc:
+            raise error(f"orca refused: {exc.code}")
+        except Exception as exc:
+            raise error(f"could not run orca: {exc}")
     try:
         proc = subprocess.run([resolve(), *argv, "--json"],
                               capture_output=True, text=True, timeout=timeout)
@@ -92,6 +129,15 @@ def run_json(argv, *, timeout, error, nonzero="strict"):
     return result
 
 
+def _pinned_version() -> str:
+    pins_path = Path(__file__).resolve().parent.parent / "pins.json"
+    try:
+        data = json.loads(pins_path.read_text(encoding="utf-8"))
+        return (data.get("orca") or {}).get("version") or "v1.4.229"
+    except Exception:
+        return "v1.4.229"
+
+
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv == []:
@@ -99,15 +145,33 @@ def main(argv=None) -> int:
         return 0
     if argv == ["--path"]:
         name = resolve()
-        found = shutil.which(name)
+        found = (name if (os.path.isabs(name) and os.path.isfile(name) and os.access(name, os.X_OK))
+                 else shutil.which(name))
         if not found:
             print(f"orca_cli: `{name}` is not on PATH", file=sys.stderr)
             return 1
         print(found)
         return 0
+    if argv == ["--version"]:
+        print(f"open-fleet-rpi {_pinned_version()}")
+        return 0
+    if argv and argv[0] in _PROVIDER_DOMAINS:
+        providers = _load_providers()
+        clean = [a for a in argv if a != "--json"]
+        try:
+            res = providers.get_provider().dispatch(clean)
+            print(json.dumps({"ok": True, "result": res}))
+            return 0
+        except providers.ProviderError as exc:
+            print(json.dumps(exc.to_envelope()))
+            return 1
+        except Exception as exc:
+            print(json.dumps({"ok": False, "error": {"code": "runtime_error", "message": str(exc)}}))
+            return 1
     print("usage: orca_cli.py [--path]", file=sys.stderr)
     return 2
 
 
 if __name__ == "__main__":
     sys.exit(main())
+

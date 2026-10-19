@@ -12,7 +12,7 @@ description: >-
   one wave's diff is ship-it's doc-sync unit, and stale runtime doctrine is pin-it.
 license: MIT
 compatibility: >-
-  HARD dependency: Orca runtime + the orchestration skill (Orca CLI). git + gh. A machine-derivable
+  HARD dependency: open-fleet RPI runtime (Orca, posix, t3code, ao+). git + gh. A machine-derivable
   public surface (an extractor script the repo has or the run writes) and a runnable claim check.
   Where the docs live in a framework (Docusaurus, MkDocs, Nextra), its build must run locally. One
   worker playbook pack per worker (matt or addy) — never two routers in one worker.

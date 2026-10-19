@@ -12,7 +12,7 @@ description: >-
   sweep). Not the full security loop (harden-it).
 license: MIT
 compatibility: >-
-  HARD dependency: Orca runtime + orchestration skill (Orca CLI). git + gh. Review worker playbooks
+  HARD dependency: open-fleet RPI runtime (Orca, posix, adapter). git + gh. Review worker playbooks
   (mattpocock code-review, addyosmani specialists, gstack review army) — one router per worker.
 metadata:
   proof: external-run

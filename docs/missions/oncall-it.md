@@ -29,7 +29,7 @@
 > make this operable: <the service or path set>
 ```
 
-**Needs** (the skill's `compatibility` field, verbatim): HARD dependency: Orca runtime + the orchestration skill (Orca CLI). git + gh. The target's own logging/metrics/tracing libraries and a backend that can be queried, a staging environment whose failures can be induced, and an alert destination the fleet can observe receiving a test fire. One worker playbook pack per worker (matt or addy) — never two routers in one worker.
+**Needs** (the skill's `compatibility` field, verbatim): HARD dependency: open-fleet RPI runtime (Orca, posix, t3code, ao+). git + gh. The target's own logging/metrics/tracing libraries and a backend that can be queried, a staging environment whose failures can be induced, and an alert destination the fleet can observe receiving a test fire. One worker playbook pack per worker (matt or addy) — never two routers in one worker.
 
 ## What to provide
 

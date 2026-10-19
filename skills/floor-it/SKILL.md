@@ -13,7 +13,7 @@ description: >-
   external-framework conformance (attest-it), or a threat-model loop (harden-it).
 license: MIT
 compatibility: >-
-  HARD dependency: Orca runtime + orchestration skill (Orca CLI). git + gh. The target repo's
+  HARD dependency: open-fleet RPI runtime (Orca, posix, adapter). git + gh. The target repo's
   toolchain for each dimension's tool (coverage, linter, perf harness, axe-core…). CI write access
   on BASE. A worker pack (matt | addy | gstack) — one router per worker.
 metadata:

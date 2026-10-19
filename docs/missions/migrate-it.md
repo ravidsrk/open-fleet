@@ -29,7 +29,7 @@
 > migrate the database: <table> — <the shape change>, no downtime
 ```
 
-**Needs** (the skill's `compatibility` field, verbatim): HARD dependency: Orca runtime + the orchestration skill (Orca CLI). git + gh. The project's own migration runner and a database the fleet can migrate and dump (a schema-dump command is the down-path oracle), plus a deploy path per phase and read/write telemetry for the zero-reader window. One worker playbook pack per worker (matt or addy) — never two routers in one worker.
+**Needs** (the skill's `compatibility` field, verbatim): HARD dependency: open-fleet RPI runtime (Orca, posix, t3code, ao+). git + gh. The project's own migration runner and a database the fleet can migrate and dump (a schema-dump command is the down-path oracle), plus a deploy path per phase and read/write telemetry for the zero-reader window. One worker playbook pack per worker (matt or addy) — never two routers in one worker.
 
 ## What to provide
 

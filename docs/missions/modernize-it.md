@@ -28,7 +28,7 @@
 > update the dependencies
 ```
 
-**Needs** (the skill's `compatibility` field, verbatim): HARD dependency: Orca runtime + orchestration skill (Orca CLI). git + gh; the package manager + a green CI baseline. addyosmani deprecation-and-migration playbook — one router per worker.
+**Needs** (the skill's `compatibility` field, verbatim): HARD dependency: open-fleet RPI runtime (Orca, posix, adapter). git + gh; the package manager + a green CI baseline. addyosmani deprecation-and-migration playbook — one router per worker.
 
 ## What to provide
 

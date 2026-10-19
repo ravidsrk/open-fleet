@@ -31,7 +31,7 @@
 > contribute to <upstream owner/repo>: <the issues to take on>
 ```
 
-**Needs** (the skill's `compatibility` field, verbatim): HARD dependency: Orca runtime + the orchestration skill (Orca CLI). git + gh, a FORK you can push to, and READ on the upstream repo. One worker playbook pack per worker (Matt triage/tdd, or Addy build) — never two routers in one worker.
+**Needs** (the skill's `compatibility` field, verbatim): HARD dependency: open-fleet RPI runtime (Orca, posix, t3code, ao+). git + gh, a FORK you can push to, and READ on the upstream repo. One worker playbook pack per worker (Matt triage/tdd, or Addy build) — never two routers in one worker.
 
 ## What to provide
 

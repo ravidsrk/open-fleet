@@ -11,7 +11,7 @@ description: >-
   (review-it), or closing a discovered backlog (clean-sweep).
 license: MIT
 compatibility: >-
-  HARD dependency: Orca runtime + orchestration skill (Orca CLI). git + gh; a FROZEN standard catalog
+  HARD dependency: open-fleet RPI runtime (Orca, posix, adapter). git + gh; a FROZEN standard catalog
   (standard@version) as the denominator. A review/verify worker playbook (addyosmani specialists,
   mattpocock code-review, gstack review army) — one router per worker.
 metadata:

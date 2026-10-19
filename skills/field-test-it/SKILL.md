@@ -12,7 +12,7 @@ description: >-
   it), framework/dependency upgrades (modernize-it), or a PR verdict (review-it).
 license: MIT
 compatibility: >-
-  HARD dependency: Orca runtime + orchestration skill (Orca CLI) plus the Orca emulator skills
+  HARD dependency: open-fleet RPI runtime (Orca, posix, adapter) plus the Orca emulator skills
   (orca-emulator for iOS simulators, orca-emulator-android for Android) or a paired physical
   device. git + gh. The app's own build/run toolchain. A fix worker playbook pack (mattpocock,
   addyosmani, gstack) — one router per worker.

@@ -10,7 +10,7 @@ description: >-
   post-deploy watch alone (observe via ship-it).
 license: MIT
 compatibility: >-
-  HARD dependency: Orca runtime + orchestration skill (Orca CLI). git + gh. A real MEASUREMENT path
+  HARD dependency: open-fleet RPI runtime (Orca, posix, adapter). git + gh. A real MEASUREMENT path
   (Lighthouse/DevTools for web CWV, or a load/profiler harness). A perf worker playbook (addyosmani
   performance-optimization or gstack benchmark) — one router per worker.
 metadata:

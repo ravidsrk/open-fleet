@@ -29,7 +29,7 @@
 > set the quality bar
 ```
 
-**Needs** (the skill's `compatibility` field, verbatim): HARD dependency: Orca runtime + orchestration skill (Orca CLI). git + gh. The target repo's toolchain for each dimension's tool (coverage, linter, perf harness, axe-core…). CI write access on BASE. A worker pack (matt | addy | gstack) — one router per worker.
+**Needs** (the skill's `compatibility` field, verbatim): HARD dependency: open-fleet RPI runtime (Orca, posix, adapter). git + gh. The target repo's toolchain for each dimension's tool (coverage, linter, perf harness, axe-core…). CI write access on BASE. A worker pack (matt | addy | gstack) — one router per worker.
 
 ## What to provide
 

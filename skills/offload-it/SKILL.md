@@ -12,7 +12,7 @@ description: >-
   (field-test-it CLEAN-ENV), or re-pinning runtime doctrine (pin-it).
 license: MIT
 compatibility: >-
-  HARD dependency: Orca runtime + orchestration skill (Orca CLI) with vm recipe doctor. A
+  HARD dependency: open-fleet RPI runtime (Orca, posix, adapter) with vm recipe doctor. A
   provider account + CLI with a sandbox/VM plan, and the provider's own docs for its verbs. An
   agent CLI + account for the auth snapshot. git + gh. One worker playbook pack per worker
   (matt or addy) — never two routers in one worker.

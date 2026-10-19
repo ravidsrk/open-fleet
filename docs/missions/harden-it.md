@@ -29,7 +29,7 @@
 > harden this: <the system and its trust boundaries>
 ```
 
-**Needs** (the skill's `compatibility` field, verbatim): HARD dependency: Orca runtime + orchestration skill (Orca CLI). git + gh; gitleaks. A security worker playbook (addyosmani security-and-hardening or gstack /cso — v3 runs only through its compiled launcher, and --comprehensive also needs Docker) — one router per worker. An ephemeral per-workspace sandbox (sandbox-policy) for exploit PoCs that can't run safely on the host.
+**Needs** (the skill's `compatibility` field, verbatim): HARD dependency: open-fleet RPI runtime (Orca, posix, adapter). git + gh; gitleaks. A security worker playbook (addyosmani security-and-hardening or gstack /cso — v3 runs only through its compiled launcher, and --comprehensive also needs Docker) — one router per worker. An ephemeral per-workspace sandbox (sandbox-policy) for exploit PoCs that can't run safely on the host.
 
 ## What to provide
 

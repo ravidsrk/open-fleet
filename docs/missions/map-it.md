@@ -29,7 +29,7 @@
 > chart this: <the goal you cannot write acceptance criteria for yet>
 ```
 
-**Needs** (the skill's `compatibility` field, verbatim): HARD dependency: Orca runtime + orchestration skill (Orca CLI). A wayfinder/research worker playbook (mattpocock wayfinder + research) — one router per worker.
+**Needs** (the skill's `compatibility` field, verbatim): HARD dependency: open-fleet RPI runtime (Orca, posix, adapter). A wayfinder/research worker playbook (mattpocock wayfinder + research) — one router per worker.
 
 ## What to provide
 

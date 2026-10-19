@@ -33,7 +33,7 @@
 > review this PR: <number or branch> — is it ready to merge?
 ```
 
-**Needs** (the skill's `compatibility` field, verbatim): HARD dependency: Orca runtime + orchestration skill (Orca CLI). git + gh. Review worker playbooks (mattpocock code-review, addyosmani specialists, gstack review army) — one router per worker.
+**Needs** (the skill's `compatibility` field, verbatim): HARD dependency: open-fleet RPI runtime (Orca, posix, adapter). git + gh. Review worker playbooks (mattpocock code-review, addyosmani specialists, gstack review army) — one router per worker.
 
 ## What to provide
 

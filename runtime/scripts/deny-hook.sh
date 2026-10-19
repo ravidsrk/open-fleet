@@ -192,62 +192,91 @@ def refuse(reason):
 
 
 try:
-    settings = json.loads(path.read_text(encoding="utf-8"))
-except (OSError, UnicodeDecodeError, ValueError) as err:
+    raw_text = path.read_text(encoding="utf-8")
+except (OSError, UnicodeDecodeError) as err:
     sys.exit(refuse(f"settings unreadable ({err})"))
 
-def covers(matcher, tool):
-    # Claude matchers are regexes tested against the tool name; a bare `*`
-    # is the documented match-all spelling. Judge the pattern itself — a
-    # valid `.*` covers every tool and must not refuse a spawn; an invalid
-    # pattern arms nothing (PR #569 review).
-    matcher = str(matcher)
-    if matcher.strip() == "*":
-        return True
-    try:
-        return re.fullmatch(matcher, tool) is not None
-    except re.error:
-        return False
-
-
-# Coverage is per tool across ALL entries: an operator may register the
-# hook under separate Bash and Edit|Write entries, and that guards both
-# just the same (PR #569 review).
-entries = (settings.get("hooks") or {}).get("PreToolUse") or []
-commands = {}
-for entry in entries:
-    if not isinstance(entry, dict):
-        continue
-    for hook in entry.get("hooks") or []:
-        if not (isinstance(hook, dict) and hook.get("type") == "command"
-                and "deny-hook.sh" in str(hook.get("command", ""))):
-            continue
-        for tool in ("Bash", "Edit"):
-            if tool not in commands and covers(entry.get("matcher", ""), tool):
-                commands[tool] = str(hook["command"])
-missing = [tool for tool in ("Bash", "Edit") if tool not in commands]
-if missing:
-    sys.exit(refuse(
-        "no PreToolUse registration of deny-hook.sh covers "
-        + " and ".join(missing)
-        + " (a mention elsewhere in the file is not a registration)"))
-
 env = dict(os.environ)
-registered_env = settings.get("env") or {}
-if not isinstance(registered_env, dict):
-    sys.exit(refuse("settings env is not an object"))
-env.update({str(k): str(v) for k, v in registered_env.items()})
 
 
 def boundary_for(command):
-    # The boundary a registered command actually runs with: an inline
-    # assignment (`ORCA_UNIT_WORKTREE=/path …/deny-hook.sh`, likewise via
-    # env) binds it as surely as the settings env does (PR #569 review).
-    m = re.search(r"ORCA_UNIT_WORKTREE=(\"[^\"]*\"|'[^']*'|\S+)", command)
+    m = re.search(
+        r"(?:OPEN_FLEET_UNIT_WORKTREE|ORCA_UNIT_WORKTREE)=(\"[^\"]*\"|'[^']*'|\S+)",
+        command,
+    )
     if m:
         return m.group(1).strip("\"'")
-    return env.get("ORCA_UNIT_WORKTREE", "")
+    return env.get("OPEN_FLEET_UNIT_WORKTREE") or env.get("ORCA_UNIT_WORKTREE") or ""
 
+
+commands = {}
+if path.suffix in (".ts", ".js"):
+    if "deny-hook.sh" not in raw_text or (
+        "tool.execute.before" not in raw_text and "PreToolUse" not in raw_text
+    ):
+        sys.exit(refuse("plugin does not wire deny-hook.sh on tool.execute.before"))
+    m_cmd = re.search(
+        r"((?:(?:OPEN_FLEET_UNIT_WORKTREE|ORCA_UNIT_WORKTREE)=\S+\s+)?(?:sh\s+)?[^\s\"'`]+deny-hook\.sh)",
+        raw_text,
+    )
+    if not m_cmd:
+        sys.exit(refuse("could not extract deny-hook.sh command from plugin"))
+    cmd_str = m_cmd.group(1).strip("\"'`")
+    m_wt = re.search(
+        r"(?:OPEN_FLEET_UNIT_WORKTREE|ORCA_UNIT_WORKTREE)\s*[:=]\s*[\"']([^\"']+)[\"']",
+        raw_text,
+    )
+    if m_wt and not boundary_for(cmd_str):
+        env["ORCA_UNIT_WORKTREE"] = m_wt.group(1)
+    commands = {"Bash": cmd_str, "Edit": cmd_str}
+else:
+    try:
+        settings = json.loads(raw_text)
+    except ValueError as err:
+        sys.exit(refuse(f"settings unreadable ({err})"))
+    if not isinstance(settings, dict):
+        sys.exit(refuse("settings must be a JSON object"))
+
+    def covers(matcher, tool):
+        matcher = str(matcher)
+        if matcher.strip() == "*":
+            return True
+        candidates = (
+            ("Bash", "bash", "shell", "terminal", "exec_command")
+            if tool == "Bash"
+            else ("Edit", "edit", "Write", "write", "apply_patch", "file_editor", "replace", "write_file")
+        )
+        try:
+            return any(re.fullmatch(matcher, cand) is not None for cand in candidates)
+        except re.error:
+            return False
+
+    hooks_obj = settings.get("hooks") if isinstance(settings.get("hooks"), dict) else settings
+    entries = (hooks_obj.get("PreToolUse") if isinstance(hooks_obj, dict) else None) or []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        hook_list = entry.get("hooks") if isinstance(entry.get("hooks"), list) else [entry]
+        for hook in hook_list:
+            if not (isinstance(hook, dict)
+                    and hook.get("type", "command") == "command"
+                    and "deny-hook.sh" in str(hook.get("command", ""))):
+                continue
+            matcher_val = entry.get("matcher", "")
+            for tool in ("Bash", "Edit"):
+                if tool not in commands and covers(matcher_val, tool):
+                    commands[tool] = str(hook["command"])
+    missing = [tool for tool in ("Bash", "Edit") if tool not in commands]
+    if missing:
+        sys.exit(refuse(
+            "no PreToolUse registration of deny-hook.sh covers "
+            + " and ".join(missing)
+            + " (a mention elsewhere in the file is not a registration)"))
+
+    registered_env = settings.get("env") or {}
+    if not isinstance(registered_env, dict):
+        sys.exit(refuse("settings env is not an object"))
+    env.update({str(k): str(v) for k, v in registered_env.items()})
 
 for tool, command in sorted(commands.items()):
     boundary = boundary_for(command)
@@ -265,7 +294,7 @@ def probe(command, tool_name, tool_input):
                        capture_output=True, text=True, env=env,
                        cwd=boundary_for(command), timeout=60)
     if not r.stdout.strip():
-        return "allow"
+        return "allow" if r.returncode == 0 else "deny"
     try:
         return json.loads(r.stdout)["hookSpecificOutput"]["permissionDecision"]
     except (ValueError, KeyError, TypeError):
@@ -278,10 +307,6 @@ bash_outside = str(Path(boundary_for(commands["Bash"])).parent
                    / "outside-the-boundary.probe")
 if probe(commands["Bash"], "Bash",
          {"command": f"echo x > {bash_outside}"}) != "deny":
-    # The root-delete rule needs no boundary, so it alone cannot prove the
-    # Bash write guard is live — a registration that strips the boundary
-    # (`env -u ORCA_UNIT_WORKTREE …`) passes rm/ls while shell redirects
-    # escape (PR #569 review).
     sys.exit(refuse(
         "registered Bash command did not deny a shell redirect outside "
         "its configured ORCA_UNIT_WORKTREE — the write boundary is not live"))
@@ -304,25 +329,58 @@ if [ $# -gt 0 ]; then
   exit 2
 fi
 
+UNIT_WORKTREE=${OPEN_FLEET_UNIT_WORKTREE:-${ORCA_UNIT_WORKTREE:-}}
+if [ -n "${OPEN_FLEET_EGRESS_LEDGER:-}" ] && [ -z "${ORCA_EGRESS_LEDGER:-}" ]; then
+  export ORCA_EGRESS_LEDGER="$OPEN_FLEET_EGRESS_LEDGER"
+fi
+
 # One decision object, with the reason JSON-encoded via argv (never interpolated).
 decide() {
-  python3 -c 'import json,sys; print(json.dumps({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":sys.argv[1],"permissionDecisionReason":sys.argv[2]}}))' "$1" "$2" 2>/dev/null && return 0
-  # No parser: emit a decision with a fixed, quote-free reason so the deny still
-  # lands as valid JSON.
-  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"%s","permissionDecisionReason":"denied by policy"}}\n' "$1"
+  _dec=$1
+  _reason=$2
+  if [ "$_dec" = "ask" ]; then
+    if [ "${CODEX_CI:-0}" != "0" ] && [ -n "${CODEX_CI:-}" ]; then _dec="deny"; fi
+    if [ "${CODEX_SANDBOX:-0}" != "0" ] && [ -n "${CODEX_SANDBOX:-}" ]; then _dec="deny"; fi
+    if [ "${OPEN_FLEET_HEADLESS_STRICT:-0}" != "0" ] && [ -n "${OPEN_FLEET_HEADLESS_STRICT:-}" ]; then _dec="deny"; fi
+    if [ "${ORCA_HOOK_STRICT_EXIT:-0}" != "0" ] && [ -n "${ORCA_HOOK_STRICT_EXIT:-}" ]; then _dec="deny"; fi
+  fi
+  _top_dec=$_dec
+  if [ "$_dec" = "deny" ] && [ -n "${GOOSE_MODE:-}" ] && [ "${GOOSE_MODE:-0}" != "0" ]; then
+    _top_dec="block"
+  fi
+  python3 -c 'import json,sys; print(json.dumps({"decision":sys.argv[3],"reason":sys.argv[2],"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":sys.argv[1],"permissionDecisionReason":sys.argv[2]}}))' "$_dec" "$_reason" "$_top_dec" 2>/dev/null || \
+    printf '{"decision":"%s","reason":"denied by policy","hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"%s","permissionDecisionReason":"denied by policy"}}\n' "$_top_dec" "$_dec"
+  if [ "$_dec" = "deny" ]; then
+    if [ -n "${JCODE_HOOK_TOOL_NAME:-}" ] || [ "${ORCA_HOOK_STRICT_EXIT:-0}" = "1" ] || [ "${OPEN_FLEET_HOOK_EXIT2:-0}" = "1" ]; then
+      printf '%s\n' "$_reason" >&2
+      exit 2
+    fi
+  fi
 }
 
 PAYLOAD=$(cat 2>/dev/null || true)
 
 # Extract tool_name, tool_input.command and tool_input.file_path as three lines.
 # A parse failure (or no python3) exits non-zero here and DENIES below.
-FIELDS=$(printf '%s' "$PAYLOAD" | python3 -c 'import json,re,shlex,sys
+FIELDS=$(printf '%s' "$PAYLOAD" | python3 -c 'import json,os,re,shlex,sys
 d = json.loads(sys.stdin.read())
 if not isinstance(d, dict):
     raise SystemExit(1)
-ti = d.get("tool_input") or {}
-if not isinstance(ti, dict):
-    ti = {}
+raw_tool = d.get("tool_name") or d.get("tool") or os.environ.get("JCODE_HOOK_TOOL_NAME") or ""
+ti = d.get("tool_input")
+if isinstance(ti, str):
+    try:
+        parsed_ti = json.loads(ti)
+        ti = parsed_ti if isinstance(parsed_ti, dict) else {"patch": ti, "input": ti}
+    except Exception:
+        ti = {"patch": ti, "input": ti}
+elif not isinstance(ti, dict):
+    if "tool_name" not in d and "tool" not in d and os.environ.get("JCODE_HOOK_TOOL_NAME"):
+        ti = d
+    elif isinstance(d.get("input"), dict):
+        ti = d.get("input")
+    else:
+        ti = {}
 def s(v):
     return v.replace("\n", " ") if isinstance(v, str) else ""
 def r(v):
@@ -535,14 +593,60 @@ def record(kind, value):
     print(kind + " " + value)
 
 
-raw_command = r(ti.get("command"))
+if raw_tool in ("Bash", "bash", "shell", "terminal", "exec_command"):
+    norm_tool = "Bash"
+elif raw_tool in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
+    norm_tool = raw_tool
+elif raw_tool in ("write", "edit", "multiedit", "replace", "write_file", "apply_patch", "patch"):
+    norm_tool = "Edit"
+elif raw_tool == "file_editor":
+    fe_cmd = str(ti.get("command") or "").strip().lower()
+    norm_tool = "Read" if fe_cmd == "view" else "Edit"
+else:
+    norm_tool = str(raw_tool)
+
+cmd_val = ti.get("command") if (norm_tool == "Bash" and isinstance(ti.get("command"), str)) else (ti.get("cmd") if isinstance(ti.get("cmd"), str) else (ti.get("command") if norm_tool == "Bash" else ""))
+raw_command = r(cmd_val)
 command = c(raw_command)
-print(s(d.get("tool_name")))
+
+target_paths = []
+for _k in ("file_path", "notebook_path", "path", "filePath"):
+    _v = ti.get(_k)
+    if isinstance(_v, str) and _v:
+        target_paths.append(_v)
+if isinstance(ti.get("edits"), list):
+    for _ed in ti.get("edits"):
+        if isinstance(_ed, dict):
+            for _k in ("file_path", "path", "filePath"):
+                _v = _ed.get(_k)
+                if isinstance(_v, str) and _v:
+                    target_paths.append(_v)
+_patch_blobs = []
+for _pk in ("patch", "diff"):
+    if isinstance(ti.get(_pk), str):
+        _patch_blobs.append(ti.get(_pk))
+if raw_tool in ("apply_patch", "patch"):
+    for _pk in ("input", "content", "command", "cmd"):
+        if isinstance(ti.get(_pk), str):
+            _patch_blobs.append(ti.get(_pk))
+    if isinstance(d.get("patch"), str):
+        _patch_blobs.append(d.get("patch"))
+for _pv in _patch_blobs:
+    for _pln in _pv.splitlines():
+        _m = re.match(r"^\*\*\* (?:Add|Update|Delete) File:\s*(.+)$", _pln)
+        if not _m:
+            _m = re.match(r"^\*\*\* Move to:\s*(.+)$", _pln)
+        if not _m:
+            _m = re.match(r"^(?:\+\+\+|---) (?:[ab]/)?([^\t\r\n]+)", _pln)
+        if _m:
+            _cand = _m.group(1).strip()
+            if _cand and _cand != "/dev/null":
+                target_paths.append(_cand)
+print(s(norm_tool))
 print(command)
-# NotebookEdit names its target notebook_path, not file_path — reading only
-# file_path left the one write tool that spells the field differently free of
-# the boundary entirely (#297).
-print(s(ti.get("file_path") or ti.get("notebook_path")))
+print(s(target_paths[0] if target_paths else ""))
+for _extra_p in target_paths[1:]:
+    record("F", s(_extra_p))
 # Line 4 onward: C = comparison command, W = write target, A = literal argument,
 # E = an off-repo write with no egress receipt arming it (rule 5, judged here
 # because only this side of the protocol still knows the joining operators).
@@ -899,24 +1003,61 @@ FILE=$(printf '%s\n' "$FIELDS" | sed -n '3p')
 case "$TOOL" in
   Edit|Write|NotebookEdit|MultiEdit)
     [ -n "$FILE" ] || exit 0
-    [ -n "${ORCA_UNIT_WORKTREE:-}" ] || exit 0
-    BOUND=$(cd "$ORCA_UNIT_WORKTREE" 2>/dev/null && pwd -P) || BOUND=""
-    if [ -z "$BOUND" ]; then
-      decide deny "deny-hook: ORCA_UNIT_WORKTREE is set but does not resolve to a directory. Fail-closed."
-      exit 0
+    if [ -n "${UNIT_WORKTREE:-}" ]; then
+      BOUND=$(cd "$UNIT_WORKTREE" 2>/dev/null && pwd -P) || BOUND=""
+      if [ -z "$BOUND" ]; then
+        decide deny "deny-hook: ORCA_UNIT_WORKTREE is set but does not resolve to a directory. Fail-closed."
+        exit 0
+      fi
+      # Judged by where the final component actually points, not by its own name.
+      check_edit_target() {
+        resolve_target "$1"
+        REAL=$RESOLVED
+        if [ -z "$REAL" ]; then
+          decide deny "deny-hook: the write target could not be resolved to an absolute path. Fail-closed."
+          exit 0
+        fi
+        case "$REAL/" in
+          "$BOUND"/*) return 0 ;;
+          *) decide deny "deny-hook: this worker may only write inside its own worktree. The target resolves outside the unit boundary."
+             exit 0 ;;
+        esac
+      }
+      check_edit_target "$FILE"
+      while IFS= read -r _FREC; do
+        case "$_FREC" in
+          'F '*) check_edit_target "${_FREC#F }" ;;
+        esac
+      done <<EOF
+$(printf '%s\n' "$FIELDS" | sed -n '4,$p')
+EOF
     fi
-    # Judged by where the final component actually points, not by its own name.
-    resolve_target "$FILE"
-    REAL=$RESOLVED
-    if [ -z "$REAL" ]; then
-      decide deny "deny-hook: the write target could not be resolved to an absolute path. Fail-closed."
-      exit 0
+    if [ -n "${OPEN_FLEET_STATE_DB:-${ORCA_FLEET_STATE_DB:-}}" ]; then
+      python3 - "$0" "$TOOL" "$FILE" "$FIELDS" <<'PYTOUCH' 2>/dev/null || true
+import importlib, os, sys
+from pathlib import Path
+db_path = os.environ.get("OPEN_FLEET_STATE_DB") or os.environ.get("ORCA_FLEET_STATE_DB")
+repo_root = Path(sys.argv[1]).resolve().parent.parent.parent
+if db_path and (repo_root / "runtime" / "providers" / "local_state.py").is_file():
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    mod = importlib.import_module("runtime.providers.local_state")
+    store = mod.LocalStateStore(db_path)
+    worker_id = os.environ.get("OPEN_FLEET_WORKER_ID") or os.environ.get("ORCA_WORKER_ID") or "worker"
+    run_id = os.environ.get("OPEN_FLEET_RUN_ID") or os.environ.get("ORCA_RUN_ID") or ""
+    op = sys.argv[2].lower()
+    paths = [sys.argv[3]]
+    for ln in sys.argv[4].splitlines()[3:]:
+        if ln.startswith("F "):
+            paths.append(ln[2:])
+    seen = set()
+    for p in paths:
+        if p and p not in seen:
+            seen.add(p)
+            store.record_file_touch(worker_id=worker_id, file_path=p, op=op, run_id=run_id)
+PYTOUCH
     fi
-    case "$REAL/" in
-      "$BOUND"/*) exit 0 ;;
-      *) decide deny "deny-hook: this worker may only write inside its own worktree. The target resolves outside the unit boundary."
-         exit 0 ;;
-    esac
+    exit 0
     ;;
   Bash) : ;;
   *) exit 0 ;;
@@ -1442,8 +1583,8 @@ done
 # an interpreter writing through its own API, a path built from a variable, and
 # every relative path. The disposable sandbox is the boundary for those; this is
 # defense in depth, the same advisory status the rest of this hook carries.
-if [ -n "${ORCA_UNIT_WORKTREE:-}" ]; then
-  BOUND=$(cd "$ORCA_UNIT_WORKTREE" 2>/dev/null && pwd -P) || BOUND=""
+if [ -n "${UNIT_WORKTREE:-}" ]; then
+  BOUND=$(cd "$UNIT_WORKTREE" 2>/dev/null && pwd -P) || BOUND=""
   if [ -z "$BOUND" ]; then
     decide deny "deny-hook: ORCA_UNIT_WORKTREE is set but does not resolve to a directory. Fail-closed."
     exit 0

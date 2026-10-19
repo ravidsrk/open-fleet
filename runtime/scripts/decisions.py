@@ -88,7 +88,19 @@ SEP = " · "
 SEP_CHAR = "·"
 CLASSES = ("mechanical", "taste", "one-way")
 DEFAULT_LOG = "docs/DECISIONS.md"
+PRIMARY_DECISIONS_ENV = "OPEN_FLEET_DECISIONS_FILE"
+DECISIONS_ENV = "ORCA_DECISIONS_FILE"
 DEFAULT_DOORS = Path(__file__).resolve().parent.parent / "one-way-doors.json"
+
+
+def decisions_path(explicit=None):
+    if explicit:
+        return str(explicit)
+    for var in (PRIMARY_DECISIONS_ENV, DECISIONS_ENV):
+        env = (os.environ.get(var) or "").strip()
+        if env:
+            return env
+    return DEFAULT_LOG
 
 # Lenses whose value IS the miss they would catch: they never auto-gate off, however
 # long their zero streak runs. This tuple is the EXECUTABLE form of the sentence in
@@ -650,7 +662,8 @@ def build_parser():
         description="Append to, read and validate the DECISIONS log.",
         epilog="exit 0 ok / 1 validation failure / 2 could-not-run",
     )
-    p.add_argument("--file", default=DEFAULT_LOG, help=f"DECISIONS log path (default {DEFAULT_LOG})")
+    p.add_argument("--file", default=decisions_path(),
+                   help=f"DECISIONS log path (default ${PRIMARY_DECISIONS_ENV}, ${DECISIONS_ENV}, or {DEFAULT_LOG})")
     p.add_argument("--doors", default=None, help="one-way door registry (default runtime/one-way-doors.json)")
     sub = p.add_subparsers(dest="command", required=True)
 

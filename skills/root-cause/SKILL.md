@@ -11,7 +11,7 @@ description: >-
   (deflake-it), nor an enumerable backlog (clean-sweep).
 license: MIT
 compatibility: >-
-  HARD dependency: Orca runtime + orchestration skill (Orca CLI). git + gh. A feedback-loop-first
+  HARD dependency: open-fleet RPI runtime (Orca, posix, adapter). git + gh. A feedback-loop-first
   debugging playbook (mattpocock diagnosing-bugs or addyosmani debug) — one router per worker.
 metadata:
   proof: doctrine-only

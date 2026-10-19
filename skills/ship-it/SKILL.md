@@ -12,7 +12,7 @@ description: >-
   charting first (map-it).
 license: MIT
 compatibility: >-
-  HARD dependency: Orca runtime + the orchestration skill (Orca CLI). git + gh. One worker
+  HARD dependency: open-fleet RPI runtime (Orca, posix, t3code, ao+). git + gh. One worker
   playbook pack per worker (mattpocock/skills for grill/tdd, addyosmani for build/verify, gstack
   for review-army/ship) — never two routers in one worker. Deploy tooling + canary surface for
   the RELEASED/DEPLOYED states.

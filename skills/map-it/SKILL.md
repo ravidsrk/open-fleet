@@ -10,7 +10,7 @@ description: >-
   BUG (root-cause) or ready-to-build intent (ship-it).
 license: MIT
 compatibility: >-
-  HARD dependency: Orca runtime + orchestration skill (Orca CLI). A wayfinder/research worker playbook
+  HARD dependency: open-fleet RPI runtime (Orca, posix, adapter). A wayfinder/research worker playbook
   (mattpocock wayfinder + research) — one router per worker.
 metadata:
   proof: doctrine-only

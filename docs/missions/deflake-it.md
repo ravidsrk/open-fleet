@@ -28,7 +28,7 @@
 > kill the flaky tests
 ```
 
-**Needs** (the skill's `compatibility` field, verbatim): HARD dependency: Orca runtime + orchestration skill (Orca CLI). git + gh; a runnable suite. A feedback-loop-first debugging playbook (mattpocock diagnosing-bugs or addyosmani debug) — one router per worker.
+**Needs** (the skill's `compatibility` field, verbatim): HARD dependency: open-fleet RPI runtime (Orca, posix, adapter). git + gh; a runnable suite. A feedback-loop-first debugging playbook (mattpocock diagnosing-bugs or addyosmani debug) — one router per worker.
 
 ## What to provide
 

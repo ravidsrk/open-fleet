@@ -87,6 +87,7 @@ EXIT_USAGE = 2
 EXIT_FAIL_CLOSED = 3
 
 DEFAULT_LEDGER = ".orca/egress.jsonl"
+PRIMARY_LEDGER_ENV = "OPEN_FLEET_EGRESS_LEDGER"
 LEDGER_ENV = "ORCA_EGRESS_LEDGER"
 # Field order is fixed so `id` is reproducible byte-for-byte on re-verification.
 FIELDS = ("ts", "sink", "host", "payload_class", "bytes", "payload_sha256", "consent", "prev")
@@ -106,9 +107,10 @@ def sha256_hex(data):
 def ledger_path(explicit=None):
     if explicit:
         return Path(explicit)
-    env = os.environ.get(LEDGER_ENV)
-    if env:
-        return Path(env)
+    for var in (PRIMARY_LEDGER_ENV, LEDGER_ENV):
+        env = os.environ.get(var)
+        if env:
+            return Path(env)
     return Path(DEFAULT_LEDGER)
 
 

@@ -28,7 +28,7 @@
 > the app is slow — journeys: <list them>; budgets: <the targets>
 ```
 
-**Needs** (the skill's `compatibility` field, verbatim): HARD dependency: Orca runtime + orchestration skill (Orca CLI). git + gh. A real MEASUREMENT path (Lighthouse/DevTools for web CWV, or a load/profiler harness). A perf worker playbook (addyosmani performance-optimization or gstack benchmark) — one router per worker.
+**Needs** (the skill's `compatibility` field, verbatim): HARD dependency: open-fleet RPI runtime (Orca, posix, adapter). git + gh. A real MEASUREMENT path (Lighthouse/DevTools for web CWV, or a load/profiler harness). A perf worker playbook (addyosmani performance-optimization or gstack benchmark) — one router per worker.
 
 ## What to provide
 

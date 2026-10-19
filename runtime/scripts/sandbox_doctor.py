@@ -35,6 +35,9 @@ BAD_STATUS = {"fail", "failed", "failing", "failure", "error", "errored", "warn"
 FINDING_KEYS = ("failures", "warnings", "errors", "problems", "issues")
 # Keys whose VALUE is a verdict word.
 STATUS_KEYS = ("status", "level", "severity", "state", "result")
+# Portable sandbox backends (#585).
+PORTABLE_BACKENDS = {"docker", "bwrap", "gondolin", "superset-cloud", "openhands-docker"}
+FORBIDDEN_MOUNT_TOKENS = (".ssh", ".config/gh", ".git/config", "$home", "${home}")
 
 # "none of these", in the text forms a doctor writes them: "failures": [], failures: 0,
 # warnings={}, errors: none, 0 warnings, no failures.
@@ -45,6 +48,60 @@ _EMPTY = re.compile(
     re.IGNORECASE,
 )
 _BAD_WORD = re.compile(r"(^|[^a-z])(fail|warn|error)", re.IGNORECASE)
+
+
+def _mount_exposes_credentials(mount_item) -> str | None:
+    """Return a reason if a mount specification exposes ~/.ssh, ~/.config/gh, .git/config, or $HOME."""
+    if isinstance(mount_item, dict):
+        parts = [str(v) for v in mount_item.values() if v is not None]
+    else:
+        parts = [str(mount_item)]
+    for raw_part in parts:
+        for seg in raw_part.split(":"):
+            s = seg.strip()
+            low = s.lower()
+            for tok in FORBIDDEN_MOUNT_TOKENS:
+                if tok in low:
+                    return f"credential_mount exposes {tok}: {raw_part!r}"
+            if s in ("~", "~/", "$HOME", "$HOME/", "${HOME}", "${HOME}/"):
+                return f"credential_mount exposes $HOME: {raw_part!r}"
+    return None
+
+
+def portable_findings(doc: dict) -> list[str]:
+    """Validate portable sandbox recipe invariants (#585) when `backend` is specified."""
+    if not isinstance(doc, dict) or "backend" not in doc:
+        return []
+    backend = str(doc.get("backend") or "").strip().lower()
+    if backend in ("orca", "orca-vm"):
+        return []
+    if backend not in PORTABLE_BACKENDS:
+        return [f"unsupported sandbox backend={backend!r}"]
+    issues = []
+    if doc.get("ok") is not True:
+        issues.append("ok=true required")
+    if doc.get("ephemeral") is not True:
+        issues.append("ephemeral=true required")
+    cred_mounts = doc.get("credential_mounts")
+    if not isinstance(cred_mounts, list):
+        issues.append("credential_mounts=[] required")
+    else:
+        for m in cred_mounts:
+            reason = _mount_exposes_credentials(m)
+            if reason:
+                issues.append(reason)
+        if len(cred_mounts) > 0:
+            issues.append(f"credential_mounts={len(cred_mounts)} (must be empty)")
+    for mount_key in ("mounts", "volumes", "bind_mounts"):
+        mounts = doc.get(mount_key)
+        if isinstance(mounts, list):
+            for m in mounts:
+                reason = _mount_exposes_credentials(m)
+                if reason:
+                    issues.append(reason)
+    if doc.get("prelaunch_placement_bound") is not True:
+        issues.append("prelaunch_placement_bound=true required")
+    return issues
 
 
 def findings(obj):
@@ -116,7 +173,7 @@ def verdict(raw, recipe):
         return False, f"doctor output does not name recipe {recipe!r}"
 
     if doc is not None:
-        bad = sorted(set(findings(doc)))
+        bad = sorted(set(findings(doc) + (portable_findings(doc) if isinstance(doc, dict) else [])))
         if bad:
             return False, "doctor reports " + ", ".join(bad[:4])
         return True, ""

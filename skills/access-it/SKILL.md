@@ -13,7 +13,7 @@ description: >-
   backlog (clean-sweep), or standards attestation (attest-it).
 license: MIT
 compatibility: >-
-  HARD dependency: Orca runtime + orchestration skill (Orca CLI). git + gh; a deterministic a11y oracle
+  HARD dependency: open-fleet RPI runtime (Orca, posix, adapter). git + gh; a deterministic a11y oracle
   (axe-core / Lighthouse) and a runnable surface. A fix worker playbook (addyosmani, mattpocock, gstack)
   — one router per worker.
 metadata:

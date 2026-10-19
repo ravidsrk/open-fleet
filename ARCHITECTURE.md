@@ -29,8 +29,9 @@ routing collisions and ingredient-shaped entry points this repo exists to remove
   protocols with checkable completion criteria, never attribution summaries of "best of X + Y".
   One consuming mission is enough when the doc is a phase protocol a worker TASK injects
   (`data-migration`, `instrument`); mission prose moved out to dodge the body cap is not.
-- **Runtime** is `runtime/*.md` policies + `runtime/scripts/` shared tooling — the Orca
-  dispatch/gate/merge/liveness/sandbox mechanics. Missions call these; users don't invoke them.
+- **Runtime** is `runtime/*.md` policies + `runtime/scripts/` shared tooling + `runtime/providers/`
+  (`open-fleet` Runtime Provider Interface — see [`docs/runtimes.md`](docs/runtimes.md)) — the Orca
+  and multi-runtime dispatch/gate/merge/liveness/sandbox mechanics. Missions call these; users don't invoke them.
 
 ## What makes a mission a mission (not a mode of another)
 

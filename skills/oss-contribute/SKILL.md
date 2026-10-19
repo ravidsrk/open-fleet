@@ -12,7 +12,7 @@ description: >-
   SHA closure) and not for building a net-new project (ship-it).
 license: MIT
 compatibility: >-
-  HARD dependency: Orca runtime + the orchestration skill (Orca CLI). git + gh, a FORK you can push
+  HARD dependency: open-fleet RPI runtime (Orca, posix, t3code, ao+). git + gh, a FORK you can push
   to, and READ on the upstream repo. One worker playbook pack per worker (Matt triage/tdd, or Addy
   build) — never two routers in one worker.
 metadata:

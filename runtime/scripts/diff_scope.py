@@ -368,6 +368,59 @@ def _tracked_files(repo):
     return sorted(name for name in out.split("\0") if name)
 
 
+def predict_merge(repo, base, branch):
+    """Detect 3-way merge conflicts in memory via git merge-tree without touching HEAD/index/worktree."""
+    if (git(repo, "rev-parse", "--verify", "-q", f"{base}^{{commit}}") is None
+            or git(repo, "rev-parse", "--verify", "-q", f"{branch}^{{commit}}") is None):
+        return {"clean": False, "tree_oid": None, "conflicts": []}
+    try:
+        r = subprocess.run(
+            [GIT, "-C", str(repo), "merge-tree", "--write-tree", base, branch],
+            capture_output=True, text=True, timeout=60, env=_git_env(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        r = None
+
+    if r is not None and r.returncode == 0:
+        lines = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
+        tree_oid = lines[0] if lines else None
+        return {"clean": True, "tree_oid": tree_oid, "conflicts": []}
+
+    if r is not None and r.returncode == 1:
+        conflicts = set()
+        for line in r.stdout.splitlines():
+            m_stage = re.match(r"^[0-9]{6}\s+[0-9a-f]{40,64}\s+[123]\t(.+)$", line)
+            if m_stage:
+                conflicts.add(m_stage.group(1).strip())
+                continue
+            m_conf = re.match(
+                r"^CONFLICT\s*\([^)]+\):\s*(?:Merge conflict in\s+)?(.+?)(?:\s+deleted in .+|$)",
+                line,
+            )
+            if m_conf:
+                conflicts.add(m_conf.group(1).strip())
+        return {"clean": False, "tree_oid": None, "conflicts": sorted(conflicts)}
+
+    mb_out = git(repo, "merge-base", base, branch)
+    if not mb_out or not mb_out.strip():
+        return {"clean": False, "tree_oid": None, "conflicts": []}
+    mb = mb_out.strip().splitlines()[0]
+    classic = git(repo, "merge-tree", mb, base, branch, tolerate=True)
+    if classic is None:
+        return {"clean": False, "tree_oid": None, "conflicts": []}
+    conflicts = set()
+    has_conflict = False
+    for line in classic.splitlines():
+        if line.startswith("<<<<<<<") or line.startswith("changed in both"):
+            has_conflict = True
+        m_path = re.match(r"^\s+(?:base|our|their)\s+[0-9]{6}\s+[0-9a-f]{40,64}\s+(.+)$", line)
+        if m_path:
+            conflicts.add(m_path.group(1).strip())
+    if has_conflict or conflicts:
+        return {"clean": False, "tree_oid": None, "conflicts": sorted(conflicts)}
+    return {"clean": True, "tree_oid": None, "conflicts": []}
+
+
 def build_parser():
     p = argparse.ArgumentParser(
         prog="diff_scope.py",
@@ -381,6 +434,8 @@ def build_parser():
                         "matched — for a review lens that gates on the flag set (#314)")
     p.add_argument("--overlap", default=None,
                    help="pre-dispatch overlap JSON ({units: [{id, scope: [...]}]}) to serialize shared hot files")
+    p.add_argument("--predict-merge", nargs=2, metavar=("BASE", "BRANCH"), default=None,
+                   help="predict 3-way merge conflicts in memory via git merge-tree (#590)")
     p.add_argument("--json", action="store_true", help="emit a JSON object instead of shell assignments")
     return p
 
@@ -388,6 +443,11 @@ def build_parser():
 def main(argv=None):
     args = build_parser().parse_args(argv)
     repo = Path(args.repo)
+    if args.predict_merge is not None:
+        base_ref, branch_ref = args.predict_merge
+        res = predict_merge(repo, base_ref, branch_ref)
+        print(json.dumps(res))
+        return EXIT_OK if res["clean"] else 1
     if args.overlap is not None:
         try:
             raw = json.loads(Path(args.overlap).read_text(encoding="utf-8"))

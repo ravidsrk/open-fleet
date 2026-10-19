@@ -52,11 +52,13 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 
 def _load_gitexec():
@@ -186,7 +188,7 @@ def _catalog_roots() -> list[Path]:
     in cwd is NEVER a candidate: it must not shadow the fleet's deny-list with
     one of its own (read at call time so tests can patch the environment)."""
     roots = []
-    for var in ("ORCA_FLEET_ROOT", "CLAUDE_PLUGIN_ROOT"):
+    for var in ("OPEN_FLEET_ROOT", "ORCA_FLEET_ROOT", "CLAUDE_PLUGIN_ROOT"):
         value = os.environ.get(var)
         if value:
             roots.append(Path(value))
@@ -230,6 +232,101 @@ def _quarantine_refusal(mission: str) -> str | None:
     return None
 
 
+def _active_runtime(explicit: str | None) -> str | None:
+    """Return explicit `--runtime` or `OPEN_FLEET_RUNTIME` / `ORCA_FLEET_RUNTIME` if set."""
+    if explicit and explicit.strip():
+        return explicit.strip()
+    for var in ("OPEN_FLEET_RUNTIME", "ORCA_FLEET_RUNTIME"):
+        val = (os.environ.get(var) or "").strip()
+        if val:
+            return val
+    return None
+
+
+def _capabilities_refusal(
+    mission: str | None,
+    runtime: str,
+    *,
+    strict_native: bool = False,
+) -> tuple[str | None, dict[str, Any]]:
+    """Validate runtime provider and mission required capabilities (#586).
+
+    Returns `(refusal_reason_or_None, structured_info)`. Fails closed (non-None
+    refusal) if `runtime/providers/capabilities.json` is missing/malformed, if
+    `runtime` is unknown, if `mission` is unknown, or if any required capability
+    of `mission` is not provided by `runtime`.
+    """
+    root = next(
+        (r for r in _catalog_roots()
+         if os.path.lexists(r / "runtime" / "providers" / "capabilities.json")),
+        None,
+    )
+    if root is None:
+        msg = "runtime/providers/capabilities.json is missing — refusing rather than assuming capabilities"
+        return msg, {"ok": False, "error": msg}
+    cap_path = root / "runtime" / "providers" / "capabilities.json"
+    try:
+        data = json.loads(cap_path.read_text(encoding="utf-8"))
+    except Exception as err:
+        msg = f"runtime/providers/capabilities.json is malformed ({err})"
+        return msg, {"ok": False, "error": msg}
+    if not isinstance(data, dict):
+        msg = "runtime/providers/capabilities.json must be a JSON object"
+        return msg, {"ok": False, "error": msg}
+    providers = data.get("providers")
+    missions = data.get("missions")
+    if not isinstance(providers, dict) or not isinstance(missions, dict):
+        msg = "runtime/providers/capabilities.json is missing 'providers' or 'missions' map"
+        return msg, {"ok": False, "error": msg}
+
+    provider_name = runtime.strip().lower()
+    if provider_name == "auto":
+        provider_name = "orca" if _which("orca") else "posix"
+    if provider_name not in providers:
+        known = ", ".join(sorted(providers))
+        msg = f"unknown_runtime: {runtime!r} is not a registered RPI provider (known: {known})"
+        return msg, {"ok": False, "runtime": runtime, "error": msg}
+
+    p_entry = providers[provider_name]
+    if not isinstance(p_entry, dict):
+        msg = f"runtime/providers/capabilities.json provider {provider_name!r} is malformed"
+        return msg, {"ok": False, "runtime": provider_name, "error": msg}
+
+    native = set(p_entry.get("native_capabilities") or [])
+    fallback = set(p_entry.get("fallback_capabilities") or [])
+    available = native if strict_native else (native | fallback)
+
+    if mission:
+        if mission not in missions or not isinstance(missions[mission], dict):
+            msg = f"unknown_mission: {mission!r} is not declared in runtime/providers/capabilities.json"
+            return msg, {"ok": False, "mission": mission, "runtime": provider_name, "error": msg}
+        m_entry = missions[mission]
+        required = list(m_entry.get("required") or [])
+        missing = [cap for cap in required if cap not in available]
+        if missing:
+            first = missing[0]
+            mode_note = " (strict-native)" if strict_native else ""
+            missing_str = ", ".join(f"missing_capability: {c}" for c in missing)
+            msg = f"mission {mission!r} cannot run on runtime {provider_name!r}{mode_note} — {missing_str}"
+            return msg, {
+                "ok": False,
+                "mission": mission,
+                "runtime": provider_name,
+                "strict_native": strict_native,
+                "missing_capability": first,
+                "missing_capabilities": missing,
+                "error": msg,
+            }
+
+    return None, {
+        "ok": True,
+        "mission": mission,
+        "runtime": provider_name,
+        "strict_native": strict_native,
+        "capabilities": sorted(available),
+    }
+
+
 def main(argv: list[str]) -> int:
     parser = _UsageExit1Parser(prog="preflight.py")
     parser.add_argument("--base", help="The integration BASE branch name (required unless --mode readonly).")
@@ -260,14 +357,37 @@ def main(argv: list[str]) -> int:
         "--mission",
         metavar="NAME",
         help="Refuse to start if this mission (or a playbook it composes) is quarantined "
-        "in runtime/quarantine.json (#558). No deny-list in the repo = no quarantine in "
-        "force; a malformed one refuses the run.",
+        "in runtime/quarantine.json (#558), or if --runtime lacks its required capabilities (#586).",
+    )
+    parser.add_argument(
+        "--runtime",
+        metavar="PROVIDER",
+        help="RPI provider name (e.g. orca, posix, overstory, t3code, ao, superset, auto). "
+        "Defaults to $OPEN_FLEET_RUNTIME or $ORCA_FLEET_RUNTIME when set (#586).",
+    )
+    parser.add_argument(
+        "--strict-native-capabilities",
+        "--strict-native",
+        dest="strict_native",
+        action="store_true",
+        help="Require mission capabilities to be in the provider's native_capabilities only.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit structured JSON summary alongside preflight status.",
     )
     args = parser.parse_args(argv)
 
+    runtime_provider = _active_runtime(args.runtime)
+    effective_mode = args.mode
+    if effective_mode == "write" and not args.base and not args.offline:
+        if args.runtime or (args.mission and runtime_provider):
+            effective_mode = "readonly"
+
     # Usage errors are exit 1 (contract: 0=OK, 1=usage/dependency, 2=invariant).
     # _UsageExit1Parser remaps argparse's own SystemExit(2) the same way.
-    if args.mode == "write" and not args.base:
+    if effective_mode == "write" and not args.base:
         print("preflight: ERROR: --base is required unless --mode readonly", file=sys.stderr)
         return 1
     if args.offline and not args.default:
@@ -279,11 +399,11 @@ def main(argv: list[str]) -> int:
 
     # 1. Required binaries. Read-only fleets never touch gh/PRs; offline starts
     #    swap every gh step for its git equivalent (merge-serialization.md).
-    required = ("git",) if args.mode == "readonly" or args.offline else ("git", "gh")
+    required = ("git",) if effective_mode == "readonly" or args.offline else ("git", "gh")
     for binary in required:
         if not _which(binary):
             errors.append(f"missing required binary on PATH: {binary}")
-    if args.mode == "write":
+    if effective_mode == "write":
         if args.require_gitleaks and not _which("gitleaks"):
             errors.append("missing required binary on PATH: gitleaks (--require-gitleaks was set)")
         elif not _which("gitleaks"):
@@ -309,8 +429,25 @@ def main(argv: list[str]) -> int:
             print(f"preflight: ERROR: QUARANTINED {refusal}", file=sys.stderr)
             return 2
 
-    if args.mode == "readonly":
-        print("preflight: OK — mode=readonly (binary + repo checks only; no BASE/PR invariants)")
+    # 2c. Capability check (#586): when --runtime (or OPEN_FLEET_RUNTIME /
+    #     ORCA_FLEET_RUNTIME) is active, validate provider and mission capabilities.
+    cap_info: dict[str, Any] | None = None
+    if runtime_provider:
+        cap_refusal, cap_info = _capabilities_refusal(
+            args.mission, runtime_provider, strict_native=args.strict_native
+        )
+        if cap_refusal:
+            if args.json:
+                print(json.dumps(cap_info))
+            print(f"preflight: ERROR: {cap_refusal}", file=sys.stderr)
+            return 2
+
+    if effective_mode == "readonly":
+        if args.json and cap_info is not None:
+            print(json.dumps(cap_info))
+        else:
+            rt_suffix = f", runtime={cap_info['runtime']}" if cap_info else ""
+            print(f"preflight: OK — mode=readonly{rt_suffix} (binary + repo checks only; no BASE/PR invariants)")
         return 0
 
     if args.offline:

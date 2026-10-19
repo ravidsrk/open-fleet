@@ -101,6 +101,33 @@ def _load_ed25519():
 _RECORD_FIELDS = ("manifest_id", "contract_digest", "unit_class", "lighting",
                   "nc_paths", "nc_command", "nc_artifact_sha256",
                   "no_gh", "lane", "execute_nc")
+_PROFILE_FIELDS = ("profile", "parent_profile")
+PROFILE_RANK = {"ro": 0, "rw": 1, "danger": 2}
+
+
+def check_profile_narrowing(
+    profile: str | None,
+    parent_profile: str | None = None,
+    env: dict[str, str] | None = None,
+) -> tuple[bool, str]:
+    """Enforce monotonic privilege narrowing ro < rw < danger (#590).
+
+    Returns (True, "") when valid, or (False, reason) on privilege escalation or invalid profile.
+    """
+    e = env if env is not None else os.environ
+    eff_parent = parent_profile or e.get("OPEN_FLEET_PARENT_PROFILE") or e.get("ORCA_PARENT_PROFILE") or None
+    if profile is not None and profile not in PROFILE_RANK:
+        return False, f"invalid profile {profile!r} (expected one of ro, rw, danger)"
+    if eff_parent is not None and eff_parent not in PROFILE_RANK:
+        return False, f"invalid parent profile {eff_parent!r} (expected one of ro, rw, danger)"
+    if profile is not None and eff_parent is not None:
+        if PROFILE_RANK[profile] > PROFILE_RANK[eff_parent]:
+            return (
+                False,
+                f"privilege escalation refused: child profile {profile!r} exceeds "
+                f"parent profile {eff_parent!r} (monotonic narrowing requires ro <= rw <= danger)",
+            )
+    return True, ""
 
 
 # The verifier-transcript fields (#281/#386): verify.py's verdict object, signed so run_report.py
@@ -144,7 +171,10 @@ def canonical_subset(record: dict, fields=_RECORD_FIELDS) -> dict:
 
     A coordinator signs a SET of paths, not a listing order, so ["b","a"] and ["a","b"] must
     produce the same bytes — otherwise a re-ordered manifest reads as a forgery."""
-    subset = {k: record[k] for k in fields if record.get(k) is not None}
+    active_fields = fields
+    if fields is _RECORD_FIELDS and any(record.get(k) is not None for k in _PROFILE_FIELDS):
+        active_fields = (*_RECORD_FIELDS, *_PROFILE_FIELDS)
+    subset = {k: record[k] for k in active_fields if record.get(k) is not None}
     if isinstance(subset.get("nc_paths"), list):
         subset["nc_paths"] = sorted(str(x) for x in subset["nc_paths"])
     return subset
@@ -238,8 +268,8 @@ def gen_key(out: Path, in_repo_ok: bool = False) -> int:
     return 0
 
 
-def _seed(key: Path):
-    """(seed bytes, None) from a gen-key seed file, or (None, reason).
+def _seed(key: Path | None = None):
+    """(seed bytes, None) from a gen-key seed file (or OPEN_FLEET_SIGNING_SEED / ORCA_DISPATCH_SIGNING_SEED), or (None, reason).
 
     h409 F-4: custody is re-asserted at USE, not only at creation. gen-key writes 0600 and refuses
     an unignored in-repo path, but a seed that was chmod'ed, copied, or committed since arrives
@@ -249,6 +279,21 @@ def _seed(key: Path):
     git work tree that does not ignore it, and NAMES the custody class of a passing seed on stderr
     so the audit trail says what signed. The check is custody class, never existence: a 0600 seed
     outside any repo, or under an ignored path, keeps working."""
+    if key is None:
+        env_val = (os.environ.get("OPEN_FLEET_SIGNING_SEED")
+                   or os.environ.get("ORCA_DISPATCH_SIGNING_SEED")
+                   or "").strip()
+        if not env_val:
+            return None, "missing --key and neither OPEN_FLEET_SIGNING_SEED nor ORCA_DISPATCH_SIGNING_SEED is set"
+        if len(env_val) == 64:
+            try:
+                seed_bytes = bytes.fromhex(env_val)
+                if len(seed_bytes) == 32:
+                    print("seed custody: environment seed (OPEN_FLEET_SIGNING_SEED/ORCA_DISPATCH_SIGNING_SEED)", file=sys.stderr)
+                    return seed_bytes, None
+            except ValueError:
+                pass
+        key = Path(env_val)
     try:
         mode = stat.S_IMODE(key.stat().st_mode)
     except OSError as exc:
@@ -274,12 +319,19 @@ def envelope(seed: bytes, record: dict, fields=_RECORD_FIELDS) -> dict:
     """{record, sig_b64}: the signed subset of `record` and an Ed25519 signature over its canonical
     bytes. One envelope shape for the dispatch tuple and the verifier transcript."""
     ed = _load_ed25519()
+    active_fields = fields
+    if fields is _RECORD_FIELDS and any(record.get(k) is not None for k in _PROFILE_FIELDS):
+        active_fields = (*_RECORD_FIELDS, *_PROFILE_FIELDS)
     sig = ed.signature(canonical_record(record, fields), seed, ed.publickey(seed))
-    return {"record": {k: record[k] for k in fields if record.get(k) is not None},
+    return {"record": {k: record[k] for k in active_fields if record.get(k) is not None},
             "sig_b64": base64.b64encode(sig).decode("ascii")}
 
 
-def sign(key: Path, record: dict) -> int:
+def sign(key: Path | None, record: dict, parent_profile: str | None = None) -> int:
+    ok, reason = check_profile_narrowing(record.get("profile"), parent_profile or record.get("parent_profile"))
+    if not ok:
+        print(f"dispatch-sign: {reason}", file=sys.stderr)
+        return 2
     seed, err = _seed(key)
     if err:
         print(f"dispatch-sign: {err}", file=sys.stderr)
@@ -288,7 +340,70 @@ def sign(key: Path, record: dict) -> int:
     return 0
 
 
-def sign_transcript(key: Path, transcript: Path, out: Path | None = None) -> int:
+def verify_dispatch(
+    record_ref: str | Path | None = None,
+    *,
+    pubkey_ref: str | Path | None = None,
+    key_ref: str | Path | None = None,
+    profile: str | None = None,
+    parent_profile: str | None = None,
+) -> int:
+    """Verify monotonic privilege narrowing and (when envelope + key/pubkey given) Ed25519 signature."""
+    env_obj = None
+    rec_obj = {}
+    if record_ref is not None:
+        raw_str = str(record_ref)
+        try:
+            if raw_str.lstrip().startswith("{"):
+                env_obj = json.loads(raw_str)
+            else:
+                env_obj = json.loads(Path(raw_str).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            print(f"dispatch-sign: cannot read dispatch record {record_ref}: {exc}", file=sys.stderr)
+            return 2
+        if not isinstance(env_obj, dict) or not isinstance(env_obj.get("record"), dict):
+            print("dispatch-sign: dispatch record must be an envelope with a 'record' object", file=sys.stderr)
+            return 2
+        rec_obj = env_obj["record"]
+
+    eff_profile = profile or rec_obj.get("profile")
+    eff_parent = parent_profile or rec_obj.get("parent_profile")
+    ok, reason = check_profile_narrowing(eff_profile, eff_parent)
+    if not ok:
+        print(f"dispatch-sign: {reason}", file=sys.stderr)
+        return 2
+
+    if env_obj is not None:
+        ed = _load_ed25519()
+        pub_bytes = None
+        if pubkey_ref is not None:
+            p_str = str(pubkey_ref).strip()
+            try:
+                if len(p_str) == 64 and all(c in "0123456789abcdefABCDEF" for c in p_str):
+                    pub_bytes = bytes.fromhex(p_str)
+                else:
+                    pub_bytes = bytes.fromhex(Path(p_str).read_text(encoding="utf-8").strip())
+            except (OSError, ValueError) as exc:
+                print(f"dispatch-sign: cannot read pubkey {pubkey_ref}: {exc}", file=sys.stderr)
+                return 2
+        else:
+            seed, err = _seed(Path(key_ref) if key_ref else None)
+            if err:
+                print(f"dispatch-sign: {err}", file=sys.stderr)
+                return 2
+            pub_bytes = ed.publickey(seed)
+        try:
+            sig = base64.b64decode(env_obj["sig_b64"], validate=True)
+        except (KeyError, ValueError, TypeError) as exc:
+            print(f"dispatch-sign: malformed signature in envelope: {exc}", file=sys.stderr)
+            return 2
+        if not ed.checkvalid(sig, canonical_record(rec_obj), pub_bytes):
+            print("dispatch-sign: signature verification FAILED", file=sys.stderr)
+            return 2
+    return 0
+
+
+def sign_transcript(key: Path | None, transcript: Path, out: Path | None = None) -> int:
     """Wrap a verdict object in the envelope. Every transcript field must be PRESENT (None is a
     legal value for none of them: an absent verdict list or exit code is nothing to sign)."""
     seed, err = _seed(key)
@@ -334,7 +449,7 @@ def main(argv=None) -> int:
                    help="allow writing the seed inside a git work tree even when it is not ignored")
 
     s = sub.add_parser("sign", help="sign a dispatch record")
-    s.add_argument("--key", required=True, help="private seed file from gen-key")
+    s.add_argument("--key", default=None, help="private seed file from gen-key (or OPEN_FLEET_SIGNING_SEED / ORCA_DISPATCH_SIGNING_SEED)")
     s.add_argument("--manifest-id", required=True, help="the unit/manifest id this dispatch binds")
     s.add_argument("--contract-digest", required=True, help="sha256:… of the frozen contract")
     s.add_argument("--unit-class", required=True, help="mutation | report-only | planning")
@@ -360,11 +475,24 @@ def main(argv=None) -> int:
     s.add_argument("--execute-nc", action="store_const", const=True, default=None,
                    dest="execute_nc",
                    help="require the gate to EXECUTE the negative control (optional)")
+    s.add_argument("--profile", default=None,
+                   help="child execution profile (ro | rw | danger) (#590)")
+    s.add_argument("--parent-profile", default=None, dest="parent_profile",
+                   help="parent execution profile (ro | rw | danger) for monotonic narrowing (#590)")
+
+    v = sub.add_parser("verify", help="verify a dispatch record and monotonic privilege narrowing (#590)")
+    v.add_argument("record_pos", nargs="?", default=None, help="optional signed envelope path or JSON")
+    v.add_argument("--record", "--envelope", dest="record", default=None, help="signed envelope path or JSON")
+    v.add_argument("--pubkey", default=None, help="public key file or hex")
+    v.add_argument("--key", default=None, help="private seed file (or OPEN_FLEET_SIGNING_SEED / ORCA_DISPATCH_SIGNING_SEED)")
+    v.add_argument("--profile", default=None, help="child execution profile (ro | rw | danger)")
+    v.add_argument("--parent-profile", default=None, dest="parent_profile",
+                   help="parent execution profile (ro | rw | danger) for monotonic narrowing")
 
     t = sub.add_parser("sign-transcript",
                        help="sign a verify.py verdict object (#281/#386) — only one YOU produced: "
                             "its toolchain.files must hash the scripts beside this signer")
-    t.add_argument("--key", required=True, help="private seed file from gen-key")
+    t.add_argument("--key", default=None, help="private seed file from gen-key (or OPEN_FLEET_SIGNING_SEED / ORCA_DISPATCH_SIGNING_SEED)")
     t.add_argument("--transcript", required=True,
                    help="the verdict object verify.py wrote with --transcript-out (unsigned), from "
                         "a run you made with the scripts beside this signer — the signer re-hashes "
@@ -376,8 +504,17 @@ def main(argv=None) -> int:
     if args.cmd == "gen-key":
         return gen_key(Path(args.out), in_repo_ok=args.in_repo_ok)
     if args.cmd == "sign-transcript":
-        return sign_transcript(Path(args.key), Path(args.transcript),
+        return sign_transcript(Path(args.key) if args.key else None, Path(args.transcript),
                                Path(args.out) if args.out else None)
+    if args.cmd == "verify":
+        rec_ref = args.record if args.record is not None else args.record_pos
+        return verify_dispatch(
+            rec_ref,
+            pubkey_ref=args.pubkey,
+            key_ref=args.key,
+            profile=args.profile,
+            parent_profile=args.parent_profile,
+        )
     record = {
         "manifest_id": args.manifest_id,
         "contract_digest": args.contract_digest,
@@ -389,8 +526,10 @@ def main(argv=None) -> int:
         "no_gh": args.no_gh,
         "lane": args.lane,
         "execute_nc": args.execute_nc,
+        "profile": args.profile,
+        "parent_profile": args.parent_profile,
     }
-    return sign(Path(args.key), record)
+    return sign(Path(args.key) if args.key else None, record, parent_profile=args.parent_profile)
 
 
 if __name__ == "__main__":

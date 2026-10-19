@@ -29,7 +29,7 @@
 > prove compliance with <standard@version>
 ```
 
-**Needs** (the skill's `compatibility` field, verbatim): HARD dependency: Orca runtime + orchestration skill (Orca CLI). git + gh; a FROZEN standard catalog (standard@version) as the denominator. A review/verify worker playbook (addyosmani specialists, mattpocock code-review, gstack review army) — one router per worker.
+**Needs** (the skill's `compatibility` field, verbatim): HARD dependency: open-fleet RPI runtime (Orca, posix, adapter). git + gh; a FROZEN standard catalog (standard@version) as the denominator. A review/verify worker playbook (addyosmani specialists, mattpocock code-review, gstack review army) — one router per worker.
 
 ## What to provide
 

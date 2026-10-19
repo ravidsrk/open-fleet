@@ -1,0 +1,526 @@
+{
+  "_about": "Capability-based Runtime Provider Interface (RPI) matrix for open-fleet (#586). Declares the 8 runtime capabilities, the 14 orchestrator providers (native vs portable fallback capabilities and supported coding-agent harnesses), and the per-mission required/optional capability contract enforced by runtime/scripts/preflight.py.",
+  "schema_version": "open-fleet-capabilities/v1",
+  "capabilities": {
+    "cap:core-orchestration": {
+      "description": "Worktree isolation, task/run state, worker lifecycle (spawn/fence/poll), and two-way mailbox messaging.",
+      "fallback": "runtime/providers/local_state.py (SQLite WAL + git worktree + tmux/nohup)"
+    },
+    "cap:sandbox-vm": {
+      "description": "Disposable VM or container isolation for untrusted code execution and environment recipe verification.",
+      "fallback": "runtime/scripts/sandbox_doctor.py (Docker, Podman, bwrap, Gondolin, E2B, Daytona, Modal, Fly, Sprites)"
+    },
+    "cap:session-search": {
+      "description": "Cross-session FTS5 transcript indexing and search for prior-art recall and compound learning.",
+      "fallback": "runtime/scripts/search_sessions.py (10-harness local JSONL/SQLite indexer)"
+    },
+    "cap:browser": {
+      "description": "Headless browser automation, DOM snapshot, console/network capture, and Core Web Vitals/a11y probing.",
+      "fallback": "Playwright CLI / Chrome DevTools MCP / agent-browser"
+    },
+    "cap:mobile-emulator": {
+      "description": "iOS Simulator and Android Emulator lifecycle, screenshot, UI hierarchy dump, and gesture injection.",
+      "fallback": "xcrun simctl (macOS) and Android adb"
+    },
+    "cap:issue-tracker": {
+      "description": "Issue and pull-request enumeration, creation, commenting, and state transitions.",
+      "fallback": "GitHub CLI (gh) and runtime/scripts/pm.py"
+    },
+    "cap:scheduler": {
+      "description": "Recurring cron/interval execution for unattended sweeps and sentinel missions.",
+      "fallback": "POSIX crontab / systemd-run / GitHub Actions schedule"
+    },
+    "cap:orca-self-audit": {
+      "description": "Live inspection of the proprietary stablyai/orca binary and `orca skills get` embedded skill bundle.",
+      "fallback": null
+    }
+  },
+  "providers": {
+    "orca": {
+      "tier": 1,
+      "upstream": "stablyai/orca",
+      "description": "Orca desktop/CLI orchestrator with native worktree, terminal, orchestration, browser, emulator, and VM subsystems.",
+      "native_capabilities": [
+        "cap:core-orchestration",
+        "cap:sandbox-vm",
+        "cap:session-search",
+        "cap:browser",
+        "cap:mobile-emulator",
+        "cap:issue-tracker",
+        "cap:scheduler",
+        "cap:orca-self-audit"
+      ],
+      "fallback_capabilities": [],
+      "supported_harnesses": [
+        "claude",
+        "codex",
+        "opencode",
+        "omp",
+        "pi",
+        "jcode",
+        "goose",
+        "hermes",
+        "crush",
+        "gemini",
+        "cursor",
+        "antigravity",
+        "grok",
+        "droid"
+      ]
+    },
+    "posix": {
+      "tier": 1,
+      "upstream": "open-fleet/posix",
+      "description": "Zero-dependency POSIX reference runtime backed by SQLite WAL, git worktrees, and tmux/nohup.",
+      "native_capabilities": [
+        "cap:core-orchestration",
+        "cap:session-search",
+        "cap:issue-tracker",
+        "cap:scheduler"
+      ],
+      "fallback_capabilities": [
+        "cap:sandbox-vm",
+        "cap:browser",
+        "cap:mobile-emulator"
+      ],
+      "supported_harnesses": [
+        "claude",
+        "codex",
+        "opencode",
+        "omp",
+        "pi",
+        "jcode",
+        "goose",
+        "hermes",
+        "crush",
+        "gemini"
+      ]
+    },
+    "overstory": {
+      "tier": 1,
+      "upstream": "jayminwest/overstory",
+      "description": "SQLite mail + git worktree + tmux multi-agent orchestrator with tiered watchdog.",
+      "native_capabilities": [
+        "cap:core-orchestration",
+        "cap:session-search",
+        "cap:issue-tracker"
+      ],
+      "fallback_capabilities": [
+        "cap:sandbox-vm",
+        "cap:browser",
+        "cap:mobile-emulator",
+        "cap:scheduler"
+      ],
+      "supported_harnesses": [
+        "claude",
+        "codex",
+        "opencode",
+        "omp",
+        "pi",
+        "jcode",
+        "goose",
+        "hermes",
+        "crush",
+        "gemini"
+      ]
+    },
+    "t3code": {
+      "tier": 1,
+      "upstream": "pingdotgg/t3code",
+      "description": "Event-sourced orchestration server (`ws://127.0.0.1:3773`) with checkpointing and terminal sessions.",
+      "native_capabilities": [
+        "cap:core-orchestration",
+        "cap:browser",
+        "cap:issue-tracker"
+      ],
+      "fallback_capabilities": [
+        "cap:sandbox-vm",
+        "cap:session-search",
+        "cap:mobile-emulator",
+        "cap:scheduler"
+      ],
+      "supported_harnesses": [
+        "claude",
+        "codex",
+        "opencode",
+        "omp",
+        "pi",
+        "jcode",
+        "goose",
+        "hermes",
+        "crush",
+        "gemini"
+      ]
+    },
+    "ao": {
+      "tier": 1,
+      "upstream": "ComposioHQ/agent-orchestrator",
+      "description": "Composio Agent Orchestrator (`ao`) with worktree/tmux plugins and CI/PR reaction loops.",
+      "native_capabilities": [
+        "cap:core-orchestration",
+        "cap:issue-tracker",
+        "cap:scheduler"
+      ],
+      "fallback_capabilities": [
+        "cap:sandbox-vm",
+        "cap:session-search",
+        "cap:browser",
+        "cap:mobile-emulator"
+      ],
+      "supported_harnesses": [
+        "claude",
+        "codex",
+        "opencode",
+        "omp",
+        "pi",
+        "jcode",
+        "goose",
+        "hermes",
+        "crush",
+        "gemini"
+      ]
+    },
+    "superset": {
+      "tier": 1,
+      "upstream": "superset-sh/superset",
+      "description": "Worktree-first terminal IDE and agent workspace orchestrator.",
+      "native_capabilities": [
+        "cap:core-orchestration",
+        "cap:session-search",
+        "cap:issue-tracker"
+      ],
+      "fallback_capabilities": [
+        "cap:sandbox-vm",
+        "cap:browser",
+        "cap:mobile-emulator",
+        "cap:scheduler"
+      ],
+      "supported_harnesses": [
+        "claude",
+        "codex",
+        "opencode",
+        "omp",
+        "pi",
+        "jcode",
+        "goose",
+        "hermes",
+        "crush",
+        "gemini"
+      ]
+    },
+    "gastown": {
+      "tier": 2,
+      "upstream": "steveyegge/gastown",
+      "description": "Go multi-agent workspace manager (`gt` + `bd` beads graph ledger and convoy queues).",
+      "native_capabilities": [
+        "cap:core-orchestration",
+        "cap:issue-tracker",
+        "cap:scheduler"
+      ],
+      "fallback_capabilities": [
+        "cap:sandbox-vm",
+        "cap:session-search",
+        "cap:browser",
+        "cap:mobile-emulator"
+      ],
+      "supported_harnesses": [
+        "claude",
+        "codex",
+        "opencode",
+        "omp",
+        "pi",
+        "jcode",
+        "goose",
+        "hermes",
+        "crush",
+        "gemini"
+      ]
+    },
+    "worktrunk": {
+      "tier": 2,
+      "upstream": "max-sixty/worktrunk",
+      "description": "Rust git-worktree lifecycle CLI (`wt`) paired with open-fleet SQLite coordination.",
+      "native_capabilities": [
+        "cap:core-orchestration"
+      ],
+      "fallback_capabilities": [
+        "cap:sandbox-vm",
+        "cap:session-search",
+        "cap:browser",
+        "cap:mobile-emulator",
+        "cap:issue-tracker",
+        "cap:scheduler"
+      ],
+      "supported_harnesses": [
+        "claude",
+        "codex",
+        "opencode",
+        "omp",
+        "pi",
+        "jcode",
+        "goose",
+        "hermes",
+        "crush",
+        "gemini"
+      ]
+    },
+    "jcode-swarm": {
+      "tier": 2,
+      "upstream": "1jehuang/jcode",
+      "description": "Rust `jcode` unix-socket swarm coordinator with shared memory and transcript search.",
+      "native_capabilities": [
+        "cap:core-orchestration",
+        "cap:session-search"
+      ],
+      "fallback_capabilities": [
+        "cap:sandbox-vm",
+        "cap:browser",
+        "cap:mobile-emulator",
+        "cap:issue-tracker",
+        "cap:scheduler"
+      ],
+      "supported_harnesses": [
+        "claude",
+        "codex",
+        "opencode",
+        "omp",
+        "pi",
+        "jcode",
+        "goose",
+        "hermes",
+        "crush",
+        "gemini"
+      ]
+    },
+    "emdash": {
+      "tier": 2,
+      "upstream": "generalaction/emdash",
+      "description": "Multi-agent desktop orchestrator with PTY ring buffers, worktrees, and SSH/container support.",
+      "native_capabilities": [
+        "cap:core-orchestration",
+        "cap:sandbox-vm",
+        "cap:issue-tracker"
+      ],
+      "fallback_capabilities": [
+        "cap:session-search",
+        "cap:browser",
+        "cap:mobile-emulator",
+        "cap:scheduler"
+      ],
+      "supported_harnesses": [
+        "claude",
+        "codex",
+        "opencode",
+        "omp",
+        "pi",
+        "jcode",
+        "goose",
+        "hermes",
+        "crush",
+        "gemini"
+      ]
+    },
+    "vibe-kanban": {
+      "tier": 2,
+      "upstream": "BloopAI/vibe-kanban",
+      "description": "Rust Axum + SQLite kanban orchestrator for coding agents with worktree and container execution.",
+      "native_capabilities": [
+        "cap:core-orchestration",
+        "cap:sandbox-vm",
+        "cap:browser",
+        "cap:issue-tracker"
+      ],
+      "fallback_capabilities": [
+        "cap:session-search",
+        "cap:mobile-emulator",
+        "cap:scheduler"
+      ],
+      "supported_harnesses": [
+        "claude",
+        "codex",
+        "opencode",
+        "omp",
+        "pi",
+        "jcode",
+        "goose",
+        "hermes",
+        "crush",
+        "gemini"
+      ]
+    },
+    "paperclip": {
+      "tier": 2,
+      "upstream": "paperclipai/paperclip",
+      "description": "Control-plane server with atomic task checkouts, run heartbeats, and governance approvals.",
+      "native_capabilities": [
+        "cap:core-orchestration",
+        "cap:issue-tracker",
+        "cap:scheduler"
+      ],
+      "fallback_capabilities": [
+        "cap:sandbox-vm",
+        "cap:session-search",
+        "cap:browser",
+        "cap:mobile-emulator"
+      ],
+      "supported_harnesses": [
+        "claude",
+        "codex",
+        "opencode",
+        "omp",
+        "pi",
+        "jcode",
+        "goose",
+        "hermes",
+        "crush",
+        "gemini"
+      ]
+    },
+    "multiclaude": {
+      "tier": 2,
+      "upstream": "dlorenc/multiclaude",
+      "description": "Go tmux + git-worktree multi-worker daemon with merge-queue Shepherd.",
+      "native_capabilities": [
+        "cap:core-orchestration",
+        "cap:issue-tracker"
+      ],
+      "fallback_capabilities": [
+        "cap:sandbox-vm",
+        "cap:session-search",
+        "cap:browser",
+        "cap:mobile-emulator",
+        "cap:scheduler"
+      ],
+      "supported_harnesses": [
+        "claude",
+        "codex",
+        "opencode",
+        "omp",
+        "pi",
+        "jcode",
+        "goose",
+        "hermes",
+        "crush",
+        "gemini"
+      ]
+    },
+    "openhands": {
+      "tier": 2,
+      "upstream": "OpenHands/OpenHands",
+      "description": "Container/Kubernetes sandboxed coding-agent runtime with REST conversation API.",
+      "native_capabilities": [
+        "cap:core-orchestration",
+        "cap:sandbox-vm",
+        "cap:browser",
+        "cap:issue-tracker"
+      ],
+      "fallback_capabilities": [
+        "cap:session-search",
+        "cap:mobile-emulator",
+        "cap:scheduler"
+      ],
+      "supported_harnesses": [
+        "claude",
+        "codex",
+        "opencode",
+        "omp",
+        "pi",
+        "jcode",
+        "goose",
+        "hermes",
+        "crush",
+        "gemini"
+      ]
+    }
+  },
+  "missions": {
+    "absorb-it": {
+      "required": ["cap:core-orchestration"],
+      "optional": ["cap:issue-tracker", "cap:session-search"]
+    },
+    "access-it": {
+      "required": ["cap:core-orchestration"],
+      "optional": ["cap:browser", "cap:session-search"]
+    },
+    "attest-it": {
+      "required": ["cap:core-orchestration"],
+      "optional": ["cap:session-search", "cap:issue-tracker"]
+    },
+    "clean-sweep": {
+      "required": ["cap:core-orchestration"],
+      "optional": ["cap:issue-tracker", "cap:session-search", "cap:scheduler"]
+    },
+    "deflake-it": {
+      "required": ["cap:core-orchestration"],
+      "optional": ["cap:session-search"]
+    },
+    "document-it": {
+      "required": ["cap:core-orchestration"],
+      "optional": ["cap:browser", "cap:session-search"]
+    },
+    "field-test-it": {
+      "required": ["cap:core-orchestration", "cap:mobile-emulator"],
+      "optional": ["cap:browser", "cap:session-search"]
+    },
+    "floor-it": {
+      "required": ["cap:core-orchestration"],
+      "optional": ["cap:session-search"]
+    },
+    "harden-it": {
+      "required": ["cap:core-orchestration"],
+      "optional": ["cap:sandbox-vm", "cap:session-search", "cap:scheduler"]
+    },
+    "map-it": {
+      "required": ["cap:core-orchestration"],
+      "optional": ["cap:session-search", "cap:issue-tracker"]
+    },
+    "migrate-it": {
+      "required": ["cap:core-orchestration"],
+      "optional": ["cap:sandbox-vm", "cap:session-search"]
+    },
+    "modernize-it": {
+      "required": ["cap:core-orchestration"],
+      "optional": ["cap:session-search"]
+    },
+    "offload-it": {
+      "required": ["cap:core-orchestration", "cap:sandbox-vm"],
+      "optional": ["cap:session-search"]
+    },
+    "oncall-it": {
+      "required": ["cap:core-orchestration"],
+      "optional": ["cap:session-search", "cap:issue-tracker"]
+    },
+    "oss-contribute": {
+      "required": ["cap:core-orchestration"],
+      "optional": ["cap:issue-tracker", "cap:session-search"]
+    },
+    "pin-it": {
+      "required": ["cap:core-orchestration", "cap:orca-self-audit"],
+      "optional": ["cap:session-search"]
+    },
+    "prove-it": {
+      "required": ["cap:core-orchestration"],
+      "optional": ["cap:session-search"]
+    },
+    "reshape-it": {
+      "required": ["cap:core-orchestration"],
+      "optional": ["cap:session-search"]
+    },
+    "review-it": {
+      "required": ["cap:core-orchestration"],
+      "optional": ["cap:issue-tracker", "cap:session-search"]
+    },
+    "root-cause": {
+      "required": ["cap:core-orchestration"],
+      "optional": ["cap:session-search"]
+    },
+    "ship-it": {
+      "required": ["cap:core-orchestration"],
+      "optional": ["cap:browser", "cap:session-search", "cap:issue-tracker"]
+    },
+    "speed-it": {
+      "required": ["cap:core-orchestration"],
+      "optional": ["cap:browser", "cap:session-search"]
+    }
+  }
+}

@@ -23,6 +23,7 @@
   <a href="CONTRIBUTING.md">Contributing</a> ·
   <a href="SECURITY.md">Security</a> ·
   <a href="docs/install.md">Install</a> ·
+  <a href="docs/runtimes.md">Runtimes &amp; Harnesses</a> ·
   <a href="docs/recipes.md">Examples</a> ·
   <a href="docs/development.md">Local development</a> ·
   <a href="docs/ops.md">Ops</a>
@@ -34,10 +35,11 @@
 |---|---|
 | Run a mission on your project | [Install](docs/install.md), then [your first review](docs/getting-started.md#your-first-mission-a-review-it-dry-run) |
 | Find the workflow for a development task | [Mission selector](docs/missions/README.md#choose-by-task) and [prompt recipes](docs/recipes.md) |
+| Run across multiple orchestrators or coding-agent harnesses | [Multi-runtime & harness guide](docs/runtimes.md) (`OPEN_FLEET_RUNTIME=orca\|posix\|overstory\|t3code\|ao\|superset\|gastown\|worktrunk\|jcode-swarm\|emdash\|vibe-kanban\|paperclip\|multiclaude\|openhands`) |
 | Improve this catalog or its docs | [Local development](docs/development.md) — Git and Python; no live Orca session needed |
 | Understand what a result proves | [Read a run result](docs/concepts.md#read-a-run-result) and [proof status](#proof-status) |
 
-**Install — one command** (needs `git` + Python ≥ 3.11; to *run* missions add Orca ≥ v1.4.229, `gh`, Claude Code — [pinned list](docs/distribution.md#prerequisites-pinned)):
+**Install — one command** (needs `git` + Python ≥ 3.11; to *run* missions add an [open-fleet RPI runtime](docs/runtimes.md) such as Orca ≥ v1.4.229 or standalone `posix`, `gh`, and a supported coding-agent harness — [pinned list](docs/distribution.md#prerequisites-pinned)):
 
 ```bash
 git clone https://github.com/ravidsrk/orca-fleet.git && cd orca-fleet && sh scripts/install.sh
@@ -47,7 +49,7 @@ The installer validates the catalog, links every mission into `~/.claude/skills`
 
 ---
 
-**orca-fleet** is a catalog of missions for the [Orca](https://github.com/stablyai/orca) runtime.
+**open-fleet** (originally **orca-fleet**) is a multi-runtime, multi-harness catalog of missions for the [Orca](https://github.com/stablyai/orca) runtime and the [open-fleet Runtime Provider Interface (RPI)](docs/runtimes.md).
 It is an independent, community-maintained project, not affiliated with or endorsed by Stably,
 the maker of Orca ([third-party notices](THIRD_PARTY_NOTICES.md)).
 Use it to build a feature, address known defects, improve tests, or review a PR. A **mission** is

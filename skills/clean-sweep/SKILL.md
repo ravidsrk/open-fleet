@@ -13,7 +13,7 @@ description: >-
   it — different convergence proofs) and not for building new work (ship-it).
 license: MIT
 compatibility: >-
-  HARD dependency: Orca runtime + the orchestration skill (Orca CLI). git + gh (or a tracker via
+  HARD dependency: open-fleet RPI runtime (Orca, posix, t3code, ao+). git + gh (or a tracker via
   orca linear or orca jira). One worker playbook pack per worker (Matt triage/tdd, or Addy
   debug/build) — never two routers in one worker.
 metadata:

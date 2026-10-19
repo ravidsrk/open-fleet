@@ -13,7 +13,7 @@ description: >-
   (reshape-it — its DEEPEN units consume this mission's characterization net).
 license: MIT
 compatibility: >-
-  HARD dependency: Orca runtime + orchestration skill (Orca CLI). git + gh; a runnable suite +
+  HARD dependency: open-fleet RPI runtime (Orca, posix, adapter). git + gh; a runnable suite +
   coverage tool. A TDD worker playbook (addyosmani or mattpocock) — one router per worker.
 metadata:
   proof: self-run

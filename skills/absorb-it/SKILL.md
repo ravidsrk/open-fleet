@@ -12,7 +12,7 @@ description: >-
   authorship, and the contributor round-trip are what make this its own mission.
 license: MIT
 compatibility: >-
-  HARD dependency: Orca runtime + the orchestration skill (Orca CLI). git + gh with MERGE rights on
+  HARD dependency: open-fleet RPI runtime (Orca, posix, t3code, ao+). git + gh with MERGE rights on
   the target repo and permission to comment on and close inbound PRs. A runnable test suite (the
   receipt oracle) and the repo's DCO/CLA policy. One worker playbook pack per worker (matt or addy)
   — never two routers in one worker.

@@ -198,13 +198,14 @@ ENV_GIVEN=0; ROUTE_ENV=""
 PAIRING_GIVEN=0; ROUTE_PAIRING=""
 CWD_GIVEN=0; CLI_CWD=""
 HOST_GIVEN=0; HOST_FLAG=""
+PARENT_PROFILE_GIVEN=0; PARENT_PROFILE=""
 args=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --mark-ready) MARK_READY=1; shift ;;
     --task-brief) TASK_BRIEF=1; shift ;;
     --task-ready) TASK_READY_FILTER=1; shift ;;
-    --timeout-ms|--run|--from|--retry-of|--retry-request|--on|--environment|--pairing-code|--cli-cwd|--task-status|--spec|--task-title|--deps|--parent|--host)
+    --timeout-ms|--run|--from|--retry-of|--retry-request|--on|--environment|--pairing-code|--cli-cwd|--task-status|--spec|--task-title|--deps|--parent|--host|--parent-profile)
       flag="$1"
       if [ $# -lt 2 ]; then
         echo "SPAWN=REFUSED task=? ${flag} needs a value" >&2
@@ -226,6 +227,7 @@ while [ $# -gt 0 ]; do
         --deps) DEPS_GIVEN=1; DEPS="$2" ;;
         --parent) PARENT_GIVEN=1; PARENT="$2" ;;
         --host) HOST_GIVEN=1; HOST_FLAG="$2" ;;
+        --parent-profile) PARENT_PROFILE_GIVEN=1; PARENT_PROFILE="$2" ;;
       esac
       shift 2 ;;
     *) args+=("$1"); shift ;;
@@ -373,12 +375,16 @@ esac
 # `kilo` is deliberately ABSENT for the same reason opencode fails closed: Orca STRIPS
 # `--dangerously-skip-permissions` from both (`tui-agent-launch-defaults.ts:5-8` at v1.4.203).
 case "$agent" in
-  claude|codex|cursor|gemini|grok|droid|opencode|omp|pi|antigravity) : ;;
+  claude|codex|cursor|gemini|grok|droid|opencode|omp|pi|antigravity|jcode|goose|hermes|crush) : ;;
   *)
-    echo "SPAWN=REFUSED task=${task} unknown agent '${agent}' (want claude|codex|cursor|gemini|grok|droid|opencode|omp|pi|antigravity)" >&2
+    echo "SPAWN=REFUSED task=${task} unknown agent '${agent}' (want claude|codex|cursor|gemini|grok|droid|opencode|omp|pi|antigravity|jcode|goose|hermes|crush)" >&2
     exit 2
     ;;
 esac
+if [ "$PARENT_PROFILE_GIVEN" = "1" ] && [ -z "$PARENT_PROFILE" ]; then
+  echo "SPAWN=REFUSED task=${tname} --parent-profile needs a non-empty value" >&2
+  exit 2
+fi
 # Validated-flag argv. ROUTE_ARGS are GLOBAL (--environment/--pairing-code ride every orca
 # call); SCOPE_ARGS (--run/--from) ride only the orchestration verbs whose specs allow them —
 # request-show, the terminal verbs, and vm doctor would reject them as unknown flags (args.ts).
@@ -398,6 +404,13 @@ if [ "$RETRY_REQ_GIVEN" = "1" ]; then WS_ARGS+=(--retry-request "$RETRY_REQUEST"
 SP="${SP:-$(pwd)}"
 PROFILE="${PROFILE:-rw}"
 SETTLE_SECS="${SETTLE_SECS:-20}"
+ACTIVE_RUNTIME="${OPEN_FLEET_RUNTIME:-${ORCA_FLEET_RUNTIME:-orca}}"
+if [ -n "$ACTIVE_RUNTIME" ] && [ "$ACTIVE_RUNTIME" != "orca" ]; then
+  WS_ARGS+=(--profile "$PROFILE")
+  if [ -n "${PARENT_PROFILE:-${OPEN_FLEET_PARENT_PROFILE:-${ORCA_PARENT_PROFILE:-}}}" ]; then
+    WS_ARGS+=(--parent-profile "${PARENT_PROFILE:-${OPEN_FLEET_PARENT_PROFILE:-${ORCA_PARENT_PROFILE:-}}}")
+  fi
+fi
 # Keep a readable worktree/receipt label with a checksum to distinguish squashed titles (#44).
 # This is NOT attempt identity: identical titles, retries, and checksum collisions are possible.
 # Actual scratch isolation is the atomic directory allocation below, independent of this label.
@@ -484,6 +497,26 @@ step=resolve-profile
 case "$PROFILE" in ro|rw|danger) : ;; *)
   echo "SPAWN=REFUSED task=${task} unknown PROFILE='$PROFILE' (want ro|rw|danger)" >&2; exit 2 ;;
 esac
+eff_parent_profile="${PARENT_PROFILE:-${OPEN_FLEET_PARENT_PROFILE:-${ORCA_PARENT_PROFILE:-}}}"
+if [ -n "$eff_parent_profile" ]; then
+  case "$eff_parent_profile" in
+    ro) _pr=0 ;;
+    rw) _pr=1 ;;
+    danger) _pr=2 ;;
+    *)
+      echo "SPAWN=REFUSED task=${task} unknown parent profile '${eff_parent_profile}' (want ro|rw|danger)" >&2
+      exit 2 ;;
+  esac
+  case "$PROFILE" in
+    ro) _cr=0 ;;
+    rw) _cr=1 ;;
+    danger) _cr=2 ;;
+  esac
+  if [ "$_cr" -gt "$_pr" ]; then
+    echo "SPAWN=REFUSED task=${task} monotonic privilege narrowing violation: child PROFILE=${PROFILE} exceeds parent profile '${eff_parent_profile}' (ro < rw < danger)" >&2
+    exit 2
+  fi
+fi
 # rw and danger launch fully-autonomous (permission-bypass) write workers — non-blocking by
 # design, but a real capability grant. They are FAIL-CLOSED behind an explicit opt-in so a
 # bare/accidental invocation never spawns a bypass worker silently. ro (read-only) needs none.
@@ -491,7 +524,8 @@ esac
 #            isolated worktree + build-blind review + PR gate + testnet/staging rails)
 #   danger → ORCA_COORD_ALLOW_DANGER=1            (implies the above AND the ephemeral-sandbox
 #            requirement — see sandbox-policy.md; use for destructive / exploit work)
-if [ "$PROFILE" = "rw" ] && [ "${ORCA_COORD_ALLOW_AUTONOMOUS_WRITE:-0}" != "1" ]; then
+ALLOW_RW="${OPEN_FLEET_COORD_ALLOW_AUTONOMOUS_WRITE:-${ORCA_COORD_ALLOW_AUTONOMOUS_WRITE:-0}}"
+if [ "$PROFILE" = "rw" ] && [ "$ALLOW_RW" != "1" ]; then
   echo "SPAWN=REFUSED task=${task} PROFILE=rw launches an autonomous permission-bypass worker — set ORCA_COORD_ALLOW_AUTONOMOUS_WRITE=1 to accept (worktree + review + PR gate are the safety layer, not per-command prompts)" >&2
   exit 2
 fi
@@ -505,11 +539,12 @@ if [ "$PROFILE" = "danger" ]; then
   # So the evidence is PRODUCED here rather than accepted here: this script runs the doctor and
   # reads its verdict. ORCA_SANDBOX_DOCTOR is now an OUTPUT path — where the transcript is WRITTEN
   # for the lane ledger — not an input anyone is trusted to supply.
-  if [ "${ORCA_COORD_ALLOW_DANGER:-0}" != "1" ]; then
+  ALLOW_DANGER="${OPEN_FLEET_COORD_ALLOW_DANGER:-${ORCA_COORD_ALLOW_DANGER:-0}}"
+  if [ "$ALLOW_DANGER" != "1" ]; then
     echo "SPAWN=REFUSED task=${task} PROFILE=danger requires ORCA_COORD_ALLOW_DANGER=1 AND an ephemeral sandbox (sandbox-policy.md)" >&2
     exit 2
   fi
-  recipe="${ORCA_SANDBOX_RECIPE:-}"
+  recipe="${OPEN_FLEET_SANDBOX_RECIPE:-${ORCA_SANDBOX_RECIPE:-}}"
   case "$recipe" in
     "" )
       echo "SPAWN=REFUSED task=${task} PROFILE=danger requires ORCA_SANDBOX_RECIPE=<orca-per-workspace-env recipe id> — the flag alone is not evidence of an ephemeral sandbox (sandbox-policy.md)" >&2
@@ -552,9 +587,10 @@ if [ "$PROFILE" = "danger" ]; then
     exit 2
   fi
   # The transcript is OURS now; record it where the lane ledger wants it.
-  if [ -n "${ORCA_SANDBOX_DOCTOR:-}" ]; then
-    if ! cp "$doctor_out" "$ORCA_SANDBOX_DOCTOR" 2>/dev/null; then
-      echo "SPAWN=REFUSED task=${task} could not write the doctor transcript to ORCA_SANDBOX_DOCTOR='${ORCA_SANDBOX_DOCTOR}' — the lane ledger record is part of the danger contract (sandbox-policy.md)" >&2
+  DOCTOR_DEST="${OPEN_FLEET_SANDBOX_DOCTOR:-${ORCA_SANDBOX_DOCTOR:-}}"
+  if [ -n "$DOCTOR_DEST" ]; then
+    if ! cp "$doctor_out" "$DOCTOR_DEST" 2>/dev/null; then
+      echo "SPAWN=REFUSED task=${task} could not write the doctor transcript to ORCA_SANDBOX_DOCTOR='${DOCTOR_DEST}' — the lane ledger record is part of the danger contract (sandbox-policy.md)" >&2
       rm -f "$doctor_out"
       exit 2
     fi
@@ -600,11 +636,21 @@ case "$agent:$PROFILE" in
   antigravity:rw|antigravity:danger) cmd_default="agy --dangerously-skip-permissions" ;;
   grok:rw|grok:danger)       cmd_default="grok --permission-mode bypassPermissions" ;;
   droid:rw|droid:danger)     cmd_default="droid --auto high" ;;
-  # No Orca-verified non-blocking flag → WORKER_CMD required:
-  #   cursor:ro, grok:ro, droid:ro, antigravity:ro (no read-only modes in Orca's map)
-  #   opencode:*, kilo:* (Orca STRIPS --dangerously-skip-permissions from both;
-  #                       opencode autonomy is config-driven)
-  #   omp:*, pi:* (not in Orca's autonomous-arg map)
+  jcode:ro)                  cmd_default="jcode --no-session --disabled-tools write,edit,multiedit,patch,apply_patch,bash,shell,terminal" ;;
+  jcode:rw|jcode:danger)     cmd_default="jcode --no-session" ;;
+  goose:ro)                  cmd_default="GOOSE_MODE=chat goose run --no-session" ;;
+  goose:rw|goose:danger)     cmd_default="GOOSE_MODE=auto goose run --no-session" ;;
+  hermes:ro)                 cmd_default="hermes chat --Continue" ;;
+  hermes:rw|hermes:danger)   cmd_default="hermes chat --yolo" ;;
+  crush:ro)                  cmd_default="crush run --quiet" ;;
+  crush:rw|crush:danger)     cmd_default="crush run --yolo" ;;
+  # Non-Orca RPI providers support opencode, omp, and pi natively without Orca's launch-arg stripping:
+  opencode:ro)               if [ "$ACTIVE_RUNTIME" != "orca" ]; then cmd_default='OPENCODE_PERMISSION={"edit":"deny","bash":"deny"} opencode run'; fi ;;
+  opencode:rw|opencode:danger) if [ "$ACTIVE_RUNTIME" != "orca" ]; then cmd_default='OPENCODE_PERMISSION={"edit":"allow","bash":"allow"} opencode run'; fi ;;
+  omp:ro)                    if [ "$ACTIVE_RUNTIME" != "orca" ]; then cmd_default="omp --tools read,grep,find,ls --no-session"; fi ;;
+  omp:rw|omp:danger)         if [ "$ACTIVE_RUNTIME" != "orca" ]; then cmd_default="omp --no-session"; fi ;;
+  pi:ro)                     if [ "$ACTIVE_RUNTIME" != "orca" ]; then cmd_default="pi --tools read,grep,find,ls --no-session"; fi ;;
+  pi:rw|pi:danger)           if [ "$ACTIVE_RUNTIME" != "orca" ]; then cmd_default="pi --no-session"; fi ;;
 esac
 
 # Generalized launch override: WORKER_CMD (any agent) or the legacy CLAUDE_CMD/CODEX_CMD.
@@ -616,8 +662,9 @@ case "$agent" in
   codex)  override="${CODEX_CMD:-${WORKER_CMD:-}}" ;;
   *)      override="${WORKER_CMD:-}" ;;
 esac
+ALLOW_OVERRIDE="${OPEN_FLEET_COORD_ALLOW_CMD_OVERRIDE:-${ORCA_COORD_ALLOW_CMD_OVERRIDE:-0}}"
 if [ -n "$override" ]; then
-  if [ "${ORCA_COORD_ALLOW_CMD_OVERRIDE:-0}" != "1" ]; then
+  if [ "$ALLOW_OVERRIDE" != "1" ]; then
     echo "SPAWN=REFUSED task=${task} launch override set without ORCA_COORD_ALLOW_CMD_OVERRIDE=1 (it would bypass PROFILE=$PROFILE)" >&2
     exit 2
   fi
@@ -660,11 +707,12 @@ fi
 # WORKER_CMD override keeps its own semantics behind its own opt-in.
 if [ "$PROFILE" != "ro" ]; then
   step=deny-hook-arming
-  if [ -n "${ORCA_DENY_HOOK_SETTINGS:-}" ]; then
+  DENY_HOOK_SETTINGS="${OPEN_FLEET_DENY_HOOK_SETTINGS:-${ORCA_DENY_HOOK_SETTINGS:-}}"
+  if [ -n "$DENY_HOOK_SETTINGS" ]; then
     # The hook verifies its own registration: parses the settings, then runs
     # the REGISTERED command (not this repo's copy) under its configured env
     # against deny/allow probes. A mention of the filename is not arming.
-    if ! _arming=$(sh "$HERE/deny-hook.sh" --verify-settings "$ORCA_DENY_HOOK_SETTINGS" 2>&1); then
+    if ! _arming=$(sh "$HERE/deny-hook.sh" --verify-settings "$DENY_HOOK_SETTINGS" 2>&1); then
       echo "SPAWN=REFUSED task=${task} deny-hook not armed: ${_arming} — wire it (deny-hook.sh --settings <worktree>) or unset ORCA_DENY_HOOK_SETTINGS to proceed UNVERIFIED" >&2
       exit 2
     fi
@@ -826,9 +874,14 @@ if [ -z "$override" ] && [ "$PROFILE" != "ro" ]; then
   case "$agent" in
     claude|antigravity) profile_flag="--dangerously-skip-permissions" ;;
     codex)  profile_flag="--dangerously-bypass-approvals-and-sandbox" ;;
-    gemini|cursor) profile_flag="--yolo" ;;
+    gemini|cursor|omp|crush) profile_flag="--yolo" ;;
+    hermes) profile_flag="--yolo --toolsets coding" ;;
     grok)   profile_flag="--permission-mode bypassPermissions" ;;
     droid)  profile_flag="--auto high" ;;
+    jcode)  profile_flag="--disabled-tools selfdev,desktop_selfdev" ;;
+    goose)  profile_flag="--with-builtin developer" ;;
+    opencode) profile_flag="--auto --standalone" ;;
+    pi)     profile_flag="--tools read,bash,edit,write,grep,find,ls" ;;
   esac
 
   step=read-start-receipt

@@ -10,7 +10,7 @@ description: >-
   deterministic failures (clean-sweep).
 license: MIT
 compatibility: >-
-  HARD dependency: Orca runtime + orchestration skill (Orca CLI). git + gh; a runnable suite. A
+  HARD dependency: open-fleet RPI runtime (Orca, posix, adapter). git + gh; a runnable suite. A
   feedback-loop-first debugging playbook (mattpocock diagnosing-bugs or addyosmani debug) — one router
   per worker.
 metadata:

@@ -58,18 +58,18 @@ if [ "${1:-}" = "--event" ]; then
   [ -n "$EVENT" ] || { echo "verify-gate: --event needs a value" >&2; exit 2; }  # usage is 2, never a bare set -eu exit 1 (#382)
   shift 2
 fi
-MANIFEST="${ORCA_MANIFEST:-${1:-}}"
-CONTRACT_SOURCE="${ORCA_CONTRACT_SOURCE:-}"
-CONTRACT_DIGEST="${ORCA_CONTRACT_DIGEST:-}"
-REPO="${ORCA_REPO:-}"
-BASE="${ORCA_BASE:-}"
-SYMBOL="${ORCA_SYMBOL:-}"
-UNIT_CLASS="${ORCA_UNIT_CLASS:-}"
-NO_GH="${ORCA_NO_GH:-}"
-LIGHTING="${ORCA_LIGHTING:-}"
-UNIT_LANE="${ORCA_UNIT_LANE:-}"
-RECORD="${ORCA_DISPATCH_RECORD:-}"
-PUBKEY="${ORCA_DISPATCH_PUBKEY:-}"
+MANIFEST="${OPEN_FLEET_GATE_MANIFEST:-${OPEN_FLEET_MANIFEST:-${ORCA_MANIFEST:-${1:-}}}}"
+CONTRACT_SOURCE="${OPEN_FLEET_CONTRACT_SOURCE:-${ORCA_CONTRACT_SOURCE:-}}"
+CONTRACT_DIGEST="${OPEN_FLEET_CONTRACT_DIGEST:-${ORCA_CONTRACT_DIGEST:-}}"
+REPO="${OPEN_FLEET_REPO:-${ORCA_REPO:-}}"
+BASE="${OPEN_FLEET_BASE:-${ORCA_BASE:-}}"
+SYMBOL="${OPEN_FLEET_SYMBOL:-${ORCA_SYMBOL:-}}"
+UNIT_CLASS="${OPEN_FLEET_UNIT_CLASS:-${ORCA_UNIT_CLASS:-}}"
+NO_GH="${OPEN_FLEET_NO_GH:-${ORCA_NO_GH:-}}"
+LIGHTING="${OPEN_FLEET_LIGHTING:-${ORCA_LIGHTING:-}}"
+UNIT_LANE="${OPEN_FLEET_UNIT_LANE:-${ORCA_UNIT_LANE:-}}"
+RECORD="${OPEN_FLEET_DISPATCH_RECORD:-${ORCA_DISPATCH_RECORD:-}}"
+PUBKEY="${OPEN_FLEET_DISPATCH_PUBKEY:-${ORCA_DISPATCH_PUBKEY:-}}"
 # #135 key SOURCE: an injected ORCA_DISPATCH_PUBKEY (off-worker orchestrator) else the committed
 # opt-in pin .orca/dispatch-pubkey — preferring the reviewed remote blob, falling back to the working
 # tree — so a repo that follows the docs actually gets the check to RUN.
@@ -120,15 +120,18 @@ set -- --manifest "$MANIFEST"
 [ -n "$UNIT_LANE" ] && set -- "$@" --lane "$UNIT_LANE"
 [ -n "$RECORD" ] && set -- "$@" --dispatch-record "$RECORD"
 [ -n "$PUBKEY" ] && set -- "$@" --dispatch-pubkey "$PUBKEY"
-[ -n "${ORCA_EXECUTE_NC:-}" ] && set -- "$@" --execute-nc
-[ -n "${ORCA_NC_COMMAND:-}" ] && set -- "$@" --nc-command "$ORCA_NC_COMMAND"
+EXECUTE_NC="${OPEN_FLEET_EXECUTE_NC:-${ORCA_EXECUTE_NC:-}}"
+NC_COMMAND="${OPEN_FLEET_NC_COMMAND:-${ORCA_NC_COMMAND:-}}"
+PROVENANCE="${OPEN_FLEET_PROVENANCE:-${ORCA_PROVENANCE:-}}"
+[ -n "$EXECUTE_NC" ] && set -- "$@" --execute-nc
+[ -n "$NC_COMMAND" ] && set -- "$@" --nc-command "$NC_COMMAND"
 # h409 F-1/F-2: verify.py learns the lane too, so a sound lane's review authority (an explicit
 # repo, a gh outside any worker-writable location) is REQUIRED there, not merely noted here.
-[ -n "${ORCA_PROVENANCE:-}" ] && set -- "$@" --provenance "$ORCA_PROVENANCE"
+[ -n "$PROVENANCE" ] && set -- "$@" --provenance "$PROVENANCE"
 
 # #279: say it here rather than let the operator read it out of verify.py's invariant list. The
 # refusal itself is verify.py's — this is a signpost, never the check.
-if [ -n "${ORCA_EXECUTE_NC:-}" ] && [ -z "${ORCA_NC_COMMAND:-}" ]; then
+if [ -n "$EXECUTE_NC" ] && [ -z "$NC_COMMAND" ]; then
   echo "verify-gate: NOTE — ORCA_EXECUTE_NC is set without ORCA_NC_COMMAND. The executed control" \
        "needs the criterion-bound command from OFF the worker; the manifest cannot supply it." >&2
 fi
@@ -136,7 +139,7 @@ fi
 # Trust boundary (#112, #135): soundness is a property of the EXECUTION CONTEXT, not of an env var the
 # worker can set. A signed dispatch record is verified (defense-in-depth in-session; a real boundary
 # only off-worker with a trusted key).
-case "${ORCA_PROVENANCE:-}" in
+case "$PROVENANCE" in
   ci|mcp|sdk|dispatch) : ;;  # off-worker context sets the env AND the key — sound; record is auditable
   *) echo "verify-gate: NOTE — native in-session hook is ADVISORY: the worker controls ORCA_* (incl." \
           "ORCA_PROVENANCE and any dispatch key), so nothing here is a soundness boundary. A signed" \
