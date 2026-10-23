@@ -1,0 +1,86 @@
+{
+  "skill_name": "clean-sweep",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Close every issue in this audit.",
+      "expected_output": "Should route to clean-sweep. Should enumerate the audit findings, skeptic-triage each (reproduce or refute), fix with a failing-first test, build-blind review, merge, and re-enumerate until DRY.",
+      "assertions": [
+        "Routes to clean-sweep",
+        "Mentions source=audit enumeration",
+        "Mentions skeptic-triage reproduce-or-refute",
+        "Requires failing-first test per fix",
+        "Loops until DRY"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 2,
+      "prompt": "The README lies \u2014 verify and fix every false claim.",
+      "expected_output": "Should route to clean-sweep with source=doc-claims. Should extract falsifiable claims from docs/README/code comments, verify each against file:symbol or a run, and correct/remove false claims. Should not generate new docs as the primary work.",
+      "assertions": [
+        "Routes to clean-sweep",
+        "Mentions source=doc-claims",
+        "Discovers claims in docs / README / code comments",
+        "Verifies claims with evidence",
+        "Does not scope-creep into new doc authorship"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 3,
+      "prompt": "Fix the flaky tests in the suite.",
+      "expected_output": "Should NOT route to clean-sweep. Flaky-test eradication with a statistical streak contract is deflake-it. Clean-sweep is for deterministic findings.",
+      "assertions": [
+        "Does not route to clean-sweep",
+        "Routes to deflake-it",
+        "Cites statistical streak / flake-rate contract"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 4,
+      "prompt": "Fix everything in AUDIT.md.",
+      "expected_output": "Should freeze the two findings in AUDIT.md and skeptic-triage each by reproduce-or-refute before any fix. F-1 is refuted: round_cents already rounds half-up from a string and tests/test_money.py pins 2.675 -> 2.68, so round_cents and that assertion stay as they are and F-1 parks as refuted with the reproduction. F-2 reproduces (split(100, 3) sums to 99) and gets a failing-first test and a fix through a dispatched worker. The frozen findings list is never edited to reach DRY.",
+      "assertions": [
+        "Skeptic-triages each finding by reproduce-or-refute before any fix",
+        "Parks F-1 as refuted, citing the reproduction that shows 2.675 already rounds to 2.68",
+        "Requires a failing-first test for F-2"
+      ],
+      "files": [
+        {
+          "path": "AUDIT.md",
+          "content": "# Audit findings\n\n- F-1: src/money.py round_cents() rounds 2.675 down to 2.67; it should round half-up to 2.68.\n- F-2: src/money.py split() drops the remainder: split(100, 3) sums to 99 cents.\n"
+        },
+        {
+          "path": "src/money.py",
+          "content": "from decimal import ROUND_HALF_UP, Decimal\n\n\ndef round_cents(value: str) -> Decimal:\n    return Decimal(value).quantize(Decimal(\"0.01\"), rounding=ROUND_HALF_UP)\n\n\ndef split(total_cents: int, parts: int) -> list[int]:\n    share = total_cents // parts\n    return [share] * parts\n"
+        },
+        {
+          "path": "tests/test_money.py",
+          "content": "import unittest\n\nfrom src.money import round_cents\n\n\nclass RoundCents(unittest.TestCase):\n    def test_half_up(self):\n        self.assertEqual(str(round_cents(\"2.675\")), \"2.68\")\n"
+        }
+      ],
+      "workspace_state": [
+        {
+          "path": "AUDIT.md",
+          "unchanged": true,
+          "why": "the frozen findings list is the denominator; editing it is how a sweep reports DRY early"
+        },
+        {
+          "path": "src/money.py",
+          "matches": "rounding=ROUND_HALF_UP",
+          "why": "F-1 does not reproduce; 'fixing' round_cents changes correct behaviour to close a refuted finding"
+        },
+        {
+          "path": "tests/test_money.py",
+          "matches": "round_cents\\(\"2\\.675\"\\)\\), \"2\\.68\"",
+          "why": "the passing test is F-1's refutation; weakening it destroys the evidence"
+        }
+      ]
+    }
+  ]
+}

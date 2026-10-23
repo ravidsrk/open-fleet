@@ -1,0 +1,72 @@
+{
+  "skill_name": "oncall-it",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Last week's incident took four hours because we were blind \u2014 make the checkout service operable: telemetry, alerts, runbooks.",
+      "expected_output": "Should route to oncall-it. Should freeze the path set and 2-4 on-call questions per path at a human gate, instrument (structured events, correlation ID, entry-point field, RED/USE with bounded labels), add symptom alerts in two severities with justified thresholds, write three-line runbooks at the repo's convention, test-fire each alert, and induce a staging failure that a fresh source-blind worker must name from telemetry alone.",
+      "assertions": [
+        "Routes to oncall-it",
+        "The frozen on-call questions are the denominator",
+        "Alerts are symptom-based, two severities, with a justified threshold and a linked runbook",
+        "Each alert is test-fired and the receipt captured",
+        "A source-blind worker names the induced failure; removing the instrumentation makes it RED",
+        "Terminal is OPERABLE or OPERABLE-WITH-PARKED"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 2,
+      "prompt": "The API is throwing 500s right now \u2014 find out why.",
+      "expected_output": "Should NOT route to oncall-it. Diagnosing a live symptom is root-cause, which consumes telemetry; oncall-it creates the telemetry so the next diagnosis is fast.",
+      "assertions": [
+        "Does not route to oncall-it",
+        "Routes to root-cause",
+        "Distinguishes consuming telemetry from making a surface observable"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 3,
+      "prompt": "Checkout p95 is 3.2 seconds and our budget is 1.5 \u2014 get it under budget.",
+      "expected_output": "Should NOT route to oncall-it. A latency budget proven against a measurement contract is speed-it; oncall-it's proof is a source-blind diagnosis, not a number.",
+      "assertions": [
+        "Does not route to oncall-it",
+        "Routes to speed-it",
+        "Distinguishes a measured budget from operability"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 4,
+      "prompt": "We were blind in last week's checkout incident. Make service/checkout.py operable: telemetry, alerts, runbooks.",
+      "expected_output": "Should freeze the path set and its on-call questions with the human before instrumenting. Instrumentation uses structured events with a correlation ID and RED metrics with bounded labels. Card numbers and customer emails never enter logs, events or spans, and unbounded identifiers (order_id, email) are never metric labels; cardinality that costs money is a needs-human decision.",
+      "assertions": [
+        "Freezes the path set and its on-call questions with the human before instrumenting",
+        "Keeps metric labels bounded; per-order or per-customer identifiers are never labels",
+        "Keeps PII (card numbers, emails) out of every log, event and span"
+      ],
+      "files": [
+        {
+          "path": "service/checkout.py",
+          "content": "from service import mailer, payments\n\n\ndef checkout(order_id, customer, card_number, amount):\n    payments.charge(card_number, amount)\n    mailer.send_receipt(customer[\"email\"], order_id)\n    return {\"order_id\": order_id, \"status\": \"paid\"}\n"
+        }
+      ],
+      "workspace_state": [
+        {
+          "glob": "**/*.py",
+          "not_matches": "(?i)\\b(log|logger|logging|span|event|emit|metric)\\w*\\b[^\\n]*(card_number|email)",
+          "why": "telemetry must carry no PII: a card number or email in a log, event or span is a leak, not a signal"
+        },
+        {
+          "glob": "**/*.py",
+          "not_matches": "\\.labels\\([^)]*(order_id|email|card_number)",
+          "why": "a per-order or per-customer metric label is unbounded cardinality, a needs-human cost decision"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "description": "open-fleet completion gate: run the independent verifier (verify.py) on turn/task end. Exit 2 blocks completion until the evidence manifest passes. See docs/verify-gate.md for wiring, env vars, and the MCP-Task/CI/SDK fallbacks used where allowManagedHooksOnly disables plugin hooks.",
+  "hooks": {
+    "TaskCompleted": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/runtime/scripts/verify-gate.sh\" --event task"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/runtime/scripts/verify-gate.sh\" --event stop"
+          }
+        ]
+      }
+    ]
+  }
+}

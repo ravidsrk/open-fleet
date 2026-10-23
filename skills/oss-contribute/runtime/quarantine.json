@@ -1,0 +1,4 @@
+{
+  "_about": "Component quarantine deny-list (#558; Agent Baseline RES-02/RES-05). Checked fail-closed by scripts/validate.py (the catalog may not route through a quarantined component), runtime/scripts/preflight.py --mission (a run may not start on one), and runtime/scripts/quarantine_check.py (ad hoc). Entries are HUMAN acts only: an agent never adds, removes, or narrows one, and the shape check refuses an entry whose 'by' names no human. component is '<kind>:<name>' with kind mission (skills/<name>), playbook (playbooks/<name>.md), or pack (a runtime/pins.json key); ref is '*' (every version) or, for packs, a commit of at least 7 hex characters matched by prefix either way. Empty list = no quarantine in force. A malformed file fails every gate closed: a broken deny-list never reads as an empty one.",
+  "quarantined": []
+}

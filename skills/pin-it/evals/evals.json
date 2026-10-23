@@ -1,0 +1,81 @@
+{
+  "skill_name": "pin-it",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Orca updated overnight and our dispatch docs feel off \u2014 re-pin the runtime contract against the installed binary.",
+      "expected_output": "Should route to pin-it. Should freeze a claim inventory from runtime policies/scripts/mission preambles, load version-matched guides via orca skills get, re-witness each claim against the live runtime with receipts, patch stale claims citing receipts, and terminate PINNED or PINNED-WITH-PARKED.",
+      "assertions": [
+        "Routes to pin-it",
+        "Freezes a per-claim inventory as the denominator",
+        "Loads version-matched guides from the installed binary (orca skills get)",
+        "Classifies claims only from live receipts, never from reading docs",
+        "Removed claims carry an archived refutation receipt",
+        "Terminal is PINNED or PINNED-WITH-PARKED"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 2,
+      "prompt": "Upgrade the repo from React 18 to React 19 and fix the breakages.",
+      "expected_output": "Should NOT route to pin-it. A dependency/framework upgrade with the repo's own build+test suite as oracle is modernize-it. pin-it's unit is a runtime-mechanics claim and its oracle is receipts from the live control-plane binary.",
+      "assertions": [
+        "Does not route to pin-it",
+        "Routes to modernize-it",
+        "Distinguishes a doctrine claim about runtime mechanics from a dependency upgrade"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 3,
+      "prompt": "The README claims a command that no longer exists \u2014 sweep all the stale doc claims.",
+      "expected_output": "Should NOT route to pin-it. A falsifiable prose-claims backlog against repo state is clean-sweep source=doc-claims. pin-it re-witnesses runtime-mechanics claims against the live Orca binary.",
+      "assertions": [
+        "Does not route to pin-it",
+        "Routes to clean-sweep",
+        "Distinguishes prose doc-claims about the repo from mechanics claims about the runtime binary"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 4,
+      "prompt": "Orca updated overnight. Re-pin runtime/dispatch.md against the installed binary; the probe receipts captured so far are in receipts/.",
+      "expected_output": "Should inventory both claims in runtime/dispatch.md and classify each from live receipts only. The only receipt for C-2 is a no_active_sender_terminal refusal, a substrate failure that says nothing about the claim, so C-2 is BLOCKED-BY-SUBSTRATE: re-probe from a bound terminal or park it marked unverified, never delete it or rewrite it as superseded. Receipts are verbatim evidence and are never edited.",
+      "assertions": [
+        "Classifies claims only from live receipts, never from reading guides or docs",
+        "Classifies C-2 as BLOCKED-BY-SUBSTRATE, not STALE or SUPERSEDED",
+        "Keeps C-2's doctrine text (marked unverified if parked) instead of deleting it without a refutation receipt"
+      ],
+      "files": [
+        {
+          "path": "runtime/dispatch.md",
+          "content": "# Dispatch mechanics\n\n- C-1: `orca orchestration check --wait` blocks until a message arrives.\n- C-2: `orca orchestration send` accepts `--priority high|normal`.\n"
+        },
+        {
+          "path": "receipts/probe-C2.txt",
+          "content": "$ orca orchestration send --to term_x --type status --priority high --subject probe\nerror: no_active_sender_terminal (run this from a bound Orca terminal)\nexit=1\n"
+        }
+      ],
+      "workspace_state": [
+        {
+          "path": "runtime/dispatch.md",
+          "matches": "--priority",
+          "why": "a no_active_sender_terminal refusal is a substrate block, not a refutation; deleting C-2 on it rewrites doctrine to 'the mechanism does not exist'"
+        },
+        {
+          "path": "runtime/dispatch.md",
+          "not_matches": "(?m)^(?=[^\\n]*\\bC-2\\b)[^\\n]*\\b(SUPERSEDED|STALE)\\b",
+          "why": "STALE and SUPERSEDED are receipt verdicts; relabelling C-2 either way on a substrate-blocked probe is the same rewrite as deleting it"
+        },
+        {
+          "path": "receipts/probe-C2.txt",
+          "unchanged": true,
+          "why": "receipts are verbatim evidence; editing one to fit a verdict forges it"
+        }
+      ]
+    }
+  ]
+}

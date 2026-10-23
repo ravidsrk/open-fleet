@@ -1,0 +1,78 @@
+{
+  "skill_name": "oss-contribute",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Contribute fixes for these open issues on an upstream repo we only have a fork of.",
+      "expected_output": "Should route to oss-contribute. Should fork, enumerate BOTH the open issues AND the upstream open PRs per issue, skeptic-triage, build on the fork with a failing-first test, review build-blind, and open etiquette-correct PRs against the upstream default branch \u2014 never merging (READ only). Terminal is CONTRIBUTED / CONTRIBUTED-WITH-PARKED.",
+      "assertions": [
+        "Routes to oss-contribute",
+        "Enumerates upstream OPEN PRs per issue, not just code (two denominators)",
+        "Builds on a fork, PR head is fork:branch and base is upstream default",
+        "Opens PRs; never merges (no merge authority on the target)",
+        "Terminal state is PR-open + reviewed, not merged",
+        "Rides evidence-manifest for SHA-bound completion"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 2,
+      "prompt": "An upstream issue we want to fix already has an open PR from another contributor.",
+      "expected_output": "Should trigger oss-contribute's contribution decision: assist (quoted comment on their PR) vs stand-down (park externally-covered) is a taste gate; an alternative is OFFERED inside the assist comment and the PR is opened only on maintainer invitation. Must not open a silent duplicate, an uninvited alternative PR, or a hollow comment.",
+      "assertions": [
+        "Applies the assist / alternative / stand-down decision",
+        "Logs the choice to DECISIONS (never silent)",
+        "Alternative PRs are offered first and opened only on maintainer invitation",
+        "Does not open a silent duplicate",
+        "Assist comments quote the target PR's own diff"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 3,
+      "prompt": "Close every open issue in our backlog and merge the fixes.",
+      "expected_output": "Should NOT route to oss-contribute; routes to clean-sweep. Executable coverage of this boundary lives in evals/routing.json id 156 (#383); this case stays as the behavioral-suite narration.",
+      "assertions": [
+        "Does not route to oss-contribute",
+        "Routes to clean-sweep",
+        "Distinguishes merged-SHA closure (own repo) from PR-open contribution (upstream)"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 4,
+      "prompt": "Prepare our contributions for upstream issues #12 and #15 (see upstream/). Draft the body of each PR we would open as outbox/pr-<issue>.md.",
+      "expected_output": "Should enumerate both denominators: upstream/issues.md and the open PRs in upstream/pulls.md. Issue #15 has no PR and is buildable (fork, failing-first test, PR against the upstream default, never merging). Issue #12 already has contributor PR #88, so it takes the assist / alternative / stand-down decision, logged to docs/DECISIONS.md; an alternative is offered inside the assist comment and opened only on maintainer invitation, so no PR body for #12 is drafted.",
+      "assertions": [
+        "Enumerates upstream open PRs per issue, not only the issues",
+        "Applies the assist / alternative / stand-down decision to #12 and logs it to DECISIONS",
+        "Offers any alternative inside the assist comment instead of opening a competing PR"
+      ],
+      "files": [
+        {
+          "path": "upstream/issues.md",
+          "content": "# Open upstream issues\n\n- #12: `parse()` crashes on an empty string\n- #15: `--version` prints nothing\n"
+        },
+        {
+          "path": "upstream/pulls.md",
+          "content": "# Open upstream PRs\n\n- #88 (by lin-w, open, CI green): fix #12, parse() returns None for an empty string\n"
+        }
+      ],
+      "workspace_state": [
+        {
+          "path": "outbox/pr-12.md",
+          "exists": false,
+          "why": "#12 already has an open PR (#88); an alternative is maintainer-gated and a silent duplicate is never opened"
+        },
+        {
+          "path": "docs/DECISIONS.md",
+          "matches": "(?i)\\b(assist|stand-?\\s?down)\\b",
+          "why": "the contribution decision is never silent: it is logged to the run's docs/DECISIONS.md"
+        }
+      ]
+    }
+  ]
+}

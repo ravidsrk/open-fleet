@@ -1,0 +1,204 @@
+{
+  "$defs": {
+    "date": {
+      "description": "UTC calendar date YYYY-MM-DD with a sane month (01-12) and day (01-31). Full calendar validity (Feb 30, leap days) and answered-never-precedes-asked stay CLI-only: parse_date rejects what a pattern cannot express.",
+      "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$",
+      "type": "string"
+    },
+    "gate": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "description": "Owed gates carry no answer metadata.",
+          "if": {
+            "properties": {
+              "status": {
+                "const": "owed"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "answer": {
+                "type": "null"
+              },
+              "answered": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "description": "Answered/waived gates carry non-blank text and a recorded date.",
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "answered",
+                  "waived"
+                ]
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "answer": {
+                "$ref": "#/$defs/prose"
+              },
+              "answered": {
+                "$ref": "#/$defs/date"
+              }
+            }
+          }
+        },
+        {
+          "description": "Overtaken gates carry a recorded date; the note may stay null when the question body already records the overtaking events.",
+          "if": {
+            "properties": {
+              "status": {
+                "const": "overtaken"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "answered": {
+                "$ref": "#/$defs/date"
+              }
+            }
+          }
+        }
+      ],
+      "description": "One human gate: a question parked for the maintainer. Statuses owed/answered/waived/overtaken keep their 2026-09-14 meaning (#419 changes the store, not the semantics).",
+      "properties": {
+        "answer": {
+          "description": "The human's answer (answered), the waiver reason (waived), or what overtook it (overtaken; may stay null when the question body already records the overtaking events, as with the migrated G4). Null while owed.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "answered": {
+          "description": "Date the answer/waiver/overtake was recorded (UTC, YYYY-MM-DD). Null while owed. Never precedes asked.",
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "asked": {
+          "description": "Date the question was parked (UTC, YYYY-MM-DD).",
+          "$ref": "#/$defs/date"
+        },
+        "blocking": {
+          "description": "Units/issues with no work until this gate resolves (refs as written, e.g. \"#386\"). Empty when the gate blocks nothing.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "description": "Stable gate id. Parked units cite it as \"gate-batch.json G<n>\" (pre-tooling refs say gate-batch.md; both forms resolve). Never renumbered: a renumber silently orphans citations.",
+          "pattern": "^G[0-9]+$",
+          "type": "string"
+        },
+        "question": {
+          "description": "The full ask, verbatim prose (may span lines). Rendered verbatim under the gate heading.",
+          "$ref": "#/$defs/prose"
+        },
+        "related": {
+          "description": "Related issues/PRs (refs as written, e.g. \"#397\"). Store-only: never rendered into the .md view.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "status": {
+          "description": "owed: awaiting the human. answered: human replied (answer holds it). waived: human ruled no answer needed (answer holds the reason). overtaken: events resolved the question before the human replied (record only, no ask).",
+          "enum": [
+            "owed",
+            "answered",
+            "waived",
+            "overtaken"
+          ],
+          "type": "string"
+        },
+        "title": {
+          "description": "Short heading suffix rendered as \"## <id> \u00b7 <title>\".",
+          "$ref": "#/$defs/prose"
+        }
+      },
+      "required": [
+        "answer",
+        "answered",
+        "asked",
+        "blocking",
+        "id",
+        "question",
+        "related",
+        "status",
+        "title"
+      ],
+      "type": "object"
+    },
+    "prose": {
+      "description": "Non-blank prose: at least one non-whitespace character.",
+      "minLength": 1,
+      "pattern": "\\S",
+      "type": "string"
+    }
+  },
+  "$id": "https://github.com/ravidsrk/open-fleet/blob/main/runtime/schemas/gate-batch.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Run-close human-gate batch (#419). The JSON file is the store; gate-batch.md is a rendered view (gate-batch.py render regenerates it byte-for-byte when no gate carries answer text).",
+  "properties": {
+    "gates": {
+      "description": "Gate records in stable-id order.",
+      "items": {
+        "$ref": "#/$defs/gate"
+      },
+      "type": "array"
+    },
+    "intro": {
+      "description": "Verbatim prose rendered between the header and the first gate (the batch's standing instructions).",
+      "type": "string"
+    },
+    "resolved_by_events": {
+      "description": "Verbatim markdown block rendered under \"## Resolved by events\" (report-only items that were never asks). Empty string when there are none.",
+      "type": "string"
+    },
+    "run_id": {
+      "description": "Stable run id, e.g. run_0607bdc681e6.",
+      "$ref": "#/$defs/prose"
+    },
+    "run_title": {
+      "description": "Human run name rendered in the header, e.g. 2026-09-14 clean-sweep tracker.",
+      "$ref": "#/$defs/prose"
+    },
+    "schema": {
+      "const": "gate-batch/1",
+      "description": "Schema tag the CLI checks on load.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "gates",
+    "intro",
+    "resolved_by_events",
+    "run_id",
+    "run_title",
+    "schema"
+  ],
+  "title": "gate-batch",
+  "type": "object"
+}

@@ -1,0 +1,12 @@
+{
+  "_about": "Liveness-watchdog thresholds for runtime/scripts/watchdog.py (issue #418). Every detection threshold and rate limit lives here so coordinators tune without code edits; watchdog.py refuses unknown keys so a typo fails loud instead of silently holding a default. Starting values are generalized from the 2026-09-14 clean-sweep tracker run (docs/runs/2026-09-14-clean-sweep-tracker.md): the R393R SPEC reviewer went 60+ min with a transcript frozen 20+ min before its nudge, and the V393R-r1 verdict worker wedged on a dead provider stream.",
+  "slow_after_s": 600,
+  "hung_after_s": 1800,
+  "wedge_frozen_s": 1200,
+  "max_nudges_per_dispatch": 1,
+  "max_ci_nudges_per_dispatch": 1,
+  "nudge_window_s": 3600,
+  "max_nudges_per_hour_per_worker": 1,
+  "nudge_text": "finish-or-report now: reply with what is green, what remains, and the exact SHAs — no new experiments. (watchdog auto-nudge; unanswered past one more window escalates to stop-redispatch)",
+  "nudge_command": null
+}

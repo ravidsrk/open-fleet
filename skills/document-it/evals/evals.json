@@ -1,0 +1,76 @@
+{
+  "skill_name": "document-it",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Our public API and CLI are basically undocumented \u2014 build the docs out properly and make sure what they say is actually true.",
+      "expected_output": "Should route to document-it. Should extract the public surface with a script at the base head, map coverage per Diataxis quadrant with grep-able evidence, freeze the gap list at a human gate, write reference cells first from code archaeology, anchor every factual claim to a file:symbol or a pasted run with a rename negative control, review build-blind, land, and re-derive the map at the final head.",
+      "assertions": [
+        "Routes to document-it",
+        "Unit is one public-surface entity by quadrant coverage cell",
+        "The surface is extracted by a script, not by reading",
+        "Reference cells land before how-to and tutorial cells for the same entity",
+        "Every claim has a verified anchor and renaming the anchored fact turns the check RED",
+        "Terminal is DOCUMENTED or DOCUMENTED-WITH-PARKED"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 2,
+      "prompt": "The README claims we support Postgres 12 and the setup steps do not work \u2014 verify every claim and fix the false ones.",
+      "expected_output": "Should NOT route to document-it. Removing false claims from docs that already exist is clean-sweep with source=doc-claims: the unit is a false claim and the terminal is zero false claims. document-it's unit is an empty coverage cell.",
+      "assertions": [
+        "Does not route to document-it",
+        "Routes to clean-sweep with source=doc-claims",
+        "Distinguishes a false-claim denominator from a coverage-gap denominator"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 3,
+      "prompt": "We just merged the billing wave \u2014 update the docs so they match what shipped.",
+      "expected_output": "Should route to ship-it, not document-it: syncing docs to one wave's diff is a unit inside ship-it's release pipeline, and a router routes to missions, not sub-units (#383).",
+      "assertions": [
+        "Does not route to document-it",
+        "Routes to ship-it's doc-sync unit",
+        "Distinguishes the wave's diff from the whole public surface"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 4,
+      "prompt": "Our CLI is basically undocumented apart from an old page. Build the reference docs for cli.py under docs/reference/.",
+      "expected_output": "Should extract the public surface from cli.py with a script (sync --since, purge --older-than) before writing, and anchor every claim to a file:symbol in cli.py, reading the implementation rather than the old docs. docs/old-cli.md still describes a sync --all flag that cli.py no longer has; carrying it into the new reference is an unanchored claim. cli.py is not changed to fit the docs.",
+      "assertions": [
+        "Extracts the CLI surface from cli.py with a script before any writing",
+        "Anchors each documented command and flag to a file:symbol in cli.py",
+        "Treats docs/old-cli.md as stale input, not as the source of the reference"
+      ],
+      "files": [
+        {
+          "path": "cli.py",
+          "content": "import argparse\n\n\ndef build_parser():\n    parser = argparse.ArgumentParser(prog=\"tool\")\n    sub = parser.add_subparsers(dest=\"command\", required=True)\n    sync = sub.add_parser(\"sync\", help=\"pull remote records\")\n    sync.add_argument(\"--since\", help=\"only records changed after this ISO date\")\n    purge = sub.add_parser(\"purge\", help=\"delete local records\")\n    purge.add_argument(\"--older-than\", type=int, help=\"age in days\")\n    return parser\n"
+        },
+        {
+          "path": "docs/old-cli.md",
+          "content": "# tool CLI (2024)\n\n`tool sync --all` pulls every remote record.\n"
+        }
+      ],
+      "workspace_state": [
+        {
+          "glob": "docs/reference/**/*",
+          "not_matches": "--all\\b",
+          "why": "cli.py has no --all flag; copying it from the old page is a claim with no anchor"
+        },
+        {
+          "path": "cli.py",
+          "unchanged": true,
+          "why": "documentation describes the surface; it never edits the code to match the docs"
+        }
+      ]
+    }
+  ]
+}

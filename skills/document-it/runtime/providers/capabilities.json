@@ -1,0 +1,623 @@
+{
+  "_about": "Capability-based Runtime Provider Interface (RPI) matrix for open-fleet (#586). Declares the 8 runtime capabilities, the 14 orchestrator providers (native vs portable fallback capabilities and supported coding-agent harnesses), and the per-mission required/optional capability contract enforced by runtime/scripts/preflight.py.",
+  "schema_version": "open-fleet-capabilities/v1",
+  "capabilities": {
+    "cap:core-orchestration": {
+      "description": "Worktree isolation, task/run state, worker lifecycle (spawn/fence/poll), and two-way mailbox messaging.",
+      "fallback": "runtime/providers/local_state.py (SQLite WAL + git worktree + tmux/nohup)"
+    },
+    "cap:sandbox-vm": {
+      "description": "Disposable VM or container isolation for untrusted code execution and environment recipe verification.",
+      "fallback": "posix only: `--on <image>` Docker launch (--cap-drop ALL, no-new-privileges, pids-limit, private git dir) certified by `vm recipe doctor` + runtime/scripts/sandbox_doctor.py (docker, bwrap, gondolin, devcontainer, apptainer recipes)"
+    },
+    "cap:session-search": {
+      "description": "Cross-session FTS5 transcript indexing and search for prior-art recall and compound learning.",
+      "fallback": "runtime/scripts/search_sessions.py --local-harnesses (read-only token scan of 10 harnesses' local transcripts; no index)"
+    },
+    "cap:browser": {
+      "description": "Headless browser automation, DOM snapshot, console/network capture, and Core Web Vitals/a11y probing.",
+      "fallback": "Playwright CLI / Chrome DevTools MCP / agent-browser"
+    },
+    "cap:mobile-emulator": {
+      "description": "iOS Simulator and Android Emulator lifecycle, screenshot, UI hierarchy dump, and gesture injection.",
+      "fallback": "xcrun simctl (macOS) and Android adb"
+    },
+    "cap:issue-tracker": {
+      "description": "Issue and pull-request enumeration, creation, commenting, and state transitions.",
+      "fallback": "GitHub CLI (gh) and runtime/scripts/pm.py"
+    },
+    "cap:scheduler": {
+      "description": "Recurring cron/interval execution for unattended sweeps and sentinel missions.",
+      "fallback": "POSIX crontab / systemd-run / GitHub Actions schedule"
+    },
+    "cap:orca-self-audit": {
+      "description": "Live inspection of the proprietary stablyai/orca binary and `orca skills get` embedded skill bundle.",
+      "fallback": null
+    }
+  },
+  "providers": {
+    "orca": {
+      "tier": 1,
+      "upstream": "stablyai/orca",
+      "description": "Orca desktop/CLI orchestrator with native worktree, terminal, orchestration, browser, emulator, and VM subsystems.",
+      "native_capabilities": [
+        "cap:core-orchestration",
+        "cap:sandbox-vm",
+        "cap:session-search",
+        "cap:browser",
+        "cap:mobile-emulator",
+        "cap:issue-tracker",
+        "cap:scheduler",
+        "cap:orca-self-audit"
+      ],
+      "fallback_capabilities": [],
+      "supported_harnesses": [
+        "claude",
+        "codex",
+        "opencode",
+        "omp",
+        "pi",
+        "jcode",
+        "goose",
+        "hermes",
+        "crush",
+        "gemini",
+        "cursor",
+        "antigravity",
+        "grok",
+        "droid"
+      ],
+      "supported_profiles": [
+        "ro",
+        "rw",
+        "danger"
+      ]
+    },
+    "posix": {
+      "tier": 1,
+      "upstream": "open-fleet/posix",
+      "description": "Zero-daemon POSIX reference runtime: SQLite WAL state, git worktrees, tmux / cmux / setsid process groups, Docker for PROFILE=danger.",
+      "native_capabilities": [
+        "cap:core-orchestration"
+      ],
+      "fallback_capabilities": [
+        "cap:sandbox-vm",
+        "cap:session-search",
+        "cap:issue-tracker",
+        "cap:scheduler",
+        "cap:browser",
+        "cap:mobile-emulator"
+      ],
+      "supported_harnesses": [
+        "claude",
+        "codex",
+        "opencode",
+        "omp",
+        "pi",
+        "jcode",
+        "goose",
+        "hermes",
+        "crush",
+        "gemini"
+      ],
+      "supported_profiles": [
+        "ro",
+        "rw",
+        "danger"
+      ]
+    },
+    "overstory": {
+      "tier": 1,
+      "upstream": "jayminwest/overstory",
+      "description": "`ov` CLI: sling/spec/mail/worktree with Overstory's own guard hooks (ro only on runtimes Overstory guards: claude, pi, sapling).",
+      "native_capabilities": [
+        "cap:core-orchestration"
+      ],
+      "fallback_capabilities": [
+        "cap:session-search",
+        "cap:issue-tracker",
+        "cap:scheduler",
+        "cap:browser",
+        "cap:mobile-emulator"
+      ],
+      "supported_harnesses": [
+        "claude",
+        "codex",
+        "opencode",
+        "pi",
+        "goose",
+        "gemini",
+        "cursor"
+      ],
+      "supported_profiles": [
+        "ro",
+        "rw"
+      ]
+    },
+    "t3code": {
+      "tier": 1,
+      "upstream": "pingdotgg/t3code",
+      "description": "T3 Code MCP thread tools (`t3_thread_launch/read/send/interrupt`) via `t3 acp-mcp-call`; needs T3_ACP_MCP_ENDPOINT/AUTHORIZATION and OPEN_FLEET_T3_PROJECT_ID.",
+      "native_capabilities": [
+        "cap:core-orchestration"
+      ],
+      "fallback_capabilities": [
+        "cap:session-search",
+        "cap:issue-tracker",
+        "cap:scheduler",
+        "cap:browser",
+        "cap:mobile-emulator"
+      ],
+      "supported_harnesses": [
+        "claude",
+        "codex"
+      ],
+      "supported_profiles": [
+        "ro",
+        "rw"
+      ]
+    },
+    "ao": {
+      "tier": 1,
+      "upstream": "ComposioHQ/agent-orchestrator",
+      "description": "Composio Agent Orchestrator loopback HTTP daemon (`/api/v1/sessions`); PROFILE=ro refused (no read-only approval mode).",
+      "native_capabilities": [
+        "cap:core-orchestration"
+      ],
+      "fallback_capabilities": [
+        "cap:session-search",
+        "cap:issue-tracker",
+        "cap:scheduler",
+        "cap:browser",
+        "cap:mobile-emulator"
+      ],
+      "supported_harnesses": [
+        "claude",
+        "codex",
+        "opencode",
+        "omp",
+        "pi",
+        "goose",
+        "crush",
+        "gemini",
+        "cursor",
+        "grok",
+        "droid"
+      ],
+      "supported_profiles": [
+        "rw"
+      ]
+    },
+    "superset": {
+      "tier": 1,
+      "upstream": "superset-sh/superset",
+      "description": "`superset` CLI: ro via `terminals create`, rw via `agents create --prompt`, danger via `workspaces create --environment` (cloud). The adapter's danger path is NOT advertised: no `vm recipe doctor` certifies that sandbox, so the provider carries no cap:sandbox-vm and the fleet may not plan a danger lane on it (2026-10-23 review, #627).",
+      "native_capabilities": [
+        "cap:core-orchestration"
+      ],
+      "fallback_capabilities": [
+        "cap:session-search",
+        "cap:issue-tracker",
+        "cap:scheduler",
+        "cap:browser",
+        "cap:mobile-emulator"
+      ],
+      "supported_harnesses": [
+        "claude",
+        "codex",
+        "opencode",
+        "omp",
+        "pi",
+        "hermes",
+        "gemini"
+      ],
+      "supported_profiles": [
+        "ro",
+        "rw"
+      ]
+    },
+    "gastown": {
+      "tier": 2,
+      "upstream": "gastownhall/gastown",
+      "description": "`gt` workspace + `bd` beads graph (bead-backed tasks, `gt sling`, `gt mail`, `gt polecat status`).",
+      "native_capabilities": [
+        "cap:core-orchestration",
+        "cap:issue-tracker"
+      ],
+      "fallback_capabilities": [
+        "cap:session-search",
+        "cap:scheduler",
+        "cap:browser",
+        "cap:mobile-emulator"
+      ],
+      "supported_harnesses": [
+        "claude",
+        "codex",
+        "opencode",
+        "omp",
+        "pi",
+        "gemini",
+        "cursor"
+      ],
+      "supported_profiles": [
+        "ro",
+        "rw"
+      ]
+    },
+    "worktrunk": {
+      "tier": 2,
+      "upstream": "max-sixty/worktrunk",
+      "description": "Rust `wt` worktree lifecycle with agents detached in tmux and open-fleet SQLite coordination.",
+      "native_capabilities": [
+        "cap:core-orchestration"
+      ],
+      "fallback_capabilities": [
+        "cap:session-search",
+        "cap:issue-tracker",
+        "cap:scheduler",
+        "cap:browser",
+        "cap:mobile-emulator"
+      ],
+      "supported_harnesses": [
+        "claude",
+        "codex",
+        "opencode",
+        "omp",
+        "pi",
+        "jcode",
+        "goose",
+        "hermes",
+        "crush",
+        "gemini"
+      ],
+      "supported_profiles": [
+        "ro",
+        "rw"
+      ]
+    },
+    "jcode-swarm": {
+      "tier": 2,
+      "upstream": "1jehuang/jcode",
+      "description": "`jcode serve` daemon socket (`comm_spawn`/`comm_read_context`/`comm_stop`); PROFILE=ro refused (no tool restriction field).",
+      "native_capabilities": [
+        "cap:core-orchestration"
+      ],
+      "fallback_capabilities": [
+        "cap:session-search",
+        "cap:issue-tracker",
+        "cap:scheduler",
+        "cap:browser",
+        "cap:mobile-emulator"
+      ],
+      "supported_harnesses": [
+        "jcode"
+      ],
+      "supported_profiles": [
+        "rw"
+      ]
+    },
+    "emdash": {
+      "tier": 2,
+      "upstream": "generalaction/emdash",
+      "description": "Emdash workspace-server unix socket (`workspace.sock`, framed wire protocol 12.0.0, `tuiAgents.startSession`); ro is claude-only.",
+      "native_capabilities": [
+        "cap:core-orchestration"
+      ],
+      "fallback_capabilities": [
+        "cap:session-search",
+        "cap:issue-tracker",
+        "cap:scheduler",
+        "cap:browser",
+        "cap:mobile-emulator"
+      ],
+      "supported_harnesses": [
+        "claude",
+        "codex",
+        "opencode",
+        "pi",
+        "goose",
+        "hermes",
+        "cursor",
+        "antigravity",
+        "grok",
+        "droid"
+      ],
+      "supported_profiles": [
+        "ro",
+        "rw"
+      ]
+    },
+    "vibe-kanban": {
+      "tier": 2,
+      "upstream": "BloopAI/vibe-kanban",
+      "description": "Vibe-Kanban REST (`/api/workspaces/start`) with an ORCA_RO executor variant (claude) and a post-exit auto-commit guard.",
+      "native_capabilities": [
+        "cap:core-orchestration"
+      ],
+      "fallback_capabilities": [
+        "cap:session-search",
+        "cap:issue-tracker",
+        "cap:scheduler",
+        "cap:browser",
+        "cap:mobile-emulator"
+      ],
+      "supported_harnesses": [
+        "claude",
+        "codex",
+        "opencode",
+        "gemini",
+        "cursor",
+        "droid"
+      ],
+      "supported_profiles": [
+        "ro",
+        "rw"
+      ]
+    },
+    "paperclip": {
+      "tier": 2,
+      "upstream": "paperclipai/paperclip",
+      "description": "Paperclip control plane (port 3100): adapterConfig permission flags read back, atomic issue checkout, bwrap for danger. The adapter's danger path is NOT advertised: no `vm recipe doctor` certifies that sandbox, so the provider carries no cap:sandbox-vm and the fleet may not plan a danger lane on it (2026-10-23 review, #627).",
+      "native_capabilities": [
+        "cap:core-orchestration"
+      ],
+      "fallback_capabilities": [
+        "cap:session-search",
+        "cap:issue-tracker",
+        "cap:scheduler",
+        "cap:browser",
+        "cap:mobile-emulator"
+      ],
+      "supported_harnesses": [
+        "claude",
+        "codex"
+      ],
+      "supported_profiles": [
+        "ro",
+        "rw"
+      ]
+    },
+    "multiclaude": {
+      "tier": 2,
+      "upstream": "dlorenc/multiclaude",
+      "description": "Multiclaude daemon socket (`spawn_agent`) + tmux; hooks injected via .multiclaude/hooks.json; release requires worker-verify.",
+      "native_capabilities": [
+        "cap:core-orchestration"
+      ],
+      "fallback_capabilities": [
+        "cap:session-search",
+        "cap:issue-tracker",
+        "cap:scheduler",
+        "cap:browser",
+        "cap:mobile-emulator"
+      ],
+      "supported_harnesses": [
+        "claude"
+      ],
+      "supported_profiles": [
+        "ro",
+        "rw"
+      ]
+    },
+    "openhands": {
+      "tier": 2,
+      "upstream": "OpenHands/software-agent-sdk",
+      "description": "OpenHands agent-server REST conversations with request-level deny-hook config; danger only when the server reports a docker runtime. The adapter's danger path is NOT advertised: no `vm recipe doctor` certifies that sandbox, so the provider carries no cap:sandbox-vm and the fleet may not plan a danger lane on it (2026-10-23 review, #627).",
+      "native_capabilities": [
+        "cap:core-orchestration"
+      ],
+      "fallback_capabilities": [
+        "cap:session-search",
+        "cap:issue-tracker",
+        "cap:scheduler",
+        "cap:browser",
+        "cap:mobile-emulator"
+      ],
+      "supported_harnesses": [
+        "openhands"
+      ],
+      "supported_profiles": [
+        "ro",
+        "rw"
+      ]
+    }
+  },
+  "missions": {
+    "absorb-it": {
+      "required": [
+        "cap:core-orchestration"
+      ],
+      "optional": [
+        "cap:issue-tracker",
+        "cap:session-search"
+      ]
+    },
+    "access-it": {
+      "required": [
+        "cap:core-orchestration"
+      ],
+      "optional": [
+        "cap:browser",
+        "cap:session-search"
+      ]
+    },
+    "attest-it": {
+      "required": [
+        "cap:core-orchestration"
+      ],
+      "optional": [
+        "cap:session-search",
+        "cap:issue-tracker"
+      ]
+    },
+    "clean-sweep": {
+      "required": [
+        "cap:core-orchestration"
+      ],
+      "optional": [
+        "cap:issue-tracker",
+        "cap:session-search",
+        "cap:scheduler"
+      ]
+    },
+    "deflake-it": {
+      "required": [
+        "cap:core-orchestration"
+      ],
+      "optional": [
+        "cap:session-search"
+      ]
+    },
+    "document-it": {
+      "required": [
+        "cap:core-orchestration"
+      ],
+      "optional": [
+        "cap:browser",
+        "cap:session-search"
+      ]
+    },
+    "field-test-it": {
+      "required": [
+        "cap:core-orchestration",
+        "cap:mobile-emulator"
+      ],
+      "optional": [
+        "cap:browser",
+        "cap:session-search"
+      ]
+    },
+    "floor-it": {
+      "required": [
+        "cap:core-orchestration"
+      ],
+      "optional": [
+        "cap:session-search"
+      ]
+    },
+    "harden-it": {
+      "required": [
+        "cap:core-orchestration"
+      ],
+      "optional": [
+        "cap:sandbox-vm",
+        "cap:session-search",
+        "cap:scheduler"
+      ]
+    },
+    "map-it": {
+      "required": [
+        "cap:core-orchestration"
+      ],
+      "optional": [
+        "cap:session-search",
+        "cap:issue-tracker"
+      ]
+    },
+    "migrate-it": {
+      "required": [
+        "cap:core-orchestration"
+      ],
+      "optional": [
+        "cap:sandbox-vm",
+        "cap:session-search"
+      ]
+    },
+    "modernize-it": {
+      "required": [
+        "cap:core-orchestration"
+      ],
+      "optional": [
+        "cap:session-search"
+      ]
+    },
+    "offload-it": {
+      "required": [
+        "cap:core-orchestration",
+        "cap:sandbox-vm"
+      ],
+      "optional": [
+        "cap:session-search"
+      ]
+    },
+    "oncall-it": {
+      "required": [
+        "cap:core-orchestration"
+      ],
+      "optional": [
+        "cap:session-search",
+        "cap:issue-tracker"
+      ]
+    },
+    "oss-contribute": {
+      "required": [
+        "cap:core-orchestration"
+      ],
+      "optional": [
+        "cap:issue-tracker",
+        "cap:session-search"
+      ]
+    },
+    "pin-it": {
+      "required": [
+        "cap:core-orchestration",
+        "cap:orca-self-audit"
+      ],
+      "optional": [
+        "cap:session-search"
+      ]
+    },
+    "prove-it": {
+      "required": [
+        "cap:core-orchestration"
+      ],
+      "optional": [
+        "cap:session-search"
+      ]
+    },
+    "reshape-it": {
+      "required": [
+        "cap:core-orchestration"
+      ],
+      "optional": [
+        "cap:session-search"
+      ]
+    },
+    "review-it": {
+      "required": [
+        "cap:core-orchestration"
+      ],
+      "optional": [
+        "cap:issue-tracker",
+        "cap:session-search"
+      ]
+    },
+    "root-cause": {
+      "required": [
+        "cap:core-orchestration"
+      ],
+      "optional": [
+        "cap:session-search"
+      ]
+    },
+    "ship-it": {
+      "required": [
+        "cap:core-orchestration"
+      ],
+      "optional": [
+        "cap:browser",
+        "cap:session-search",
+        "cap:issue-tracker"
+      ]
+    },
+    "speed-it": {
+      "required": [
+        "cap:core-orchestration"
+      ],
+      "optional": [
+        "cap:browser",
+        "cap:session-search"
+      ]
+    }
+  }
+}

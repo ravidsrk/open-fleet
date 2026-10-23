@@ -1,0 +1,186 @@
+{
+  "version": 1,
+  "note": "The fleet's one-way door registry — the single enumerated list that gate-classification.md's classification table and sandbox-policy.md's Ask-First bucket point at (#366: freeze entered through gate-classification's freeze-gate prose and mission-scheduling, not the old MD list, so the registry now OWNS the enumeration). A door is hard or impossible to reverse, or out of the fleet's authority: HUMAN ONLY, never auto-resolved, never defaulted on timeout. Each door carries a keyword net of destructive PHRASINGS. The net exists so an unregistered wording can never be auto-decided: runtime/scripts/decisions.py refuses a DECISIONS line whose text matches a net but whose class is not one-way, and refuses a one-way line that carries no human source. Keywords are matched as substrings against the whole line after decisions.py fold() canonicalisation (case, hyphens and punctuation flatten; filler words drop; common verb forms and a small destructive-verb synonym set fold to one token), so each is a multi-word phrase — a single common word would fire on ordinary prose and train people to ignore the refusal.",
+  "doors": [
+    {
+      "id": "merge-to-default",
+      "title": "Merge to the default branch (or promote BASE to it)",
+      "why": "Other people's work is rebuilt on top of it; a bad merge is reverted in public, not undone.",
+      "keywords": [
+        "merge to main",
+        "merge to master",
+        "merge into main",
+        "merge into master",
+        "merge to default",
+        "merge into the default branch",
+        "promote base",
+        "promote to main",
+        "promote the base branch",
+        "admin merge",
+        "--admin merge",
+        "bypass branch protection",
+        "force push to main",
+        "force-push to main",
+        "force push to master",
+        "land on main",
+        "land on master",
+        "land on the default branch"
+      ]
+    },
+    {
+      "id": "deploy",
+      "title": "Deploy to a shared or production environment",
+      "why": "Deployment changes what real users are running; the blast radius is outside the repo.",
+      "keywords": [
+        "deploy to production",
+        "deploy to prod",
+        "ship to production",
+        "release to production",
+        "promote to production",
+        "cut a release",
+        "publish the package",
+        "npm publish",
+        "push the image to the registry",
+        "apply the terraform plan",
+        "kubectl apply to prod",
+        "roll out to production",
+        "roll out to prod",
+        "push to production",
+        "push to prod",
+        "take it live",
+        "go live in production"
+      ]
+    },
+    {
+      "id": "rollback",
+      "title": "Roll back a deployed release",
+      "why": "A rollback is itself a deploy, and it strands whatever shipped after the target.",
+      "keywords": [
+        "roll back the deploy",
+        "rollback the deploy",
+        "roll back production",
+        "rollback production",
+        "roll back the release",
+        "revert the release",
+        "revert the deployment",
+        "restore the previous version in prod",
+        "back out the release",
+        "back out the deploy"
+      ]
+    },
+    {
+      "id": "deletion",
+      "title": "Delete data, an unmerged or default branch, a dirty worktree, or infrastructure",
+      "why": "Deletion has no undo once the tree is gone; a shape check is not authorization. Routine teardown is NOT this door: deleting a unit branch whose PR merged (gh pr merge --merge --delete-branch) and retiring that unit's clean worktree are ungated conductor steps (merge-serialization.md, dispatch-lifecycle.md), so the net names the deletions that lose work or a shared ref (2026-10-23 review, P2-36).",
+      "keywords": [
+        "delete the default branch",
+        "delete the main branch",
+        "delete the master branch",
+        "delete the base branch",
+        "delete the integration branch",
+        "delete the release branch",
+        "delete the protected branch",
+        "delete the unmerged",
+        "delete all branches",
+        "force delete",
+        "git branch --delete --force",
+        "git push origin --delete main",
+        "git push origin --delete master",
+        "get rid of the unmerged branch",
+        "delete the dirty worktree",
+        "delete the coordinator worktree",
+        "worktree remove --force",
+        "delete the database",
+        "drop the table",
+        "drop table",
+        "drop database",
+        "truncate the table",
+        "delete the bucket",
+        "delete the repository",
+        "purge the data",
+        "wipe the volume",
+        "destroy the environment",
+        "terraform destroy",
+        "rm -rf",
+        "tear down the environment",
+        "get rid of the database",
+        "empty the bucket"
+      ]
+    },
+    {
+      "id": "spend",
+      "title": "Commit money the fleet does not hold",
+      "why": "Spend leaves the machine and the fleet holds no budget authority.",
+      "keywords": [
+        "purchase the",
+        "buy the license",
+        "upgrade the plan",
+        "increase the quota",
+        "provision a paid",
+        "enable billing",
+        "raise the spending limit",
+        "charge the card"
+      ]
+    },
+    {
+      "id": "scope-change",
+      "title": "Change the frozen scope of a run",
+      "why": "The denominator is the whole proof; moving it retroactively makes every completion claim unfalsifiable.",
+      "keywords": [
+        "change the frozen scope",
+        "widen the scope",
+        "expand the frozen",
+        "drop a frozen criterion",
+        "remove a frozen criterion",
+        "amend the frozen spec",
+        "re-freeze the spec",
+        "add to the frozen denominator"
+      ]
+    },
+    {
+      "id": "secret-rotation",
+      "title": "Rotate or revoke a secret",
+      "why": "Rotation invalidates every holder of the old value, including systems nobody enumerated.",
+      "keywords": [
+        "rotate the credential",
+        "rotate the credentials",
+        "rotate the secret",
+        "rotate the key",
+        "rotate the token",
+        "revoke the token",
+        "revoke the api key",
+        "regenerate the api key",
+        "reset the signing key"
+      ]
+    },
+    {
+      "id": "live-credentials",
+      "title": "Use, provision, or move live credentials",
+      "why": "A real credential in a worker's context is an incident whether or not it is used.",
+      "keywords": [
+        "use the production credential",
+        "use live credentials",
+        "provision a credential",
+        "create an access key",
+        "create a service account",
+        "paste the api key",
+        "commit the credential",
+        "add the secret to the repo",
+        "grant production access"
+      ]
+    },
+    {
+      "id": "freeze",
+      "title": "Freeze or unfreeze the run's contract",
+      "why": "The freeze gate is where a human takes ownership of the target; the fleet cannot open or close it for them.",
+      "keywords": [
+        "freeze the spec",
+        "unfreeze the spec",
+        "lift the freeze",
+        "declare the freeze",
+        "close the freeze gate",
+        "sign off the freeze"
+      ]
+    }
+  ]
+}

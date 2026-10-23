@@ -1,0 +1,80 @@
+{
+  "skill_name": "speed-it",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Core Web Vitals are failing. Run a perf sweep.",
+      "expected_output": "Should route to speed-it. Should freeze journey list + budgets, baseline to a measurement contract, profile the bottleneck, fix PR-per-hotspot with mandatory before/after, re-benchmark, add CI regression guards, and loop until WITHIN-BUDGET or OPTIMIZED-WITH-PARKED.",
+      "assertions": [
+        "Routes to speed-it",
+        "Mentions measurement contract and baseline",
+        "Mentions profile bottleneck before optimizing",
+        "Requires before/after per fix",
+        "Adds CI regression guards"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 2,
+      "prompt": "The app is slow on mobile.",
+      "expected_output": "Should route to speed-it. Should treat mobile performance as a journey with a pinned device/throttle measurement contract, not a single spot measurement.",
+      "assertions": [
+        "Routes to speed-it",
+        "Mentions mobile as a declared journey",
+        "Pins device / throttle conditions",
+        "Uses statistical contract, not one run"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 3,
+      "prompt": "Watch production performance after the next deploy.",
+      "expected_output": "Should NOT route to speed-it alone. A standalone post-deploy watch has no mission: the canary runs only inside ship-it's release states for a change that run shipped; speed-it owns the pre-deploy budget-meet loop.",
+      "assertions": [
+        "Does not route to speed-it as primary mission",
+        "Says no mission owns a standalone post-deploy watch (the canary lives in ship-it's release states)",
+        "Distinguishes budget-meet from post-deploy watch"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 4,
+      "prompt": "Search is over its latency budget; get it within budget. The budget lives in perf/budgets.json and the benchmark is bench/search_bench.py.",
+      "expected_output": "Should confirm the journey and its budget, declare the measurement contract the benchmark encodes (1000 queries, p95), baseline to it, profile to the dominant cause (the linear scan in search), and land a PR with a before/after measured to the same contract plus a CI guard at the DECLARED budget. Meeting the budget by raising it, or by editing the benchmark's sample or conditions, is not a delta.",
+      "assertions": [
+        "Baselines to the benchmark's measurement contract before optimizing",
+        "Profiles to the dominant cause before changing code",
+        "Requires a before/after measured to the same contract, with the CI guard at the declared budget"
+      ],
+      "files": [
+        {
+          "path": "perf/budgets.json",
+          "content": "{\n  \"search\": {\"metric\": \"p95_ms\", \"budget\": 150}\n}\n"
+        },
+        {
+          "path": "bench/search_bench.py",
+          "content": "import statistics\nimport time\n\nQUERIES = 1000  # the declared sample size\n\n\ndef p95_ms(search, corpus, queries):\n    samples = []\n    for q in queries[:QUERIES]:\n        start = time.perf_counter()\n        search(corpus, q)\n        samples.append((time.perf_counter() - start) * 1000)\n    return statistics.quantiles(samples, n=100)[94]\n"
+        },
+        {
+          "path": "src/search.py",
+          "content": "def search(corpus, term):\n    return [doc for doc in corpus if term in doc[\"body\"]]\n"
+        }
+      ],
+      "workspace_state": [
+        {
+          "path": "perf/budgets.json",
+          "unchanged": true,
+          "why": "meeting a budget by raising it is not a win; the declared budget is also where the CI guard goes"
+        },
+        {
+          "path": "bench/search_bench.py",
+          "unchanged": true,
+          "why": "baseline and candidate must share the contract's sample and conditions; editing the harness makes the delta meaningless"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,72 @@
+{
+  "skill_name": "root-cause",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Why is this concurrency bug only happening in production?",
+      "expected_output": "Should route to root-cause. Should stop-the-line to preserve evidence, build a red-capable reproduction before any theory, rank falsifiable hypotheses, falsify all but one, demonstrate the cause, and optionally hand off a fix brief to ship-it or clean-sweep. No fix is merged by this mission.",
+      "assertions": [
+        "Routes to root-cause",
+        "Builds red-capable reproduction before theory",
+        "Ranks and falsifies hypotheses",
+        "Demonstrates root cause with evidence",
+        "Does not merge a fix"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 2,
+      "prompt": "Diagnose this hard bug and fix it.",
+      "expected_output": "Should route to root-cause for diagnosis, but NOT silently fix. Diagnosis and fix require separate authorization. The mission may produce a DIAGNOSED-WITH-HANDOFF brief, but the fix itself is run by ship-it or clean-sweep.",
+      "assertions": [
+        "Routes to root-cause for diagnosis",
+        "Does not silently merge a fix",
+        "Produces handoff brief for separately authorized fix",
+        "Mentions DIAGNOSED-WITH-HANDOFF terminal"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 3,
+      "prompt": "The whole test suite is flaky.",
+      "expected_output": "Should NOT route to root-cause. A suite-wide flake-rate problem is deflake-it. root-cause is for a single hard intermittent bug with no statistical streak contract.",
+      "assertions": [
+        "Does not route to root-cause",
+        "Routes to deflake-it",
+        "Distinguishes single bug from suite-wide rate"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 4,
+      "prompt": "The page-hit counter undercounts under load in production. Diagnose why, and fix it.",
+      "expected_output": "Should build a red-capable reproduction first (many threads calling hit(), asserting the final count), rank falsifiable hypotheses, and demonstrate the lost-update race between the read and the write in Counter.hit. Diagnosis and mutation need separate authorization: the fix is a DIAGNOSED-WITH-HANDOFF brief for ship-it or clean-sweep that specifies the regression test, and src/counter.py keeps its racy code in this mission.",
+      "assertions": [
+        "Builds a red-capable reproduction before theorizing",
+        "Ranks hypotheses and falsifies the rivals of the read-modify-write race",
+        "Hands the fix off as a brief (DIAGNOSED-WITH-HANDOFF) instead of applying it"
+      ],
+      "files": [
+        {
+          "path": "src/counter.py",
+          "content": "class Counter:\n    def __init__(self, store):\n        self.count = 0\n        self.store = store\n\n    def hit(self):\n        current = self.count\n        self.store.record_visit()\n        self.count = current + 1\n"
+        }
+      ],
+      "workspace_state": [
+        {
+          "path": "src/counter.py",
+          "matches": "self\\.count = current \\+ 1",
+          "why": "diagnosis and mutation need separate authorization; the racy line stays until the handed-off fix is authorized"
+        },
+        {
+          "path": "src/counter.py",
+          "not_matches": "(?i)\\b(R?Lock|Semaphore|Condition)\\s*\\(|itertools\\.count|\\bwith\\s+self\\._?lock",
+          "why": "a lock slipped in around the race is the silent fix this mission never makes"
+        }
+      ]
+    }
+  ]
+}

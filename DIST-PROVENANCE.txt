@@ -1,0 +1,3 @@
+Built by scripts/bundle.py from v0.8.0 at 065824b091af7b8b8d37dba3c4eb7154cc139019.
+Every mission under skills/ carries its playbooks and runtime docs under references/.
+Source: https://github.com/ravidsrk/open-fleet
