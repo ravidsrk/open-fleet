@@ -22,3 +22,4 @@ jobs:
         run: |
           gh api "repos/$REPO/statuses/$SHA" -f state=success -f context=verdict-gate \
             -f description="spoof: same name, wrong source (#594 witness)"
+# Witness step 3: a content-changing push after the GO (#594).
