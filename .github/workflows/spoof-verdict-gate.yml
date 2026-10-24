@@ -1,0 +1,24 @@
+# DISPOSABLE WITNESS for #594. This PR is never merged. It shows that a same-named
+# `verdict-gate` (a job named verdict-gate and a commit status named verdict-gate, both
+# from github-actions) cannot satisfy main's required check, whose expected source is
+# the dedicated app open-fleet-verdict-gate (app id 5451539).
+name: spoof-verdict-gate
+
+on: pull_request
+
+permissions:
+  statuses: write
+
+jobs:
+  verdict-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Post a same-named verdict-gate status from github-actions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          gh api "repos/$REPO/statuses/$SHA" -f state=success -f context=verdict-gate \
+            -f description="spoof: same name, wrong source (#594 witness)"
