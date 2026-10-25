@@ -1148,36 +1148,46 @@ def check_report(report_path, mission, tier, root=None, base=None):
     return errors
 
 
+# Reports bound before a run's directory had to be named for its report. A closed list: a new
+# report keeps its artifacts in a directory named for it, so no report can borrow another's.
+LEGACY_RUN_DIRS = {"2026-09-14-clean-sweep-self-run": "2026-09-14-clean-sweep-tracker"}
+# A report may carry its tier after its run's name: `…-ship-it-self-run.md` beside `…-selfrun/`.
+TIER_SUFFIXES = ("self-run", "selfrun", "external-run")
+
+
 def run_directory(report, mission, root=None):
     """`docs/runs/<date>-<mission>…` — the directory a run's own artifacts live in.
 
     Derived from the report filename, never from the RUN: header, so a report
-    cannot nominate someone else's directory. Both `…-ship-it-self-run.md` and
-    its `…-ship-it-selfrun/` artifact directory share the date and the mission,
-    which is what is matched: same date prefix, mission name present.
+    cannot nominate someone else's directory. The directory is the one named
+    for the report: its exact stem, or the stem less a tier suffix (`self-run`
+    also spelled `selfrun`), or the closed LEGACY_RUN_DIRS entry. Any other
+    same-day directory naming the mission belongs to another run and is never
+    lent (#694 review: `…-trajectories-602-live` took `…-602-adapters/`, and a
+    report of any name took a mission's only same-day directory). With none of
+    these present the report's own stem is returned, which fails closed.
     """
     m = re.match(r"^(\d{4}-\d{2}-\d{2})-", report.stem)
     if not m or mission not in report.stem:
         return None
-    date = m.group(1)
     runs_dir = ((root or ROOT) / "docs" / "runs") if root is not None else RUNS_DIR
-    for candidate in sorted(runs_dir.glob(f"{date}-*")):
-        if not candidate.is_dir():
-            continue
-        stem = candidate.name
-        if not stem.startswith(date + "-"):
-            continue
+    stem = report.stem
+    if stem in LEGACY_RUN_DIRS:
+        return f"docs/runs/{LEGACY_RUN_DIRS[stem]}"
+    names = [stem]
+    for tier in TIER_SUFFIXES:
+        if stem.endswith("-" + tier):
+            base = stem[:-len(tier) - 1]
+            names += [base, base + "-selfrun"] if tier == "self-run" else [base]
+    mtoks = mission.split("-")
+    for name in names:
         # Token-contiguous, never substring (#382, PR #387 review): "map-it" must not match
-        # "map-iteration". The directory's tokens after the date must contain the mission's
-        # tokens as a contiguous run — an anchored regex's lookbehind rejects the "-" that the
-        # glob convention always puts before the mission token, which is what made the first
-        # cut's anchored branch dead code.
-        tokens = stem[len(date) + 1:].split("-")
-        mtoks = mission.split("-")
-        if any(tokens[i:i + len(mtoks)] == mtoks
-               for i in range(len(tokens) - len(mtoks) + 1)):
-            return f"docs/runs/{stem}"
-    return f"docs/runs/{report.stem}"
+        # "map-iteration".
+        tokens = name[len(m.group(1)) + 1:].split("-")
+        if (runs_dir / name).is_dir() and any(tokens[i:i + len(mtoks)] == mtoks
+                                               for i in range(len(tokens) - len(mtoks) + 1)):
+            return f"docs/runs/{name}"
+    return f"docs/runs/{stem}"
 
 
 def _missions(root):

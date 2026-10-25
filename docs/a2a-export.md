@@ -157,7 +157,7 @@ with the endpoint that server actually serves:
 ```bash
 python3 scripts/a2a_export.py --standard-card \
   --endpoint https://<your-host>/a2a/v1 --binding JSONRPC [--mission ship-it] \
-  [--protocol-version 1.0] [--agent-version 0.8.0] [--out card.json]
+  [--protocol-version 1.0] [--agent-version <version>] [--out card.json]
 ```
 
 `--standard-card` requires both `--endpoint` and `--binding`. Without either, it exits 2 and

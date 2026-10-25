@@ -252,7 +252,8 @@ Parallel builders opening pull requests against `BASE` can cause merge races and
 
 Spawning workers is cheap; reviewing and verifying their output is the bottleneck. Per [`runtime/attention-budget.md`](../runtime/attention-budget.md), fleets pace concurrency to verification capacity:
 - Default code-mutation waves run at most **≤ 3 concurrent builder panes**, with roughly 1 build-blind reviewer per 3 builders.
-- While merge serialization provides consumer-side backpressure, the attention budget provides producer-side backpressure so unreviewed diffs never pile up. Empirical calibration of these WIP caps is pre-registered in [docs/experiments/wip-curve-prereg.md](experiments/wip-curve-prereg.md).
+- While merge serialization provides consumer-side backpressure, the attention budget provides producer-side backpressure so unreviewed diffs never pile up.
+- The mutation-wave caps are measured: the [pre-registered WIP-curve experiment](experiments/wip-curve-prereg.md) (#604) ran 12 live runs at four settings and kept them ([run report](runs/2026-10-25-wip-curve-604-live.md)). The report-only and planning caps are still asserted.
 
 ---
 

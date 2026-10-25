@@ -4,6 +4,11 @@ Updated 2026-10-20. The [research roadmap epic](https://github.com/ravidsrk/open
 dependencies and completion criteria. Research-backed recommendations are proposed work,
 not a new release authorization or a frozen implementation specification.
 
+**Status, 2026-10-25: done.** All fifteen work packages and the epic are closed; the work-package
+table gives each one's closing state, and the decisions table its current status. The rest of
+this page is the 2026-10-20 plan as written, and [`roadmap-backlog.json`](roadmap-backlog.json)
+keeps each package's entry state as of that date.
+
 [Research and source checks](research/2026-10-20-product-roadmap-research.md) ·
 [Dependency index](roadmap-backlog.json) ·
 [Existing release epic](https://github.com/ravidsrk/open-fleet/issues/526)
@@ -105,23 +110,23 @@ live protocol service support and legal conformance are not assumed.
 
 ## Work packages
 
-| Issue | Work package | Wave / size | Hard prerequisite | Current entry state |
+| Issue | Work package | Wave / size | Hard prerequisite | State (2026-10-25) |
 |---|---|---|---|---|
-| [R01 / #594](https://github.com/ravidsrk/open-fleet/issues/594) | Activate the trusted verdict-gate identity in branch protection | W0 / S | — | Needs human |
-| [R02 / #595](https://github.com/ravidsrk/open-fleet/issues/595) | Complete the independent-maintainer review witness for H-10 | W0 / S | — | Needs human |
-| [R03 / #596](https://github.com/ravidsrk/open-fleet/issues/596) | Publish witnessed provider and harness certification with a reproducible first-run path | W1 / L | [PR #592](https://github.com/ravidsrk/open-fleet/pull/592) (merged) | Ready to scope |
-| [R04 / #597](https://github.com/ravidsrk/open-fleet/issues/597) | Reconcile POSIX worker launch after crashes at enumerated lifecycle boundaries | W1 / M | [PR #592](https://github.com/ravidsrk/open-fleet/pull/592) (merged) | Ready to scope |
-| [R05 / #598](https://github.com/ravidsrk/open-fleet/issues/598) | Differential-test deny-hook shell parsing against real shell behavior | W1 / M | [PR #592](https://github.com/ravidsrk/open-fleet/pull/592) (merged) | Ready to scope |
-| [R06 / #599](https://github.com/ravidsrk/open-fleet/issues/599) | Persist and fence the single-conductor merge queue | W1 / L | [R04 / #597](https://github.com/ravidsrk/open-fleet/issues/597) | After R04 |
-| [R07 / #600](https://github.com/ravidsrk/open-fleet/issues/600) | Cover the remaining verifier invariants with isolated VF-Bench traps | W2 / M | — | Ready to scope |
-| [R08 / #601](https://github.com/ravidsrk/open-fleet/issues/601) | Make VF-Bench independently runnable with held-out and temporal evaluation | W2 / L | [R07 / #600](https://github.com/ravidsrk/open-fleet/issues/600) | After R07 |
-| [R09 / #602](https://github.com/ravidsrk/open-fleet/issues/602) | Evaluate adversarial worker trajectories using observed actions and state | W2 / L | [PR #592](https://github.com/ravidsrk/open-fleet/pull/592) (merged) | Ready to scope |
-| [R10 / #603](https://github.com/ravidsrk/open-fleet/issues/603) | Derive run and wave metrics from an append-only event record | W2 / M | — | Ready to scope |
-| [R11 / #604](https://github.com/ravidsrk/open-fleet/issues/604) | Measure the WIP throughput curve before changing fleet concurrency defaults | W2 / M | — | Protocol prep ready; authorize live-run budget |
-| [R12 / #605](https://github.com/ravidsrk/open-fleet/issues/605) | Bind episodic memory hints to source revision and untrusted provenance | W3 / M | — | Ready to scope |
-| [R13 / #606](https://github.com/ravidsrk/open-fleet/issues/606) | Measure instruction-load reductions with paired mission ablations | W3 / M | [R09 / #602](https://github.com/ravidsrk/open-fleet/issues/602), [R10 / #603](https://github.com/ravidsrk/open-fleet/issues/603) | After R09, R10 |
-| [R14 / #607](https://github.com/ravidsrk/open-fleet/issues/607) | Correct and validate A2A export against a pinned official schema | W3 / M | — | Ready to scope |
-| [R15 / #608](https://github.com/ravidsrk/open-fleet/issues/608) | Verify provenance retention receipts against the signed inventory offline | W3 / M | [R07 / #600](https://github.com/ravidsrk/open-fleet/issues/600) | After R07 |
+| [R01 / #594](https://github.com/ravidsrk/open-fleet/issues/594) | Activate the trusted verdict-gate identity in branch protection | W0 / S | — | Closed 2026-10-24 |
+| [R02 / #595](https://github.com/ravidsrk/open-fleet/issues/595) | Complete the independent-maintainer review witness for H-10 | W0 / S | — | Closed 2026-10-24: OpenAI Codex is the reviewer of record |
+| [R03 / #596](https://github.com/ravidsrk/open-fleet/issues/596) | Publish witnessed provider and harness certification with a reproducible first-run path | W1 / L | [PR #592](https://github.com/ravidsrk/open-fleet/pull/592) (merged) | Closed 2026-10-25; its one owed Orca cell moved to #680 |
+| [R04 / #597](https://github.com/ravidsrk/open-fleet/issues/597) | Reconcile POSIX worker launch after crashes at enumerated lifecycle boundaries | W1 / M | [PR #592](https://github.com/ravidsrk/open-fleet/pull/592) (merged) | Closed 2026-10-23 |
+| [R05 / #598](https://github.com/ravidsrk/open-fleet/issues/598) | Differential-test deny-hook shell parsing against real shell behavior | W1 / M | [PR #592](https://github.com/ravidsrk/open-fleet/pull/592) (merged) | Closed 2026-10-24 |
+| [R06 / #599](https://github.com/ravidsrk/open-fleet/issues/599) | Persist and fence the single-conductor merge queue | W1 / L | [R04 / #597](https://github.com/ravidsrk/open-fleet/issues/597) | Closed 2026-10-23 |
+| [R07 / #600](https://github.com/ravidsrk/open-fleet/issues/600) | Cover the remaining verifier invariants with isolated VF-Bench traps | W2 / M | — | Closed 2026-10-23 |
+| [R08 / #601](https://github.com/ravidsrk/open-fleet/issues/601) | Make VF-Bench independently runnable with held-out and temporal evaluation | W2 / L | [R07 / #600](https://github.com/ravidsrk/open-fleet/issues/600) | Closed 2026-10-24 |
+| [R09 / #602](https://github.com/ravidsrk/open-fleet/issues/602) | Evaluate adversarial worker trajectories using observed actions and state | W2 / L | [PR #592](https://github.com/ravidsrk/open-fleet/pull/592) (merged) | Closed 2026-10-25: live arm bound, every attack 5/5 PASS |
+| [R10 / #603](https://github.com/ravidsrk/open-fleet/issues/603) | Derive run and wave metrics from an append-only event record | W2 / M | — | Closed 2026-10-23 |
+| [R11 / #604](https://github.com/ravidsrk/open-fleet/issues/604) | Measure the WIP throughput curve before changing fleet concurrency defaults | W2 / M | — | Closed 2026-10-25: measured; mutation-wave caps kept |
+| [R12 / #605](https://github.com/ravidsrk/open-fleet/issues/605) | Bind episodic memory hints to source revision and untrusted provenance | W3 / M | — | Closed 2026-10-24 |
+| [R13 / #606](https://github.com/ravidsrk/open-fleet/issues/606) | Measure instruction-load reductions with paired mission ablations | W3 / M | [R09 / #602](https://github.com/ravidsrk/open-fleet/issues/602), [R10 / #603](https://github.com/ravidsrk/open-fleet/issues/603) | Closed 2026-10-25: measured; current activation kept |
+| [R14 / #607](https://github.com/ravidsrk/open-fleet/issues/607) | Correct and validate A2A export against a pinned official schema | W3 / M | — | Closed 2026-10-23 |
+| [R15 / #608](https://github.com/ravidsrk/open-fleet/issues/608) | Verify provenance retention receipts against the signed inventory offline | W3 / M | [R07 / #600](https://github.com/ravidsrk/open-fleet/issues/600) | Closed 2026-10-23 |
 
 Start with [R07 / #600](https://github.com/ravidsrk/open-fleet/issues/600)'s invariant fixtures, [R14 / #607](https://github.com/ravidsrk/open-fleet/issues/607)'s schema/claim correction, and [R03 / #596](https://github.com/ravidsrk/open-fleet/issues/596)'s
 bounded first-run path. [R05 / #598](https://github.com/ravidsrk/open-fleet/issues/598) can now build its differential corpus
@@ -164,10 +169,10 @@ their existing human gates.
 | Decision | Recommendation | Status |
 |---|---|---|
 | Primary investment | Reliability and empirical proof, then broader adoption | Working recommendation; priority confirmation not recorded |
-| Expanded beta gates | Keep the current announcement gates; complete R01/R02 before 1.0 | Maintainer decides any gate change |
-| Live experiment budget and independent corpus custodian | Specify per experiment before paid/model-dependent runs | Unresolved; offline work can proceed |
-| A2A transport/server scope | Correct the offline descriptor and schema claim first | A real service remains unspecified |
-| Default concurrency / instruction cap | Keep current values until R11/R13 supply evidence | Unchanged; any revision is a separate decision |
+| Expanded beta gates | Keep the current announcement gates; complete R01/R02 before 1.0 | R01 and R02 closed 2026-10-24; any other gate change is the maintainer's |
+| Live experiment budget and independent corpus custodian | Specify per experiment before paid/model-dependent runs | Authorised per experiment (USD 50 for #602, 150 for #604, 750 for #606); OpenAI Codex holds VF-Bench's held-out set (#601) |
+| A2A transport/server scope | Correct the offline descriptor and schema claim first | Descriptor corrected (#607); a real service remains unspecified |
+| Default concurrency / instruction cap | Keep current values until R11/R13 supply evidence | Measured: R11 and R13 both recommend keeping the current values; any revision is a separate decision |
 
 Deliberately deferred: new missions, additional unvalidated adapters, a hosted SaaS,
 automatic memory-to-policy promotion, auto-merge to default, and compliance certification.

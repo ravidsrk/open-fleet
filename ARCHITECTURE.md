@@ -150,8 +150,8 @@ instruction surface. Two structural guards inherit that lesson:
   [docs/concepts.md#proof-status](docs/concepts.md#proof-status).
 - **Runtime evidence level.** Runtime policies are doctrine (mechanism) by default; a policy that
   makes an EMPIRICAL claim carries an explicit `Evidence level:` (ASSERTED / measured) —
-  `attention-budget.md` is the exemplar of the Evidence-level rule (its own level is ASSERTED
-  until the WIP-curve runs land). Each mission guide surfaces the mission's `proof:` tier beside
+  `attention-budget.md` is the exemplar of the Evidence-level rule (mutation-wave caps MEASURED
+  by #604; the rest ASSERTED). Each mission guide surfaces the mission's `proof:` tier beside
   its autonomy, so a doctrine-only, never-run mission never reads as field-proven.
 - **Instruction budget.** The line caps tabled below, plus a per-file **byte budget** (240 B × the
   line cap) so instruction surface packed into a few long lines cannot beat the line count.

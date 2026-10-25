@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """wip_curve.py — the pre-registered WIP throughput-curve experiment (#604): plan, run, report, verify.
 
-runtime/attention-budget.md keeps the fleet's WIP caps ASSERTED until at least three
-protocol-compliant runs at differing WIP settings measure verified-CLOSED throughput. This script
-is that experiment short of the model spend, which needs the owner's authorisation
-(docs/experiments/wip-curve-prereg.md says exactly what is built and what remains):
+runtime/attention-budget.md kept the fleet's WIP caps ASSERTED until at least three
+protocol-compliant runs at differing WIP settings measured verified-CLOSED throughput. This script
+is that experiment; its 12 live runs (docs/runs/2026-10-25-wip-curve-604-live.md) measured the
+mutation-wave caps and kept them. A live run spends model budget only under the owner's
+authorisation (docs/experiments/wip-curve-prereg.md):
 
   check-prereg  the pre-registration and its task set are well formed and bound to each other: the
                 task set hashes to the registered digest, the seed rebuilds to the registered

@@ -1,15 +1,15 @@
 # Pre-registration: paired instruction-load ablations (R13 / #606)
 
-Registration: **version 2**, `docs/experiments/ablation-prereg.json` sha256 `3cfc54bb05e39a0efd3fd93553a55e38b4c3a9c1da01dc50c20437e6d450561e`.
+Registration: **version 2**, `docs/experiments/ablation-prereg.json` sha256 `d235a2ccefac500fdd7130c9aef62b10bf6219b299e1e6ac4bdf48cef7293f02`.
 
 **Status.** The design, the variant generator, the static obligation check, the paired runner
 and the reporter are implemented and tested. The owner authorised the cost cap below on
 2026-10-24 (`AUTHORISED`, USD 750). The live run took place on 2026-10-25 at `c220067e9c`, whose
 registration (sha256 `244ae9f45880faeff9dd0426b2c0fcd635c54db3ef0862d1ce6d0a4e2eae0391`) is the
 one that ran, and is bound in [its run report](../runs/2026-10-25-ablation-606-live.md). The pins
-here were refreshed after the run, for #604's edit to `attention-budget.md` and #602's filled live
-rows in `evals/adversarial-trajectories.json`, so they describe today's payloads, not the ones
-that ran; the run re-derives from its own commit. **Recommendation: keep the current activation.** The registered rule returns SUCCESSFUL_REDUCTION for every mission, but
+here were refreshed after the run, for #604's edit to `attention-budget.md`, #602's filled live
+rows in `evals/adversarial-trajectories.json` and #695's edit to `ARCHITECTURE.md`, so they
+describe today's payloads, not the ones that ran; the run re-derives from its own commit. **Recommendation: keep the current activation.** The registered rule returns SUCCESSFUL_REDUCTION for every mission, but
 only because task success was 0 in both arms: the registered agent command could not run the tests
 or commit, and the reduced arm's deferred documents were unreachable. The report gives a follow-up
 design. Nothing in this experiment changes the
@@ -93,8 +93,8 @@ pinned in `registered_payloads`, and a test holds this table to them:
 <!-- BEGIN GENERATED: ablation-loads — scripts/ablation.py prereg --refresh -->
 | Mission | Baseline activation | Reduced activation | Delta |
 |---|---|---|---|
-| ship-it | ~33,997 | ~4,579 | -29,418 |
-| clean-sweep | ~32,651 | ~4,546 | -28,105 |
+| ship-it | ~33,996 | ~4,579 | -29,417 |
+| clean-sweep | ~32,650 | ~4,546 | -28,104 |
 | review-it | ~24,480 | ~3,724 | -20,756 |
 | root-cause | ~19,249 | ~6,716 | -12,533 |
 <!-- END GENERATED: ablation-loads -->
