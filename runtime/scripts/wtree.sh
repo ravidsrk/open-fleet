@@ -17,9 +17,10 @@
 #
 # The REAL repo index is never touched. Seeding the temp index by COPYING the real one preserves the
 # stat cache, so `git add -A` only re-hashes files whose stat changed. gstack's #2687 hardening is
-# kept verbatim in spirit: `cp` stamps the copy "now", which defeats git's racy-index protection and
-# can hide a same-second rewrite, so `touch -r` restores the original mtime — and if that touch
-# FAILS we fall through to the slower `read-tree HEAD` seed rather than trusting a stale stat cache.
+# kept verbatim in spirit: a copy is stamped "now", which defeats git's racy-index protection and
+# can hide a same-second rewrite, so the copy gets the original's times back (from the fstat of the
+# descriptor it was read from) — and if that FAILS we fall through to the slower `read-tree HEAD`
+# seed rather than trusting a stale stat cache.
 #
 # Staging runs in GIT CUSTODY (W4 custody sweep): against a git dir this script builds in a temp
 # dir, whose config it writes and which defines no filter or diff driver, over the repository's
@@ -42,10 +43,13 @@
 # Exit 1 outside a git repo, or in a repo with no commits and no usable index — callers MUST treat
 # a non-zero exit as "no fingerprint" and fail closed, never as an empty one.
 # Exit 1 too when the repository cannot be staged in custody: an `extensions.*` the custody git dir
-# cannot honour (a partial clone above all), a non-regular `info/exclude`, `info/attributes`,
-# `shallow`, shared index or `info/sparse-checkout` where git would read one, a repository-scope
-# `core.attributesFile` that is not a regular file of at most 1 MiB, or a gitlink path holding a
-# newline; and when the exit-3 check below cannot run (its diff-index or check-attr fails).
+# cannot honour (a partial clone above all), a common git dir whose path an alternates file cannot
+# name (a newline or `"` in it), an `info/exclude`, `info/attributes`, `shallow` or
+# `info/sparse-checkout` that is not a regular file of at most 16 MiB, an index or shared index
+# that is not one of at most 1 GiB, or a repository-scope `core.attributesFile` that is not one of
+# at most 1 MiB, where git would read it; no python3 that resolves to an absolute path (it does
+# those reads); or a gitlink path holding a newline; and when the exit-3 check below cannot run
+# (its diff-index or check-attr fails).
 # Exit 3, with the reason on stderr, when a path staged differently from HEAD is selected by a
 # filter driver a config DECLARES — the repository's, or a global/system file, which on a one-uid
 # host the worker can write as well (#629, PR #649 review, W4-02). No filter ever runs here: the
@@ -113,6 +117,13 @@ case "$GIT" in
   /*) ;;
   *) echo "wtree: no git on PATH that resolves to an absolute path; no fingerprint" >&2; exit 1 ;;
 esac
+# python3 -I does the reads sh cannot do safely: every file copied into CUSTODY below is opened
+# without blocking and without following a final symlink (Codex, round 5, P2). Resolved once, as git.
+PY=$(command -v python3 2>/dev/null) || PY=
+case "$PY" in
+  /*) ;;
+  *) echo "wtree: no python3 on PATH that resolves to an absolute path; no fingerprint" >&2; exit 1 ;;
+esac
 # The caller's own global/system view, kept for ONE read below: the driver NAMES those files
 # declare, so a changed path one selects is reported unverifiable (exit 3), never staged raw.
 _CALLER_GLOBAL=${GIT_CONFIG_GLOBAL-}; _CALLER_GLOBAL_SET=${GIT_CONFIG_GLOBAL+1}
@@ -135,8 +146,38 @@ export GIT_CONFIG_KEY_2 GIT_CONFIG_VALUE_2 GIT_CONFIG_KEY_3 GIT_CONFIG_VALUE_3
 # that never closes would block the fingerprint, and the gate behind it, forever (#629).
 exec </dev/null
 
+# Bytes, not text, from here on: paths and config keys are handled under LC_ALL=C (see below).
+LC_ALL=C
+export LC_ALL
+NL='
+'
+TAB=$(printf '\t')
+# Codex, round 5 (P1): `$(...)` strips EVERY trailing newline, so `TOP=$(git rev-parse
+# --show-toplevel)` for a repository at /tmp/repo<NL> named /tmp/repo, and the fingerprint printed
+# THAT repository's tree. exact_out runs a command and leaves its stdout in `_out` with only the ONE
+# newline git ends a value with removed and every other byte kept (a sentinel printed after the
+# output takes the strip); a command that fails, or output that does not end in that newline, is a
+# failure. Every path git hands this script (the toplevel, the git dir, the common dir, the index)
+# and every core.* value carried below is read this way. No other command substitution here can
+# lose a byte to the strip: `command -v` output must be absolute, so it ends in the command's name;
+# mktemp's ends in its random suffix; the rest are object ids, a format name, counts or messages.
+exact_out() {
+  _out=$("$@" 2>/dev/null && printf x) || return 1
+  _out=${_out%x}
+  case "$_out" in
+    *"$NL") _out=${_out%"$NL"} ;;
+    *) return 1 ;;
+  esac
+}
+
 TARGET="${1:-.}"
-TOP=$("$GIT" -C "$TARGET" rev-parse --show-toplevel 2>/dev/null) || exit 1
+exact_out "$GIT" -C "$TARGET" rev-parse --show-toplevel || exit 1
+TOP=$_out
+# An empty TOP would make every `-C "$TOP"` below run in the caller's directory instead.
+case "$TOP" in
+  /*) ;;
+  *) exit 1 ;;
+esac
 
 # #629: `git add -A` below materialises worktree content, running a repo-config clean/smudge
 # filter a .gitattributes selects. The command comes only from a declared filter.<n>.* key, and
@@ -155,11 +196,6 @@ TOP=$("$GIT" -C "$TARGET" rev-parse --show-toplevel 2>/dev/null) || exit 1
 # content runs with those files off, so a driver they declare never runs, but its NAME is
 # collected with the repository's — DECLARED keeps every blanked filter name, one per line, for
 # the exit-3 check after staging, whichever scope (`--show-scope`) declared it.
-LC_ALL=C
-export LC_ALL
-NL='
-'
-TAB=$(printf '\t')
 DECLARED=
 # PR #649 review (PRRT_kwDOTWxN9c6vzAIE): an unreadable driver list must stop the fingerprint,
 # never run with nothing blanked. `$(git ... | tr ...)` reported tr's exit status and hid git's,
@@ -236,8 +272,15 @@ fi
 # name folding, stat fields, sparse flags) ride too, read here by `config --get`, so a checkout
 # still fingerprints as its committed tree. `core.excludesFile` is NOT carried: honouring a file
 # the worker names could hide an untracked file, so it counts (fails STALE) instead.
-_gitdir=$("$GIT" -C "$TOP" rev-parse --absolute-git-dir 2>/dev/null) || exit 1
-_common=$("$GIT" -C "$TOP" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 1
+# Both read byte-exact (exact_out, above): a stripped trailing newline named another directory.
+exact_out "$GIT" -C "$TOP" rev-parse --absolute-git-dir || exit 1
+_gitdir=$_out
+exact_out "$GIT" -C "$TOP" rev-parse --path-format=absolute --git-common-dir || exit 1
+_common=$_out
+case "$_gitdir" in
+  /*) ;;
+  *) echo "wtree: $TOP's git dir is not absolute; no fingerprint" >&2; exit 1 ;;
+esac
 _format=$("$GIT" -C "$TOP" rev-parse --show-object-format 2>/dev/null) || exit 1
 case "$_format" in
   sha1) _rfv=0 ;;
@@ -272,8 +315,8 @@ set +f
 IFS=$OLDIFS
 for _k in filemode symlinks ignorecase precomposeunicode protecthfs protectntfs sparsecheckout \
     sparsecheckoutcone autocrlf eol safecrlf checkroundtripencoding checkstat trustctime; do
-  _v=$("$GIT" -C "$TOP" config --get "core.$_k" 2>/dev/null) || continue
-  set -- "$@" "GIT_CONFIG_KEY_$_n=core.$_k" "GIT_CONFIG_VALUE_$_n=$_v"
+  exact_out "$GIT" -C "$TOP" config --get "core.$_k" || continue
+  set -- "$@" "GIT_CONFIG_KEY_$_n=core.$_k" "GIT_CONFIG_VALUE_$_n=$_out"
   _n=$((_n + 1))
 done
 _head=$("$GIT" -C "$TOP" rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null) || _head=
@@ -284,60 +327,24 @@ trap 'rm -rf "$CUSTODY"' EXIT INT TERM
 # core.attributesFile (Codex on this branch, P1): a repository-scope one is attribute DATA like
 # info/attributes — dropped, a clean CRLF checkout an `eol=crlf` line there steers, once touched,
 # staged unnormalised and read STALE. Its CONTENT is carried: the path as git expands it
-# (`--type=path`; a relative one is the work tree top's, where git reads it), read only as a
-# regular file of at most 1 MiB, opened without following a final symlink and without blocking (a
-# FIFO's open would hang the gate), into a file CUSTODY's own core.attributesFile names — the same
-# lowest precedence, below .gitattributes and info/attributes. A FIFO, device, directory, symlink or
-# larger file is no fingerprint (exit 1), never silently dropped; a missing file or an empty value
-# is no attributes, as for git. sh cannot open without blocking, so python3 -I does that one read,
-# and takes the path from git's NUL-terminated output in a file: a `$(...)` would strip a trailing
-# newline from it and read another file (Codex, round 3). CUSTODY's file is named ALWAYS, empty when
-# the repository names none, so git never opens its default user attributes file
-# ($XDG_CONFIG_HOME/git/attributes or ~/.config/git/attributes, the worker's to write on a one-uid
-# host — a FIFO there hung staging), and GIT_ATTR_NOSYSTEM=1 (above) keeps the system file shut.
+# (`--type=path`; a relative one is the work tree top's, where git reads it), read as every custody
+# copy below is read (a regular file of at most 1 MiB here), into a file CUSTODY's own
+# core.attributesFile names — the same lowest precedence, below .gitattributes and info/attributes.
+# A FIFO, device, directory, symlink or larger file is no fingerprint (exit 1), never silently
+# dropped; a missing file or an empty value is no attributes, as for git. The reader takes the path
+# from git's NUL-terminated output in a file: a `$(...)` would strip a trailing newline from it and
+# read another file (Codex, round 3). CUSTODY's file is named ALWAYS, empty when the repository
+# names none, so git never opens its default user attributes file ($XDG_CONFIG_HOME/git/attributes
+# or ~/.config/git/attributes, the worker's to write on a one-uid host — a FIFO there hung
+# staging), and GIT_ATTR_NOSYSTEM=1 (above) keeps the system file shut.
 : >"$CUSTODY/attributes" || exit 1
 _rc=0
 "$GIT" -C "$TOP" config --type=path -z --get core.attributesFile >"$CUSTODY/wtree-attributes-path" \
   2>/dev/null || _rc=$?
 _aflen=$(wc -c <"$CUSTODY/wtree-attributes-path" | tr -d ' \t') || exit 1
+_attrs=
 if [ "$_rc" -eq 0 ] && [ "$_aflen" -gt 1 ]; then
-  PY=$(command -v python3 2>/dev/null) || PY=
-  case "$PY" in
-    /*) ;;
-    *) echo "wtree: $TOP names a core.attributesFile and no python3 resolves to read it safely; no fingerprint" >&2
-       exit 1 ;;
-  esac
-  if ! "$PY" -I -c '
-import os, stat, sys
-pathfile, top, dst, limit = sys.argv[1], os.fsencode(sys.argv[2]), sys.argv[3], int(sys.argv[4])
-with open(pathfile, "rb") as fh:
-    raw = fh.read()
-if not raw.endswith(b"\0") or b"\0" in raw[:-1]:
-    sys.exit(1)
-src = raw[:-1]
-if not src.startswith(b"/"):
-    src = top + b"/" + src
-try:
-    fd = os.open(src, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
-except FileNotFoundError:
-    data = b""
-except OSError:
-    sys.exit(1)
-else:
-    st = os.fstat(fd)
-    if not stat.S_ISREG(st.st_mode) or st.st_size > limit:
-        os.close(fd)
-        sys.exit(1)
-    with os.fdopen(fd, "rb") as fh:
-        data = fh.read(limit + 1)
-    if len(data) > limit:
-        sys.exit(1)
-with open(dst, "wb") as fh:
-    fh.write(data)
-' "$CUSTODY/wtree-attributes-path" "$TOP" "$CUSTODY/attributes" 1048576 2>/dev/null; then
-    echo "wtree: $TOP's core.attributesFile is not a regular file of at most 1 MiB; no fingerprint" >&2
-    exit 1
-  fi
+  _attrs=$CUSTODY/wtree-attributes-path
 elif [ "$_rc" -eq 0 ] && [ "$_aflen" -ne 1 ]; then
   echo "wtree: $TOP's core.attributesFile listing is not one NUL-terminated value; no fingerprint" >&2
   exit 1
@@ -348,16 +355,6 @@ fi
 set -- "$@" "GIT_CONFIG_KEY_$_n=core.attributesFile" "GIT_CONFIG_VALUE_$_n=$CUSTODY/attributes"
 _n=$((_n + 1))
 set -- "$@" "GIT_CONFIG_COUNT=$_n"
-# A regular file is copied (mtime kept); a missing one is skipped; anything else (a symlink, a
-# FIFO) where git would read one is refused, never followed.
-copy_regular() {
-  if [ -L "$1" ]; then return 1; fi
-  if [ -e "$1" ]; then
-    [ -f "$1" ] || return 1
-    cp -p "$1" "$2" || return 1
-  fi
-  return 0
-}
 mkdir "$CUSTODY/refs" "$CUSTODY/refs/heads" "$CUSTODY/refs/tags" "$CUSTODY/info" \
   "$CUSTODY/objects" "$CUSTODY/objects/info" || exit 1
 printf '[core]\n\trepositoryformatversion = %s\n\tbare = true\n' "$_rfv" >"$CUSTODY/config" || exit 1
@@ -370,29 +367,13 @@ else
   printf 'ref: refs/heads/open-fleet-unborn\n' >"$CUSTODY/HEAD" || exit 1
 fi
 printf '%s/objects\n' "$_common" >"$CUSTODY/objects/info/alternates" || exit 1
-# info/attributes is DATA (Codex on this branch, P1): `text`/`eol`/`working-tree-encoding`/`ident`
-# are built-in conversions, so without it a clean CRLF checkout of an `eol=crlf` path, once
-# touched, staged as CRLF and read STALE; a `filter=`/`diff=` it selects names a driver CUSTODY's
-# config never defines. core.attributesFile's content is carried above.
-for _pair in "info/exclude:$_common" "info/attributes:$_common" "shallow:$_common" \
-    "info/sparse-checkout:$_gitdir"; do
-  _rel=${_pair%%:*}
-  if ! copy_regular "${_pair#*:}/$_rel" "$CUSTODY/$_rel"; then
-    echo "wtree: ${_pair#*:}/$_rel is not a regular file; no fingerprint" >&2
-    exit 1
-  fi
-done
-for _f in "$_gitdir"/sharedindex.*; do
-  [ -e "$_f" ] || [ -L "$_f" ] || continue
-  if ! copy_regular "$_f" "$CUSTODY/${_f##*/}"; then
-    echo "wtree: $_f is not a regular file; no fingerprint" >&2
-    exit 1
-  fi
-done
 
 # Resolve the REAL index path BEFORE exporting GIT_INDEX_FILE: with the variable set,
 # `rev-parse --git-path index` returns the temp index itself and the stat-cache seed self-copies.
-REAL_INDEX=$("$GIT" -C "$TOP" rev-parse --git-path index 2>/dev/null || true)
+REAL_INDEX=
+if exact_out "$GIT" -C "$TOP" rev-parse --git-path index; then
+  REAL_INDEX=$_out
+fi
 case "$REAL_INDEX" in
   ""|/*) ;;
   *) REAL_INDEX="$TOP/$REAL_INDEX" ;;
@@ -400,6 +381,113 @@ esac
 
 TMPIDX=$(mktemp "${TMPDIR:-/tmp}/orca-wtree-XXXXXX") || exit 1
 trap 'rm -f "$TMPIDX"; rm -rf "$CUSTODY"' EXIT INT TERM
+
+# What git reads from the repository's git dir is COPIED into CUSTODY: the common `info/exclude`,
+# `info/attributes` and `shallow`, the per-worktree `info/sparse-checkout` and split-index
+# `sharedindex.*`, the core.attributesFile content (above), and the real index into TMPIDX (the
+# stat-cache seed). info/attributes is DATA (Codex on this branch, P1): `text`/`eol`/
+# `working-tree-encoding`/`ident` are built-in conversions, so without it a clean CRLF checkout of
+# an `eol=crlf` path, once touched, staged as CRLF and read STALE; a `filter=`/`diff=` it selects
+# names a driver CUSTODY's config never defines. Each file is opened ONCE (Codex, round 5, P2): a
+# type check by path and then `cp` by path again let a still-running worker swap in a FIFO between
+# the two (cp's open hung the gate) or a symlink (cp followed it). So python3 -I opens it without
+# following a final symlink and without blocking, checks the type and size with fstat on that
+# descriptor, and copies from that descriptor, never more than the cap: a regular file of at most
+# 16 MiB (the data files) or 1 GiB (the index and each shared index). Anything else — a FIFO,
+# socket, device, directory, symlink, larger or still-growing file — is no fingerprint (exit 1),
+# never followed or skipped; an absent file is skipped, as git skips it. Each copy gets its
+# original's atime/mtime from that same fstat. The reader prints `seeded` once the index is copied
+# with its times; an absent index, or times that cannot be restored, seed from HEAD instead.
+if ! _seeded=$("$PY" -I -c '
+import os, stat, sys
+MIB = 1 << 20
+DATA, INDEX, ATTRIBUTES = (16 * MIB, b"16 MiB"), (1024 * MIB, b"1 GiB"), (MIB, b"1 MiB")
+FLAGS = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+         | getattr(os, "O_NOCTTY", 0))
+top, common, gitdir, custody, index, tmpidx, pathfile = map(os.fsencode, sys.argv[1:8])
+
+
+class Refused(Exception):
+    pass
+
+
+def copy(src, dst, cap):
+    """src into dst from ONE descriptor: opened without following a final symlink or blocking, read
+    only if fstat on it shows a regular file of at most cap bytes, and never past cap + 1 bytes (a
+    file that grows past it is refused too). Its stat, or None if src is absent, as for git."""
+    try:
+        fd = os.open(src, FLAGS)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError:
+        raise Refused(src, cap)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > cap[0]:
+            raise Refused(src, cap)
+        left = cap[0] + 1
+        with open(dst, "wb") as out:
+            while left > 0:
+                chunk = os.read(fd, min(left, MIB))
+                if not chunk:
+                    break
+                out.write(chunk)
+                left -= len(chunk)
+        if left <= 0:
+            raise Refused(src, cap)
+    finally:
+        os.close(fd)
+    return st
+
+
+def stamp(dst, st):
+    os.utime(dst, ns=(st.st_atime_ns, st.st_mtime_ns))
+
+
+def main():
+    if pathfile:
+        with open(pathfile, "rb") as fh:
+            raw = fh.read()
+        src = raw[:-1]
+        named = top + b"\x27s core.attributesFile"
+        if not raw.endswith(b"\0") or b"\0" in src:
+            raise Refused(named, ATTRIBUTES)
+        try:
+            copy(src if src.startswith(b"/") else top + b"/" + src, custody + b"/attributes", ATTRIBUTES)
+        except Refused:
+            raise Refused(named, ATTRIBUTES) from None
+    for base, rel in ((common, b"info/exclude"), (common, b"info/attributes"), (common, b"shallow"),
+                      (gitdir, b"info/sparse-checkout")):
+        st = copy(base + b"/" + rel, custody + b"/" + rel, DATA)
+        if st is not None:
+            stamp(custody + b"/" + rel, st)
+    for name in sorted(os.listdir(gitdir)):
+        if name.startswith(b"sharedindex."):
+            st = copy(gitdir + b"/" + name, custody + b"/" + name, INDEX)
+            if st is not None:
+                stamp(custody + b"/" + name, st)
+    st = copy(index, tmpidx, INDEX) if index else None
+    if st is not None:
+        try:
+            stamp(tmpidx, st)
+        except OSError:
+            return
+        sys.stdout.write("seeded\n")
+
+
+try:
+    main()
+except Refused as exc:
+    what, cap = exc.args
+    sys.stderr.buffer.write(b"wtree: " + what + b" is not a regular file of at most " + cap[1]
+                            + b"; no fingerprint\n")
+    sys.exit(1)
+except OSError as exc:
+    sys.stderr.write("wtree: cannot copy what git reads into custody (%s); no fingerprint\n" % exc)
+    sys.exit(1)
+' "$TOP" "$_common" "$_gitdir" "$CUSTODY" "$REAL_INDEX" "$TMPIDX" "$_attrs"); then
+  exit 1
+fi
 GIT_INDEX_FILE="$TMPIDX"
 export GIT_INDEX_FILE
 
@@ -408,11 +496,7 @@ seed_from_head() {
   "$GIT" -C "$TOP" --git-dir="$CUSTODY" --work-tree="$TOP" read-tree HEAD 2>/dev/null || return 1
 }
 
-if [ -n "$REAL_INDEX" ] && [ -f "$REAL_INDEX" ] && cp "$REAL_INDEX" "$TMPIDX" 2>/dev/null; then
-  if ! touch -r "$REAL_INDEX" "$TMPIDX" 2>/dev/null; then
-    seed_from_head || exit 1
-  fi
-else
+if [ "$_seeded" != seeded ]; then
   seed_from_head || exit 1
 fi
 

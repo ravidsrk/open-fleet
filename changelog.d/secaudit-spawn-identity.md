@@ -1,8 +1,8 @@
 - **The spawn path's identity inputs are bounded: the parent-profile cap reaches Orca workers,
   CLI commands and installer operands are validated, and printed receipt fields are inert**
   ([2026-10-27 security audit](../docs/runs/2026-10-27-security-audit.md): W4-04, W4-10, W4-11,
-  W4-12, W4-15/W2-03, W2-05/W5-22, W5-19, W5-20; W4-13 is parked, since running the resolver
-  under `python3 -I` changes a pinned assertion that needs a one-way human waiver first).
+  W4-12, W4-13, W4-15/W2-03, W2-05/W5-22, W5-19, W5-20). The CLI resolver that `spawn_worker.sh`
+  runs first now runs under `python3 -I`, so a caller's PYTHONPATH cannot shadow it.
   `spawn_worker.sh` records every launch's profile under the pane handle the runtime returns
   (`~/.open-fleet/spawn-profiles/`), so a spawn from that pane is capped at it on Orca as well as
   posix. Each launch reserves its profile there before any launch call (an unwritable registry or

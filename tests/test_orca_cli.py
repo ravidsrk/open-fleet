@@ -385,7 +385,7 @@ class NoScriptNamesTheExecutable(unittest.TestCase):
 
     def test_spawn_worker_runs_the_resolved_command(self):
         text = (SCRIPTS / "spawn_worker.sh").read_text(encoding="utf-8")
-        self.assertIn('ORCA_BIN="$(python3 "$HERE/orca_cli.py")"', text)
+        self.assertIn('ORCA_BIN="$(python3 -I "$HERE/orca_cli.py")"', text)
         offenders = [line for line in text.splitlines()
                      if not line.lstrip().startswith("#") and self.SHELL_INVOCATION.search(line)]
         self.assertEqual(offenders, [], "spawn_worker.sh invokes a bare `orca`")

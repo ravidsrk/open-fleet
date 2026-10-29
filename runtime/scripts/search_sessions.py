@@ -29,12 +29,14 @@ codex, opencode, omp, pi, jcode, goose, hermes, crush, openhands — each throug
 reader that follows its upstream on-disk format (see the per-reader comments).
 It is a token scan, not an index: every query re-reads the stores, each file up to
 MAX_FILE_BYTES and the whole scan up to MAX_RUN_BYTES (a skip is said on stderr; the
-episodic hint's manifests too). Those cap the BYTES; parsing multiplies them, so the scan itself
-(the stores and the manifests alike) runs in a forked child: on Linux, RLIMIT_DATA holds it to
-SCAN_MEMORY_BYTES past what the process held, and a source whose parse passes that is skipped and
-said; on every platform a source still being read after SOURCE_SECONDS is skipped and said; a
-child stopped by either is restarted past that source, at most SCAN_ATTEMPTS times. macOS does
-not enforce RLIMIT_DATA, so there memory is bounded only by the byte caps times the parse's
+episodic hint's manifests and --current-evidence too). Those cap the BYTES; parsing multiplies
+them, so every parse of them (the stores, the manifests and the current evidence alike) runs in a
+forked child, never in this process: on Linux, RLIMIT_DATA holds it to SCAN_MEMORY_BYTES past
+what the process held, and a source whose parse passes that is skipped and said; on every platform
+a source still being read after SOURCE_SECONDS is skipped and said; a child stopped by either is
+restarted past that source, at most SCAN_ATTEMPTS times (the current evidence is never skipped: it
+is refused, exit 2, and only its checked observations cross back). macOS does not enforce
+RLIMIT_DATA, so there memory is bounded only by the byte caps times the parse's
 amplification (and a store's schema statement by MAX_SQL_BYTES, everywhere). Regular files only (a link, FIFO or device is said and
 never read; a store, -wal or -shm swapped for one during SQLite's open fails it closed, and
 an open stalled past SQLITE_OPEN_SECONDS is abandoned), a SQLite store's plain tables'
@@ -131,18 +133,22 @@ DEFAULT_RUNS_DIR = Path(__file__).resolve().parent.parent.parent / "docs" / "run
 # re-attack of 2d254d0f). The memory is SCAN_MEMORY_BYTES' job.
 MAX_FILE_BYTES = 64 << 20
 MAX_RUN_BYTES = 512 << 20
-# Every scan of untrusted stores -- the local-harness search and the run-manifest scan -- runs in a
-# forked child (_contained) whose RLIMIT_DATA allows it SCAN_MEMORY_BYTES past what the process held
-# when it forked. Linux enforces RLIMIT_DATA on every private writable mapping, so an allocation past
-# it fails: a parse that runs out is a MemoryError, and the source being read is skipped and said;
+# Every read of untrusted JSON -- the local-harness search, the run-manifest scan and the frozen
+# task's --current-evidence -- runs in a forked child (_contained, _current_evidence) whose
+# RLIMIT_DATA allows it SCAN_MEMORY_BYTES past what the process held when it forked: no byte a
+# store, a manifest or the evidence file holds is parsed in the parent. Linux enforces RLIMIT_DATA
+# on every private writable mapping, so an allocation past it fails: a parse that runs out is a
+# MemoryError, and the source being read is skipped and said (the current evidence is refused);
 # a child that dies of it is restarted past that source. macOS (and any system that does not
 # enforce RLIMIT_DATA on mmap) does not bound it: there the memory a scan holds is bounded only by
 # the byte caps above times the parse's amplification, and MAX_SQL_BYTES for a store's schema. The
 # parent never holds what the child parsed: the child returns a flat projection of exactly the fields
-# the parent reads (_project_hits, _project_hints), every text cut to its cap and every list to its
-# count, as JSON of at most RESULT_BYTES with at most RESULT_VALUES structural bytes, both checked
-# before the parent decodes it -- never a pickled unit or manifest, which carried a parsed amplifier
-# (a matching unit beside 24 MiB of empty objects) back into the unbounded parent (Codex round 11).
+# the parent reads (_project_hits, _project_hints, _bounded_observations), every text cut to its cap
+# and every list to its count, as JSON of at most RESULT_BYTES with at most RESULT_VALUES structural
+# bytes, both checked before the parent decodes it -- never a pickled unit or manifest, which carried
+# a parsed amplifier (a matching unit beside 24 MiB of empty objects) back into the unbounded parent
+# (Codex round 11), nor the evidence file's own JSON, which was parsed here before its shape was
+# checked (Codex round 13: a 60 MiB array of empty objects, some 20 million dicts).
 SCAN_MEMORY_BYTES = 1 << 30
 # Wall clock for one source (a file or a store, read and parsed), on every platform: the child is
 # killed past it and restarted past that source, which is said.
@@ -162,6 +168,12 @@ LIST_ITEMS = 32
 REASON_ITEMS = 64
 SYMBOL_ITEMS = 8
 MAX_HINTS = 500
+# The frozen task's current evidence (--current-evidence) is read, parsed and checked in a contained
+# child, and what crosses back is at most this many observations, each path at most PATH_CHARS
+# (_bounded_observations). Past either the evidence is refused whole, never cut: a dropped
+# observation could be the one that supersedes a hint. A task observes the paths it touches, far
+# fewer than this; the count also bounds supersede's work, which compares each with every hint.
+MAX_OBSERVATIONS = 4096
 # The longest schema statement SQLite is allowed to parse in a store (SQLITE_LIMIT_SQL_LENGTH): its
 # expression tree costs ~180 bytes per list item, so a 62 MB `DEFAULT (0 IN (1,1,...))` was 5.61 GB
 # while under the old limit (MAX_FILE_BYTES). No harness writes a schema statement near this.
@@ -374,7 +386,7 @@ def _decode(data):
         return None
     try:
         return json.loads(data)
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
 
 
@@ -922,6 +934,65 @@ def _manifest_hints(hints, order, mf, clean_paths, rdir):
         })
 
 
+def _bounded_observations(raw):
+    """hint_provenance.load_observations(raw), held to MAX_OBSERVATIONS entries and PATH_CHARS per
+    path, and refused whole past either (hp.ProvenanceError), never cut: a dropped observation could
+    be the one that supersedes a hint. A source note, which nothing reads, is cut to PATH_CHARS. The
+    count bounds supersede's work too: it compares every observation with every hint."""
+    items = raw.get("observations") if isinstance(raw, dict) else raw
+    if isinstance(items, list) and len(items) > MAX_OBSERVATIONS:
+        raise hp.ProvenanceError(f"current evidence holds {len(items)} observations, over {MAX_OBSERVATIONS}")
+    observations = hp.load_observations(raw)
+    for i, obs in enumerate(observations):
+        if len(obs["path"]) > PATH_CHARS:
+            raise hp.ProvenanceError(f"current evidence [{i}] names a path over {PATH_CHARS} characters")
+        obs["source"] = obs["source"][:PATH_CHARS]
+    return observations
+
+
+def _evidence_observations(path):
+    """In a contained child: --current-evidence read (capped; a link the caller named is followed),
+    parsed and validated (_bounded_observations), as ["ok", observations], ["unreadable", ""] or
+    ["invalid", why]: a refusal is an answer here, never an exception, so the parent can say why."""
+    raw = _read_capped(path, follow=True)
+    if raw is None:
+        return ["unreadable", ""]
+    try:
+        return ["ok", _bounded_observations(json.loads(raw.decode("utf-8")))]
+    except (ValueError, RecursionError, hp.ProvenanceError) as exc:  # a UnicodeDecodeError is a ValueError
+        return ["invalid", _text(str(exc), PATH_CHARS)]
+
+
+def _current_evidence(path):
+    """--current-evidence's observations (_bounded_observations), read, parsed and validated in a
+    contained child (_attempt: SCAN_MEMORY_BYTES, SOURCE_SECONDS) as a manifest is, never here: a
+    60 MiB array of empty objects was parsed in this process before its shape was checked, some
+    20 million dicts (Codex round 13 on 594f7265). What crosses back is the validated list, checked
+    against RESULT_BYTES and RESULT_VALUES before it is decoded, and checked again here
+    (build_episodic_selection). Refused (Refused, exit 2), never cut or skipped, when the file is
+    unreadable, not a regular file, over MAX_FILE_BYTES, not UTF-8 JSON, nested past the parser's
+    depth, not [{path, outcome}] or past MAX_OBSERVATIONS or PATH_CHARS, or when its read and parse
+    passed SCAN_MEMORY_BYTES or SOURCE_SECONDS. Without fork (not POSIX) it runs here, as every
+    contained scan does."""
+    if _WORKER is not None or not hasattr(os, "fork"):
+        outcome, answer = "ok", _evidence_observations(path)
+    else:
+        outcome, answer = _attempt(_evidence_observations, (path,), frozenset(), lambda value: value)
+    if outcome != "ok" or not (isinstance(answer, list) and len(answer) == 2):
+        why = {"memory": f"its parse passed the scan's memory limit (SCAN_MEMORY_BYTES, {SCAN_MEMORY_BYTES} bytes)",
+               "slow": f"it was still being read and parsed after SOURCE_SECONDS ({SOURCE_SECONDS:g} s)",
+               "failed": "its reader failed on it"}.get(
+                   outcome, f"what it holds is past what a contained scan returns (RESULT_BYTES, {RESULT_BYTES} bytes)")
+        raise Refused(f"episodic hint: --current-evidence {path}: {why}")
+    state, detail = answer
+    if state == "unreadable":
+        raise Refused(f"episodic hint: --current-evidence {path} is unreadable, "
+                      f"not a regular file, or over {MAX_FILE_BYTES} bytes")
+    if state != "ok":
+        raise Refused(f"episodic hint: --current-evidence {path}: {detail}")
+    return detail
+
+
 def _session_hints(session_hits):
     hints = []
     for order, hit in enumerate(session_hits or []):
@@ -1076,7 +1147,9 @@ def build_episodic_selection(paths, runs_dir=None, session_hits=None, max_lines=
     was recorded) or a newer record or ``current_evidence`` makes it SUPERSEDED; session hits stay
     UNKNOWN. ``mode="current"`` (worker-facing) suppresses STALE/SUPERSEDED entries and withholds
     notes that speak as an authority; ``"historical"`` lists everything, labelled, for a
-    coordinator's audit."""
+    coordinator's audit. ``current_evidence`` is the evidence already parsed (main reads its file in
+    a contained child, _current_evidence), held to MAX_OBSERVATIONS and PATH_CHARS
+    (_bounded_observations: hp.ProvenanceError past either)."""
     clean_paths = [_nonempty(p, "--path") for p in (paths or []) if p is not None]
     if not clean_paths and session_hits is None:
         raise Refused("--episodic-hint requires at least one --path or query")
@@ -1084,7 +1157,7 @@ def build_episodic_selection(paths, runs_dir=None, session_hits=None, max_lines=
         raise Refused(f"--hint-mode must be one of {','.join(HINT_MODES)}, got {mode!r}")
     if live is not None and not isinstance(live, hp.LiveSource):
         live = hp.LiveSource(live)
-    observations = hp.load_observations(current_evidence) if current_evidence is not None else []
+    observations = _bounded_observations(current_evidence) if current_evidence is not None else []
     rdir = Path(runs_dir) if runs_dir is not None else DEFAULT_RUNS_DIR
     prior = _prior_hints(clean_paths, rdir, live, observations)  # assessed and labelled, contained
     sessions = _session_hints(session_hits)
@@ -2440,14 +2513,9 @@ def main(argv=None):
                 if ns.repo is not None:
                     live = hp.LiveSource(_nonempty(ns.repo, "--repo"),
                                          rev=_nonempty(ns.live_rev, "--live-rev"))
-                if ns.current_evidence is not None:
-                    raw = _read_capped(Path(ns.current_evidence), follow=True)
-                    if raw is None:
-                        raise Refused(f"episodic hint: --current-evidence {ns.current_evidence} is unreadable, "
-                                      f"not a regular file, or over {MAX_FILE_BYTES} bytes")
-                    evidence = json.loads(raw.decode("utf-8"))
-                    hp.load_observations(evidence)
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError, hp.ProvenanceError) as exc:
+                if ns.current_evidence is not None:  # read, parsed and checked contained, never here
+                    evidence = _current_evidence(Path(ns.current_evidence))
+            except (OSError, hp.ProvenanceError) as exc:
                 raise Refused(f"episodic hint: {exc}")
             hits = None
             if has_query:

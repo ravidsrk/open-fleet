@@ -2049,7 +2049,7 @@ host), or usage.
 reports broken. Source `runtime/scripts/search_sessions.py:1-50`; behavior pinned by
 `tests/test_search_sessions.py` and (episodic hints) `tests/test_hint_provenance.py`.
 
-Usage: `search_sessions.py [--precheck-only] [--episodic-hint [--runs-dir DIR] [--repo DIR [--live-rev REV]] [--hint-mode current|historical] [--current-evidence FILE] [--hint-json]] [query] [--query TEXT] [--scope conversation|all] [--fresh] [--limit 1-100] [--cursor CURSOR] [--agent A]... [--path P]... [--since ISO] [--sort relevance|newest] [--debug] [--environment E] [--pairing-code C] [--local-harnesses]` — `--local-harnesses` scans the local transcript stores of all 10 harnesses read-only (and is the automatic fallback when the Orca/provider search fails on a non-Orca runtime or with `OPEN_FLEET_LOCAL_SEARCH=1`); every snippet and title is fenced by `guard_text`. Every read is bounded: a transcript or run manifest over `MAX_FILE_BYTES` (64 MiB) is skipped, and so are a SQLite store's rows past it; a store over `MAX_STORE_BYTES` (1 GiB with its `-wal`) is never opened, and on a SQLite without `octet_length` (before 3.43, where sizing a value loads it) neither is one over `MAX_FILE_BYTES`, so no value inside can exceed the cap — the bound chosen because it is decided from the checked file before SQLite opens it; every store connection is opened by one helper that sets `SQLITE_LIMIT_LENGTH` to `MAX_FILE_BYTES` and `SQLITE_LIMIT_SQL_LENGTH` to `MAX_SQL_BYTES` (1 MiB, so a schema statement's expression tree stays small on every platform) before its first statement (Python 3.11+; without `setlimit` the same store bound applies), so SQLite refuses to load a larger value, or a schema holding a larger statement, at all, even in a store grown after its check (said; for a value, that table's later rows are lost); a scan reads at most `MAX_RUN_BYTES` (512 MiB) in all; and each skip is said on stderr, so a partial recall is never silent. Those caps bound the bytes read, not the memory, since parsing multiplies them (a 63 MiB transcript of `{"a":{},"b":{}}` lines held 1.71 GB): the scan of the stores, and the episodic hint's scan of the manifests, run in a forked child that holds the parse; on Linux its `RLIMIT_DATA` allows it `SCAN_MEMORY_BYTES` (1 GiB) past what the process held, so a source whose parse passes that is skipped and said, and on every platform a source still being read after `SOURCE_SECONDS` (60 s) is skipped and said; a child stopped by either is restarted past that source, at most `SCAN_ATTEMPTS` (8) times, after which the scan is abandoned and said; the episodic hint's prior-run entries are assessed and labelled in that child too (`hint_provenance.assess`, `supersede`, `verdict`, on the whole record), so no cap can leave out what a label is decided on; the child returns only a flat JSON projection of what the parent shows -- a hit's strings cut (its snippet to 64 KiB, or shorter to fit), a prior-run entry's display fields cut and its lists capped, with its computed label, at most 500 entries, never a parsed unit or manifest -- at most `RESULT_BYTES` (8 MiB) with at most `RESULT_VALUES` structural bytes, both checked before the parent decodes it. macOS does not enforce `RLIMIT_DATA`, so there the memory a scan holds is bounded only by the byte caps times the parse's amplification (some 25 to 30 times its bytes for adversarial JSON) and, for a store's schema, by `MAX_SQL_BYTES`; only regular files are read (a transcript, store or manifest that is a link, FIFO or device is never opened, and that skip is said too, a FIFO or a link to `/dev/zero` named like a transcript included); SQLite opens a store, its `-wal` and its `-shm` by name with blocking calls, so the open runs in a worker thread while the three names are watched: one that stops being a regular file during the open (a FIFO swapped in) fails the store closed, an open still blocked after `SQLITE_OPEN_SECONDS` (10 s) is abandoned, and once an abandoned open stays blocked no further store is opened in that process (SQLite may hold its process-wide lock), each said; a SQLite store is read only from its plain tables' stored columns — never a view, a virtual table (an fts5 table can front a view) or a virtual generated column (computed on each read) — one row at a time, each row's stored size charged as SQLite reads it, in the query itself, before any of its values is handed to Python, so no value past either cap ever reaches Python, and no table or column name over 256 bytes, nor any column's declared type or DEFAULT, is ever fetched; a `.zst` transcript is walked frame by frame in work linear in the file, every frame charged at least 512 bytes, and a damaged or truncated frame keeps the whole frames before it and is said (without Python 3.14's `compression.zstd` every `.zst` is skipped, and said); a record nested past the JSON parser's depth is skipped, never fatal to the scan (2026-10-27 audit and re-attack, W5-21).
+Usage: `search_sessions.py [--precheck-only] [--episodic-hint [--runs-dir DIR] [--repo DIR [--live-rev REV]] [--hint-mode current|historical] [--current-evidence FILE] [--hint-json]] [query] [--query TEXT] [--scope conversation|all] [--fresh] [--limit 1-100] [--cursor CURSOR] [--agent A]... [--path P]... [--since ISO] [--sort relevance|newest] [--debug] [--environment E] [--pairing-code C] [--local-harnesses]` — `--local-harnesses` scans the local transcript stores of all 10 harnesses read-only (and is the automatic fallback when the Orca/provider search fails on a non-Orca runtime or with `OPEN_FLEET_LOCAL_SEARCH=1`); every snippet and title is fenced by `guard_text`. Every read is bounded: a transcript or run manifest over `MAX_FILE_BYTES` (64 MiB) is skipped, and so are a SQLite store's rows past it; a store over `MAX_STORE_BYTES` (1 GiB with its `-wal`) is never opened, and on a SQLite without `octet_length` (before 3.43, where sizing a value loads it) neither is one over `MAX_FILE_BYTES`, so no value inside can exceed the cap — the bound chosen because it is decided from the checked file before SQLite opens it; every store connection is opened by one helper that sets `SQLITE_LIMIT_LENGTH` to `MAX_FILE_BYTES` and `SQLITE_LIMIT_SQL_LENGTH` to `MAX_SQL_BYTES` (1 MiB, so a schema statement's expression tree stays small on every platform) before its first statement (Python 3.11+; without `setlimit` the same store bound applies), so SQLite refuses to load a larger value, or a schema holding a larger statement, at all, even in a store grown after its check (said; for a value, that table's later rows are lost); a scan reads at most `MAX_RUN_BYTES` (512 MiB) in all; and each skip is said on stderr, so a partial recall is never silent. Those caps bound the bytes read, not the memory, since parsing multiplies them (a 63 MiB transcript of `{"a":{},"b":{}}` lines held 1.71 GB): the scan of the stores, the episodic hint's scan of the manifests, and its read of `--current-evidence`, run in a forked child that holds the parse (no byte of a store, a manifest or the evidence file is parsed in the parent); on Linux its `RLIMIT_DATA` allows it `SCAN_MEMORY_BYTES` (1 GiB) past what the process held, so a source whose parse passes that is skipped and said, and on every platform a source still being read after `SOURCE_SECONDS` (60 s) is skipped and said; a child stopped by either is restarted past that source, at most `SCAN_ATTEMPTS` (8) times, after which the scan is abandoned and said; the episodic hint's prior-run entries are assessed and labelled in that child too (`hint_provenance.assess`, `supersede`, `verdict`, on the whole record), so no cap can leave out what a label is decided on; the child returns only a flat JSON projection of what the parent shows -- a hit's strings cut (its snippet to 64 KiB, or shorter to fit), a prior-run entry's display fields cut and its lists capped, with its computed label, at most 500 entries, never a parsed unit or manifest -- at most `RESULT_BYTES` (8 MiB) with at most `RESULT_VALUES` structural bytes, both checked before the parent decodes it. macOS does not enforce `RLIMIT_DATA`, so there the memory a scan holds is bounded only by the byte caps times the parse's amplification (some 25 to 30 times its bytes for adversarial JSON) and, for a store's schema, by `MAX_SQL_BYTES`; only regular files are read (a transcript, store or manifest that is a link, FIFO or device is never opened, and that skip is said too, a FIFO or a link to `/dev/zero` named like a transcript included); SQLite opens a store, its `-wal` and its `-shm` by name with blocking calls, so the open runs in a worker thread while the three names are watched: one that stops being a regular file during the open (a FIFO swapped in) fails the store closed, an open still blocked after `SQLITE_OPEN_SECONDS` (10 s) is abandoned, and once an abandoned open stays blocked no further store is opened in that process (SQLite may hold its process-wide lock), each said; a SQLite store is read only from its plain tables' stored columns — never a view, a virtual table (an fts5 table can front a view) or a virtual generated column (computed on each read) — one row at a time, each row's stored size charged as SQLite reads it, in the query itself, before any of its values is handed to Python, so no value past either cap ever reaches Python, and no table or column name over 256 bytes, nor any column's declared type or DEFAULT, is ever fetched; a `.zst` transcript is walked frame by frame in work linear in the file, every frame charged at least 512 bytes, and a damaged or truncated frame keeps the whole frames before it and is said (without Python 3.14's `compression.zstd` every `.zst` is skipped, and said); a record nested past the JSON parser's depth is skipped, never fatal to the scan (2026-10-27 audit and re-attack, W5-21).
 
 The precheck runs first: `enabled=false` or phase `degraded`/`closed` refuses with
 exit 2 before the query fires; `current`/`idle`/`indexing` proceed (`--fresh` asks
@@ -2088,7 +2088,13 @@ merges live `orca search` hits when a query is passed, and emits a bounded `<= 1
   are `CURRENT`, `UNKNOWN`, `STALE` or `SUPERSEDED` per the reason table under
   [`hint_provenance.py`](#hint_provenancepy). `--current-evidence FILE` (`[{path, outcome:
   pass|fail, source}]`, the frozen task's own observations) supersedes any entry whose claimed
-  outcome it contradicts; agreeing evidence never upgrades an entry.
+  outcome it contradicts; agreeing evidence never upgrades an entry. The file is read (a link
+  named on the command line is followed; at most `MAX_FILE_BYTES`), parsed and shape-checked in a
+  contained child of its own under the manifests' limits (`SCAN_MEMORY_BYTES`,
+  `SOURCE_SECONDS`), and only the checked observations cross back -- at most `MAX_OBSERVATIONS`
+  (4,096), each path at most 1,024 characters, within `RESULT_BYTES`; anything else (unreadable,
+  not UTF-8 JSON, nested past the parser's depth, the wrong shape, past a bound, or a parse past a
+  limit) refuses the hint whole, exit 2, never a partial read.
 - **Modes.** `--hint-mode current` (default, worker-facing) suppresses `STALE`/`SUPERSEDED`
   entries and withholds a note whose own words (outside quotes) assert a grant or speak as an
   authority (`grant-claim`, `instruction-override`, `authority-claim`, `suppression-request`,
@@ -2147,7 +2153,7 @@ Exits: 0 sent · 1 runtime/refusal/receipt failure · 2 usage or validation refu
 Who is spawning, by process tree: the identity `spawn_worker.sh` reads when an environment says
 nothing (W4-04, Codex rounds 3 and 4). Source `runtime/scripts/spawn_identity.py`; behavior pinned
 by `tests/test_spawn_worker.py` (`TestIdentitySurvivesAScrubbedEnvironment`,
-`TestUnknownIsNeverAbsent`).
+`TestUnknownIsNeverAbsent`, `TestIdentityIsTheProcessCredentials`).
 
 Usage: `spawn_identity.py whoami --registry <dir> --pid <pid>` (one line per fact: `ROOT <profile>
 <key>` for each recorded worker root among the pid's ancestors, `INTREE`, `ANCHORED`, `LIVE
@@ -2172,7 +2178,14 @@ on 1).
 A pane found is recorded: its process tree is identified, and another carrier of the handle
 outside it would have to have escaped it (the residual below). Completeness decides what finding
 NOTHING means. A scan is complete only when every process of this uid that could be the launch's
-pane was read; a read that fails for any reason but the process being gone is UNKNOWN, never
+pane was read. Whose a process is comes from its credentials, the real, effective, saved and
+filesystem uids on the `Uid:` line of `/proc/<pid>/status`: it is this uid's when ANY of the four
+is this uid, so a same-uid pane that went non-dumpable or runs a setuid program (effective uid
+root) is still read. The owner of `/proc/<pid>` or of its files never decides it (Codex round 10):
+that owner is the effective uid alone, and root for every file of a non-dumpable process. A
+process none of whose four uids is this uid is another user's and is skipped; one whose `status`
+cannot be read or holds no single well-formed `Uid:` line of four uids leaves the scan incomplete
+(exit 1, never 3). A read that fails for any reason but the process being gone is UNKNOWN, never
 "absent" (Codex round 4): an environment that stays unreadable (`EACCES` from a non-dumpable
 process, `EIO`) makes the scan incomplete. It is read again for up to 0.25 s first, since a
 process caught exiting answers `EACCES` for a moment and then is gone, and one that has exited
@@ -2188,7 +2201,10 @@ read: an ancestor, a recorded root, host or anchor, a registry directory or a re
 cannot be read is unknown (an entry whose liveness is unknown is kept, not pruned; an anchor
 counts only while it is certainly alive). On a host that hides other users' processes (`hidepid`), a caller whose
 ancestry passes through a hidden process cannot be identified while any worker root is live, so
-`whoami` exits 1 and the caller is capped at `ro`. A `/proc` that is not this process's own pid
+`whoami` exits 1 and the caller is capped at `ro`. There, under `hidepid=1`, the `status` of
+another user's process cannot be read, so no `record-root` scan is complete and finding nothing
+exits 1; under `hidepid=2` a non-dumpable process of this uid is not listed at all, so a scan
+cannot count it (not covered). A `/proc` that is not this process's own pid
 namespace's (a sandbox that unshares pids but keeps the host's `/proc`, so every pid read there
 is another process) answers nothing: exit 1.
 
@@ -2658,8 +2674,9 @@ Flags: none — positional arguments only.
 Untracked non-ignored files are included; .gitignore'd scratch stays out. Committing
 identical content does not change the fingerprint, so a record made on a dirty tree stays
 valid once committed; content-preserving rebase/amend/squash does not change it either.
-The temp index seeds from a copy of the real one (stat cache preserved, mtime restored
-against racy-index reads), falling back to `read-tree HEAD` when the restore fails.
+The temp index seeds from a copy of the real one (stat cache preserved, atime/mtime restored
+from the copied file's own descriptor against racy-index reads), falling back to `read-tree HEAD`
+when the real index is absent or the restore fails.
 Staging runs in git custody (below), so the blobs and tree it writes land in a scratch object
 store removed on exit; the repository's own store is never written.
 
@@ -2687,21 +2704,21 @@ custody of `runtime/scripts/gitexec.py` (`custody_git_dir`), spelled in sh: a gi
 builds in a temp dir with its own config (object format only, no driver of any kind), HEAD at the
 repository's HEAD commit, the repository's objects as a read-only alternate and regular-file copies
 of its `info/exclude`, `info/attributes`, `shallow`, `info/sparse-checkout` and split-index
-`sharedindex.*` (anything but a regular file there is exit 1), with the repository's own work tree
-(`--work-tree`). A driver any config gains at any moment is undefined there. `info/attributes` is
-data: `text`/`eol`/`working-tree-encoding` are built-in conversions a clean CRLF checkout needs to
-fingerprint as its tree, and a `filter=` it selects names a driver the custody never defines. The
-repository's data-only `core.*` settings (line endings and `safecrlf`, file modes, name folding,
-stat fields, sparse flags, `checkRoundtripEncoding`) ride as command-line pairs for the same
-reason; a repository-scope `core.excludesFile` does not (an untracked file only it hid counts and
-reads STALE). A repository-scope `core.attributesFile` is attribute data too, and dropping it made
-a clean CRLF checkout it steers read STALE, so its CONTENT is carried: the path as git expands it
-(a relative one from the work tree top), read only as a regular file of at most 1 MiB, opened
-without following a final symlink and without blocking (by `python3 -I`, since sh cannot), into a
-file the custody's own `core.attributesFile` names — the same lowest precedence, below
-`.gitattributes` and `info/attributes`. A FIFO, device, directory, symlink or larger file is exit 1,
-never dropped; a missing file or empty value is no attributes, as for git. The path reaches the
-reader from git's NUL-terminated output, never a `$(...)`, which stripped a trailing newline and
+`sharedindex.*` (anything but a regular file there is exit 1; how each is read is below), with the
+repository's own work tree (`--work-tree`). A driver any config gains at any moment is undefined
+there. `info/attributes` is data: `text`/`eol`/`working-tree-encoding` are built-in conversions a
+clean CRLF checkout needs to fingerprint as its tree, and a `filter=` it selects names a driver the
+custody never defines. The repository's data-only `core.*` settings (line endings and `safecrlf`,
+file modes, name folding, stat fields, sparse flags, `checkRoundtripEncoding`) ride as command-line
+pairs for the same reason; a repository-scope `core.excludesFile` does not (an untracked file only
+it hid counts and reads STALE). A repository-scope `core.attributesFile` is attribute data too, and
+dropping it made a clean CRLF checkout it steers read STALE, so its CONTENT is carried: the path as
+git expands it (a relative one from the work tree top), read as every custody copy is (below) and
+only as a regular file of at most 1 MiB, into a file the custody's own `core.attributesFile` names —
+the same lowest precedence, below `.gitattributes` and `info/attributes`. A FIFO, device, directory,
+symlink or larger file is exit 1, never dropped; a missing file or empty value is no attributes, as
+for git. The path reaches the reader from git's NUL-terminated output, never a `$(...)`, which
+stripped a trailing newline and
 read another file. The custody's own attributes file is named always — empty when the repository
 names none — so git never opens its default user attributes file (`$XDG_CONFIG_HOME/git/attributes`
 or `~/.config/git/attributes`, the worker's to write on a one-uid host, where a FIFO hung staging),
@@ -2726,6 +2743,27 @@ its raw bytes and the value states that content (a changed file reads STALE, nev
 refuses the record as UNVERIFIABLE, naming the reason, not as STALE. The coordinator's clean-env
 re-run at `head_sha` decides such a unit.
 
+Copies and paths (Codex, round 5). Every file copied into the custody — the five above, the
+`core.attributesFile` content, and the real index into the temp index — is opened ONCE, by
+`python3 -I` (sh cannot open without blocking): without following a final symlink
+(`O_NOFOLLOW`), without blocking (`O_NONBLOCK`), its type and size checked with `fstat` on that
+descriptor, and copied from that descriptor, never past its cap. A type check by path followed by
+`cp` by path let a still-running worker swap in a FIFO between the two, so `cp`'s open hung the
+gate, or a symlink, which `cp` followed. The caps: 16 MiB for `info/exclude`, `info/attributes`,
+`shallow` and `info/sparse-checkout`, 1 GiB for the index and each `sharedindex.*`, 1 MiB for
+`core.attributesFile`. A FIFO, socket, device, directory, symlink, larger or still-growing file is
+exit 1, never followed, skipped or waited on; an absent file is skipped, as git skips it (an absent
+index seeds from HEAD). Each copy gets its original's atime/mtime from that same `fstat`. python3 is
+resolved once to an absolute path, as git is; none is exit 1. Every path git hands wtree.sh — the
+toplevel, the git dir, the common dir, the index path — and every carried `core.*` value is read
+byte-exact: `$(...)` strips every trailing newline, so wtree.sh pointed at `/tmp/repo<NL>`
+fingerprinted `/tmp/repo`, another repository, and printed its tree. A sentinel printed after git's
+output takes the strip and only git's own terminating newline is removed. So a linked worktree whose
+path ends in a newline fingerprints itself; a repository whose common git dir holds a newline (or a
+`"`) is exit 1, since an alternates file cannot name it; a toplevel or git dir that is not absolute
+is exit 1. A limit: `config --get` prints a valueless key (`[core] filemode`, true to git) exactly
+as it prints an empty value, so such a key is carried as the empty value git reads as false.
+
 Custody (W4-07). The environment pointers that outrank `-C` (`GIT_DIR`, `GIT_WORK_TREE`,
 `GIT_COMMON_DIR`, `GIT_INDEX_FILE`, the object directories, `GIT_ATTR_SOURCE`), the inherited
 config channels that outrank or blind the belt (`GIT_CONFIG_PARAMETERS`, `GIT_CONFIG`,
@@ -2734,8 +2772,9 @@ config channels that outrank or blind the belt (`GIT_CONFIG_PARAMETERS`, `GIT_CO
 (`"$GIT"`); a git that does not resolve to one is exit 1.
 
 Exits: 0 prints the hash · 1 outside a git repo, no commits and no usable index, no absolute
-git on PATH, a repository the custody cannot stage (an unhonourable extension, a non-regular
-file where git reads one, a `core.attributesFile` that is not a regular file of at most 1 MiB, a
+git or python3 on PATH, a repository the custody cannot stage (an unhonourable extension, a common
+git dir an alternates file cannot name, a file where git reads one that is not a regular file
+within its cap — 16 MiB, 1 GiB for the index and shared index, 1 MiB for `core.attributesFile` — a
 gitlink path holding a newline), or an exit-3 check that could not run · 3 a path staged differently from HEAD is filtered by a declared driver, reason on
 stderr, nothing on stdout (callers fail closed on nonzero — never treat it as an empty fingerprint).
 

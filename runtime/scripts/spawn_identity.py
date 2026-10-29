@@ -27,12 +27,19 @@ process could not be read); 3 when a COMPLETE scan found no process carrying the
 worker is not a local process: it exited, runs remotely or in another uid's container, or the
 backend is a dry run); 1 when nothing was found and the scan was not complete, or nothing could
 be read. A scan is complete only when every process of this uid that could be this launch's pane
-was read: an environment that stays unreadable for any reason but the process being gone
-(EACCES from a non-dumpable process, EIO; re-read for a moment first, since a process caught
-exiting answers EACCES briefly) makes it incomplete. A process that vanishes mid-scan is gone,
-not unknown. With `--since PID` (spawn_worker.sh
-passes itself), an unreadable process that started before PID is not counted: it cannot be a
-pane this launch created, so a runtime that hands a launch a pre-existing pane is not covered
+was read. A process is this uid's when ANY of the real, effective, saved and filesystem uids on
+the `Uid:` line of /proc/<pid>/status is this uid (a pane that went non-dumpable or runs a setuid
+program included), never by the owner of /proc/<pid> or its files (the effective uid alone, and
+root for a non-dumpable process's files; Codex round 10); one none of whose uids is this uid is
+another user's and is skipped; one whose status cannot be read or holds no single well-formed
+`Uid:` line leaves the scan incomplete (1, never 3): under hidepid=1 another user's status cannot
+be read, so no scan there is complete; under hidepid=2 a non-dumpable process of this uid is not
+listed at all (not covered). An environment of this uid's process that stays unreadable for any
+reason but the process being gone (EACCES from a non-dumpable process, EIO; re-read for a moment
+first, since a process caught exiting answers EACCES briefly) makes it incomplete too. A process
+that vanishes mid-scan is gone, not unknown. With `--since PID` (spawn_worker.sh passes itself),
+an unreadable process that started before PID is not counted: it cannot be a pane this launch
+created, so a runtime that hands a launch a pre-existing pane is not covered
 there. Without /proc, `ps -E` omits an environment it may not read without saying so, so no scan
 there is complete: finding nothing is 1, never 3. Every read elsewhere is tri-state too: a failed
 read is UNKNOWN, never "absent", and whoami exits 1 on one (spawn_worker.sh then caps at ro).
@@ -196,6 +203,34 @@ def _read_environ(pid: int) -> bytes:
     return (PROC / str(pid) / "environ").read_bytes()
 
 
+def _read_status(pid: int) -> str:
+    """/proc/<pid>/status. Raises OSError as the read does."""
+    return (PROC / str(pid) / "status").read_text(encoding="utf-8", errors="replace")
+
+
+_UID_LINE = re.compile(r"Uid:[ \t]+([0-9]+)[ \t]+([0-9]+)[ \t]+([0-9]+)[ \t]+([0-9]+)[ \t]*\Z")
+
+
+def _uids(pid: int) -> tuple[int, ...] | None:
+    """(real, effective, saved, filesystem) uid of a process: its CREDENTIALS, from the one `Uid:`
+    line of /proc/<pid>/status, which stays readable when the process is non-dumpable. Never the
+    owner of /proc/<pid> or of its files: that is the effective uid alone (a pane running a setuid
+    program shows root there while its real uid is this one), and root for every file of a
+    non-dumpable process (Codex round 10). None when the process is gone; Unknown when the file
+    cannot be read or does not hold exactly one `Uid:` line of four uids."""
+    try:
+        text = _read_status(pid)
+    except GONE:
+        return None
+    except OSError as exc:
+        raise Unknown(f"/proc/{pid}/status: {exc.strerror or exc}") from None
+    lines = [line for line in text.split("\n") if line.startswith("Uid:")]
+    match = _UID_LINE.match(lines[0]) if len(lines) == 1 else None
+    if match is None:
+        raise Unknown(f"/proc/{pid}/status does not name its credentials (one Uid: line of four uids)")
+    return tuple(int(u) for u in match.groups())
+
+
 def _handles_in(raw: bytes) -> set[str]:
     found = set()
     for item in raw.split(b"\0"):
@@ -210,10 +245,13 @@ VANISHED_ROUNDS = 5
 
 
 def _scan_proc(handle: str, since: int | None) -> tuple[list[int], bool]:
-    """(pids whose initial environment names `handle`, complete?) over /proc. Incomplete when /proc
-    or a process's owner cannot be read, or when a process of this uid has an environment that
-    stays unreadable (non-dumpable, EIO) and may be this launch's (it started at or after `since`,
-    or its start is unknown). An unreadable environment is read again for up to
+    """(pids whose initial environment names `handle`, complete?) over /proc. A process is this
+    uid's when ANY of its credentials (`_uids`: real, effective, saved, filesystem) is this uid, so
+    a pane that went non-dumpable or runs a setuid program is still read; one none of whose uids is
+    this one is another user's and is skipped. Incomplete when /proc cannot be listed, when a
+    process's credentials cannot be read or parsed, or when a process of this uid has an
+    environment that stays unreadable (non-dumpable, EIO) and may be this launch's (it started at
+    or after `since`, or its start is unknown). An unreadable environment is read again for up to
     UNREADABLE_SETTLE_SECS first: a process caught exiting answers EACCES for a moment and then is
     gone, and on a busy host (other sessions' commands) that moment is common. A process that has
     exited but is not yet reaped (a zombie, EXITED) answers EACCES for as long as its parent
@@ -245,15 +283,15 @@ def _scan_proc(handle: str, since: int | None) -> tuple[list[int], bool]:
                 continue
             examined.add(pid)
             try:
-                owner = os.stat(PROC / str(pid)).st_uid
-            except GONE:
+                uids = _uids(pid)
+            except Unknown:
+                complete = False  # whose it is cannot be told: it could be this uid's pane
+                continue
+            if uids is None:
                 vanished = True
                 continue
-            except OSError:
-                complete = False
-                continue
-            if owner != uid:
-                continue  # another user's process cannot read this uid's 0700 registry
+            if uid not in uids:
+                continue  # no credential of it is this uid: another user's process
             try:
                 raw = _read_environ(pid)
             except GONE:

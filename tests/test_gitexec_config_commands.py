@@ -22,6 +22,7 @@ import importlib.util
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -1247,6 +1248,201 @@ class WtreeTrustsNoSameUidConfigOrEnvironment(unittest.TestCase):
         self.assertNotRegex(code, bare, "a bare, PATH-resolved git call is left")
         self.assertIn('"$GIT" -C', code)
         self.assertIn("command -v git", code)
+
+
+def _bounded(argv, env, timeout=20):
+    """``argv`` in a session of its own: its CompletedProcess, or None once it outlives ``timeout``
+    (the whole process group is killed then, so a child blocked opening a FIFO never outlives the
+    test and a regression fails fast instead of hanging the suite)."""
+    proc = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, start_new_session=True)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.communicate()
+        return None
+    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+
+class WtreeFingerprintsTheRepositoryItIsGiven(unittest.TestCase):
+    """Codex, round 5 (P1): `TOP=$(git rev-parse --show-toplevel)` stripped the trailing newline of
+    the repository's path, so wtree.sh pointed at /tmp/repo<NL> fingerprinted /tmp/repo, ANOTHER
+    repository, and printed that one's tree. Every path git hands wtree.sh (the toplevel, the git
+    dir, the common dir, the index) is now read byte-exact, and so is every core.* value it carries."""
+
+    def _repo_at(self, path, body):
+        path.mkdir()
+        _quiet_git(path, "init", "-q")
+        (path / "a.txt").write_text(body, encoding="utf-8")
+        _quiet_git(path, "add", "-A")
+        _quiet_git(path, "commit", "-qm", "c")
+        return _quiet_git(path, "rev-parse", "HEAD^{tree}").stdout.strip()
+
+    def _dir(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        return Path(os.path.realpath(tmp))
+
+    def test_a_repository_path_ending_in_a_newline_never_fingerprints_the_other_one(self):
+        d = self._dir()
+        requested = self._repo_at(d / "repo\n", "the requested repository\n")
+        other = self._repo_at(d / "repo", "a different repository\n")
+        self.assertNotEqual(requested, other, "fixture: the two repositories hold the same tree")
+        r = _wtree(d / "repo\n")
+        self.assertNotEqual(r.stdout.strip(), other, "wtree.sh fingerprinted the repository at the stripped path")
+        # Its common dir holds the newline, which an alternates file cannot name: no fingerprint.
+        self.assertEqual((r.returncode, r.stdout), (1, ""), r.stderr)
+        self.assertIn("no fingerprint", r.stderr)
+
+    def test_a_linked_worktree_path_ending_in_a_newline_fingerprints_itself(self):
+        # Its common dir is the main repository's, which an alternates file names, so the exact path
+        # stages THIS work tree and prints its own tree, never the neighbour's.
+        d = self._dir()
+        head_tree = self._repo_at(d / "main", "the requested work tree\n")
+        other = self._repo_at(d / "wt", "a different repository\n")
+        add = _quiet_git(d / "main", "worktree", "add", "-q", "--detach", str(d / "wt\n"))
+        self.assertEqual(add.returncode, 0, add.stderr)
+        r = _wtree(d / "wt\n")
+        self.assertNotEqual(r.stdout.strip(), other, "wtree.sh fingerprinted the repository at the stripped path")
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, head_tree), r.stderr)
+
+    def test_a_core_value_reaches_the_custody_byte_exact(self):
+        # `core.eol = "lf\n"` is no eol setting to the repository's own git (it is not `lf`); the
+        # stripped `lf` carried a different setting into custody. A git first on PATH records the
+        # GIT_CONFIG pairs of every call wtree.sh makes.
+        d = self._dir()
+        self._repo_at(d / "repo", "one\n")
+        _quiet_git(d / "repo", "config", "core.eol", "lf\n")
+        bindir = d / "envbin"
+        bindir.mkdir()
+        log = d / "pairs.jsonl"
+        (bindir / "git").write_text(
+            f"#!{sys.executable} -I\nimport json, os, sys\n"
+            f"with open({str(log)!r}, 'a', encoding='utf-8') as fh:\n"
+            "    fh.write(json.dumps({k: v for k, v in os.environ.items() if k.startswith('GIT_CONFIG_')}) + '\\n')\n"
+            f"os.execv({_REAL_GIT!r}, [{_REAL_GIT!r}] + sys.argv[1:])\n", encoding="utf-8")
+        (bindir / "git").chmod(0o755)
+        r = _wtree(d / "repo", env={**_CLEAN_ENV, "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        carried = set()
+        for line in log.read_text(encoding="utf-8").splitlines():
+            env = json.loads(line)
+            carried |= {env.get(f"GIT_CONFIG_VALUE_{i}") for i in range(int(env.get("GIT_CONFIG_COUNT", 0)))
+                        if env.get(f"GIT_CONFIG_KEY_{i}") == "core.eol"}
+        self.assertEqual(carried, {"lf\n"}, "core.eol did not reach the custody as the repository declares it")
+
+
+# Every file wtree.sh copies into its custody (sharedindex: the split index's shared part).
+_CUSTODY_COPIES = ("info/exclude", "info/attributes", "shallow", "info/sparse-checkout", "sharedindex", "index")
+
+
+class WtreeCustodyCopiesReadOnlyTheDescriptorTheyCheck(unittest.TestCase):
+    """Codex, round 5 (P2): copy_regular checked a file's type BY PATH and then `cp -p` opened it by
+    path again, so a still-running worker that swapped in a FIFO between the two hung the
+    coordinator (cp's open blocks with no writer), and a symlink swapped in was followed. Each copy
+    is now opened once, without blocking or following a final symlink, checked with fstat on that
+    descriptor, size-capped and copied from it. The race is made deterministic: a shim first on PATH
+    for the program that OPENS the file (`cp` before, `python3` now) swaps the regular file the
+    fixture planted for a FIFO or a symlink as that program starts, i.e. after every check sh made
+    by path. Runs are bounded, so a regression fails fast instead of hanging."""
+
+    def _repo(self, target):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        p = _Probe(tmp)
+        p.commit("a.txt", "one\n")
+        git_dir = Path(os.path.realpath(p.repo)) / ".git"
+        if target == "sharedindex":
+            _quiet_git(p.repo, "update-index", "--split-index")
+            path = sorted(git_dir.glob("sharedindex.*"))[0]
+        elif target == "index":
+            path = git_dir / "index"
+        else:
+            body = {"info/exclude": "hidden.txt\n", "info/attributes": "*.txt text\n",
+                    "shallow": p._git("rev-parse", "HEAD").stdout, "info/sparse-checkout": "/*\n"}[target]
+            path = git_dir / target
+            path.parent.mkdir(exist_ok=True)
+            path.write_text(body, encoding="utf-8")
+        before = _wtree(p.repo)
+        self.assertEqual(before.returncode, 0, f"fixture: {target} as a regular file is no fingerprint: {before.stderr}")
+        return p, path
+
+    def _swapping_env(self, p, path, kind):
+        decoy = p.dir / "decoy"
+        shutil.copyfile(path, decoy)
+        swapped = p.dir / "swapped"
+        swap = f"rm -f {_sh(path)} && " + (f"mkfifo {_sh(path)}" if kind == "fifo" else f"ln -s {_sh(decoy)} {_sh(path)}")
+        bindir = p.dir / "swapbin"
+        bindir.mkdir()
+        # cp opened the one file it was handed; python3 opens every custody file, so it swaps at once.
+        for name, hit in (("cp", "0"), ("python3", "1")):
+            (bindir / name).write_text(
+                "#!/bin/sh\n"
+                f"hit={hit}\n"
+                f'for a in "$@"; do [ "$a" = {_sh(path)} ] && hit=1; done\n'
+                f'if [ "$hit" = 1 ] && [ ! -e {_sh(swapped)} ]; then : > {_sh(swapped)}; {swap}; fi\n'
+                f'exec {_sh(shutil.which(name))} "$@"\n', encoding="utf-8")
+            (bindir / name).chmod(0o755)
+        return {**_CLEAN_ENV, "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}"}, swapped
+
+    def test_a_fifo_or_symlink_swapped_in_as_the_copy_opens_is_no_fingerprint_and_never_hangs(self):
+        for target in _CUSTODY_COPIES:
+            for kind in ("fifo", "symlink"):
+                with self.subTest(target=target, kind=kind):
+                    p, path = self._repo(target)
+                    env, swapped = self._swapping_env(p, path, kind)
+                    r = _bounded(["sh", str(SCRIPTS / "wtree.sh"), str(p.repo)], env)
+                    if r is None:
+                        self.fail(f"wtree.sh hung on a {kind} swapped in at {target}")
+                    self.assertTrue(swapped.exists(), "the swap never ran")
+                    self.assertEqual((r.returncode, r.stdout), (1, ""), r.stderr)
+                    self.assertIn("not a regular file", r.stderr)
+
+    def test_a_file_over_its_cap_is_no_fingerprint_and_one_at_it_is_copied(self):
+        caps = {"index": (1 << 30, "1 GiB"), "sharedindex": (1 << 30, "1 GiB")}
+        for target in _CUSTODY_COPIES:
+            cap, label = caps.get(target, (16 << 20, "16 MiB"))
+            with self.subTest(target=target):
+                p, path = self._repo(target)
+                with open(path, "r+b") as fh:  # sparse: nothing is written past the content
+                    fh.truncate(cap + 1)
+                r = _bounded(["sh", str(SCRIPTS / "wtree.sh"), str(p.repo)], _CLEAN_ENV)
+                self.assertIsNotNone(r, f"wtree.sh hung on an oversized {target}")
+                self.assertEqual((r.returncode, r.stdout), (1, ""), r.stderr)
+                self.assertIn(f"not a regular file of at most {label}", r.stderr)
+        p, path = self._repo("info/exclude")
+        (p.repo / "hidden.txt").write_text("excluded\n", encoding="utf-8")
+        with open(path, "r+b") as fh:
+            fh.truncate(16 << 20)
+        r = _wtree(p.repo)
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, p._git("rev-parse", "HEAD^{tree}").stdout.strip()),
+                         r.stderr)
+
+    def test_every_copy_still_reads_as_the_repositorys_own_git_reads_it(self):
+        # Regular files at every path, a split index included: an untouched checkout fingerprints as
+        # HEAD (the index copy keeps its stat cache), an untracked file info/exclude hides stays out,
+        # and one it does not hide still counts.
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        p = _Probe(tmp)
+        p.commit("a.txt", "one\n")
+        _quiet_git(p.repo, "update-index", "--split-index")
+        info = p.repo / ".git" / "info"
+        info.mkdir(exist_ok=True)
+        (info / "exclude").write_text("hidden.txt\n", encoding="utf-8")
+        (info / "attributes").write_text("*.txt text\n", encoding="utf-8")
+        (info / "sparse-checkout").write_text("/*\n", encoding="utf-8")
+        (p.repo / ".git" / "shallow").write_text(p._git("rev-parse", "HEAD").stdout, encoding="utf-8")
+        (p.repo / "hidden.txt").write_text("excluded\n", encoding="utf-8")
+        self.assertTrue(list((p.repo / ".git").glob("sharedindex.*")), "fixture: no split index")
+        head_tree = p._git("rev-parse", "HEAD^{tree}").stdout.strip()
+        r = _wtree(p.repo)
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, head_tree), r.stderr)
+        (p.repo / "new.txt").write_text("new\n", encoding="utf-8")
+        r = _wtree(p.repo)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotEqual(r.stdout.strip(), head_tree)
 
 
 # PR #649 review (PRRT_kwDOTWxN9c6vxaeq): an `includeIf` makes the effective config depend on WHERE

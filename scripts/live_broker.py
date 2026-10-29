@@ -26,13 +26,21 @@ evicted -- for its request line and headers, its body's first byte, its share of
 its body -- so an evicted connection gives its slot up at once. A body is at most MAX_BODY (the API's own 32 MB) and held
 once (one buffer of its Content-Length), and what the bodies of every connection take together --
 their bytes and the most parsing them can allocate -- is at most BODY_BUDGET. Before a body is read,
-the most one of its length can take parsed (WORST_PER_BYTE times it) is taken from that budget;
-then parse_cost, a pre-scan of its bytes, bounds its parse (the str json.loads decodes it to and the
-strings parsed out of it at their characters' width, and every JSON value) and the rest goes back.
+the most one of its length can take parsed as text (WORST_PER_BYTE times it) is taken from that
+budget, by a request that holds none while it waits; then parse_cost, a pre-scan of its bytes,
+bounds its parse (the str json.loads decodes it to and the strings parsed out of it at their
+characters' width, and every JSON value): what that bound does not need goes back, and a body whose
+values need more takes the rest. At most one request waits for budget while holding any: of the
+bodies read in full, one may wait for that rest, every other take leaving what it needs free, and
+any other whose rest does not fit at once is refused (503) and gives back all but its bytes'
+charge, so no request ever waits for a share another waiting request holds (_BodyBudget; Codex
+round 13 on 594f7265). Once its parse is over a body keeps only its bytes' charge while it is
+relayed. The charge for a body's bytes goes back only once its buffer is freed, on every way out
+of the request, an exception included (Codex round 1 on PR #732).
 Budget goes only to a body that is arriving (its first byte is here); a body arriving slower than
 MIN_BODY_RATE, past BODY_GRACE_S, is stalled, and a request waiting for budget takes back, for
-itself, what a stalled body holds past its buffer, evicting it. Each take waits up to BODY_WAIT_S
-for room and is otherwise refused (503, a "body-budget" refusal);
+itself, what a stalled body holds past its buffer, evicting it. A take that may wait waits up to
+BODY_WAIT_S for room and is otherwise refused (503, a "body-budget" refusal);
 a body whose bound could pass the whole budget, that nests past MAX_DEPTH, or whose pre-scan passes
 MAX_SCAN_STEPS is refused unparsed (413, a "body-parse" refusal). The parse itself runs in a forked
 child whose RLIMIT_DATA is that bound, so a parse that would pass it fails in the child and the body
@@ -143,10 +151,12 @@ MAX_BODY = 32_000_000
 # 512m), and four concurrent 64 MiB bodies held twice each took it to 506 MB (re-attack of
 # 2d254d0f); holding each once did not bound the parse either -- 20 million empty objects in 60 MiB
 # parse to over 1 GiB (Codex round 7), and 63 MiB of ASCII with one emoji is decoded and parsed to
-# two UCS-4 copies, 504 MiB with the body (Codex round 9). So a request takes its Content-Length
-# from this budget before its first body byte is read and, before anything parses it, parse_cost's
-# bound on the parse; each waits up to BODY_WAIT_S for room, else is refused (503) and counted, and a
-# body whose bound alone is past the budget is refused (413) unparsed and counted. The parse itself
+# two UCS-4 copies, 504 MiB with the body (Codex round 9). So a request takes the most a body of its
+# Content-Length can need parsed as text (WORST_PER_BYTE) from this budget before its first body byte
+# is read and, before anything parses it, the rest of parse_cost's bound on the parse; a first take
+# waits up to BODY_WAIT_S for room, as does the one body read in full that may wait for the rest
+# (_BodyBudget: any other is refused at once), else is refused (503) and counted, and a body whose
+# bound alone is past the budget is refused (413) unparsed and counted. The parse itself
 # runs in a forked child whose RLIMIT_DATA is that bound (_parse_in_child), so the bound is not an
 # estimate the container trusts: a parse that would pass it fails there, and the body is refused.
 # The worst body MAX_BODY can hold (13 times its bytes, see parse_cost) fits, and the budget leaves
@@ -765,9 +775,10 @@ class Broker(BaseHTTPRequestHandler):
             return self.fail(411, "invalid_request_error", "a request needs a Content-Length")
         if not 0 <= length <= MAX_BODY:
             return self.fail(413, "invalid_request_error", f"a body over {MAX_BODY} bytes")
-        # Before a byte is read, the most a body of this length can need parsed (WORST_PER_BYTE) is
-        # taken, so two bodies holding their bytes can never wait on each other for their parses;
-        # what the pre-scan finds it does not need goes back at once (answer_post).
+        # Before a byte is read, the most a body of this length can need parsed as text
+        # (WORST_PER_BYTE) is taken, by a request holding none while it waits; what the pre-scan
+        # finds it does not need goes back at once, and a body whose JSON values need more takes
+        # it then, at most one body waiting for that at a time (answer_post, _BodyBudget).
         bodies, worst = self.server.bodies, WORST_PER_BYTE * length
         if worst > bodies.limit:
             self.ledger.refuse("body-parse", f"a {length}-byte body, which could parse past the "
@@ -775,6 +786,7 @@ class Broker(BaseHTTPRequestHandler):
             return self.fail(413, "invalid_request_error", "the body is too large for the broker to parse within "
                                                            "its memory")
         self.ticket = ticket = _Ticket(self.connection, length)
+        self.body = None  # the body's one buffer, once read_body allocates it
         self.server.track(self.connection, ticket)
         try:
             # Budget goes only to a body that is arriving: its first byte must be here (a stalled
@@ -793,7 +805,20 @@ class Broker(BaseHTTPRequestHandler):
             ticket.since, ticket.arriving = time.monotonic(), True
             self.answer_post(path, length)
         finally:
+            # The charge for a body's bytes goes back only once its buffer is gone, on every way
+            # out: an exception's frames still reference it here, so it is emptied in place first
+            # (Codex round 1 on PR #732). What is past its bytes may go back earlier, never they.
+            self.drop_body()
             bodies.give(ticket)
+
+    def drop_body(self):
+        """Free this request's body buffer in place, whatever still references it. Its one export,
+        read_body's view, is released before read_body returns, so this never fails; if it did, the
+        BufferError would escape (a fault) before any of the share went back, which then stays held:
+        never a charge returned while its bytes live."""
+        body, self.body = self.body, None
+        if body is not None:
+            body.clear()
 
     def body_arriving(self):
         """Whether the body's first byte arrives before the body's deadline (or an eviction)."""
@@ -829,9 +854,15 @@ class Broker(BaseHTTPRequestHandler):
                                              f"{bodies.limit}-byte budget, or that nests past {MAX_DEPTH}")
             return self.fail(413, "invalid_request_error", "the body's JSON is too large or too deeply nested "
                                                            "for the broker to parse within its memory")
+        # A larger charge than the one taken before the body was read is waited for by at most one
+        # body read in full at a time; any other is refused at once and gives back all but its
+        # bytes' charge, so bodies read in full never wait on one another's shares (_BodyBudget,
+        # Codex round 13); its bytes' charge goes back with its buffer (do_POST).
         if cost <= ticket.held:
             bodies.give(ticket, ticket.held - cost)
-        elif not bodies.take(ticket, cost - ticket.held, time.monotonic() + BODY_WAIT_S, self.server.reclaimed):
+        elif not bodies.take(ticket, cost - ticket.held, time.monotonic() + BODY_WAIT_S, self.server.reclaimed,
+                             grow=True):
+            bodies.give(ticket, ticket.held - len(body))  # its parse's share; its bytes' stays until they go
             self.ledger.refuse("body-budget", f"a parse of up to {cost} bytes past the {bodies.limit} held at once")
             return self.fail(503, "overloaded_error", "the broker holds as many request bodies as it can; retry")
         self.price_and_relay(body, cost - len(body))
@@ -841,6 +872,8 @@ class Broker(BaseHTTPRequestHandler):
         bound; check its terms, reserve its worst case, and relay it. The broker never holds the
         parsed body."""
         facts = _parse_in_child(body, allowance)
+        # The parse child has exited: what its bound held goes back, and the body keeps its buffer.
+        self.server.bodies.give(self.ticket, self.ticket.held - len(body))
         if facts.get("error"):
             # A fault in the child (in terms(), say): recorded as a handler fault, and, as one
             # raised here would, the connection is closed unanswered.
@@ -867,7 +900,8 @@ class Broker(BaseHTTPRequestHandler):
         """The request's `length` body bytes, or None when they do not all arrive by the deadline:
         the socket timeout bounds each read, this bounds the trickle (W5-16). Read into ONE buffer
         of exactly `length` bytes, never chunks joined after (which held each body twice)."""
-        body, got, deadline = bytearray(length), 0, time.monotonic() + BODY_DEADLINE_S
+        body = self.body = bytearray(length)  # do_POST frees it before its charge goes back
+        got, deadline = 0, time.monotonic() + BODY_DEADLINE_S
         view = memoryview(body)
         try:
             while got < length:
@@ -1007,52 +1041,87 @@ class _BodyBudget:
     takes from it with `take`, which waits for room until a deadline; while it waits it takes back
     what any stalled body holds past its buffer (`_reclaim`), so stalled requests cannot keep the
     budget from one whose body is arriving, and what it takes back is its own at once, never handed
-    to another waiter. An evicted request's wait ends at once (`cancel`). `give` returns a share."""
+    to another waiter. An evicted request's wait ends at once (`cancel`). `give` returns a share.
+
+    The invariant that keeps it deadlock-free: AT MOST ONE REQUEST WAITS FOR BUDGET WHILE HOLDING
+    ANY. A body's first take is made before it holds any (do_POST); only a body read in full whose
+    parse needs more than it took before it was read takes again holding a share (`grow`), and of
+    those only one -- the grower -- may wait: any other whose charge does not fit at once is refused
+    and gives back at once all it holds past its bytes, whose charge it keeps only until its buffer
+    is freed, as it ends (do_POST). While the grower waits every other take leaves what it still
+    needs free, so nothing granted after it can keep it out. Every share it waits for is held by a
+    request that never waits for budget -- a body arriving (ended by BODY_DEADLINE_S, or taken back
+    once stalled), pre-scanned (MAX_SCAN_STEPS), parsed (PARSERS at a time, each in PARSE_SECONDS)
+    or relayed, or one refused and ending, its 503 written -- and every other waiter holds nothing
+    anyone waits for, so no set of requests can wait on one another: the grower is served once those
+    end, or its own deadline answers it (Codex round 13 on 594f7265: 32 completed ~1 MB bodies, each
+    holding its first share and waiting for a larger one, waited on one another until every one was
+    refused). No share is ever given back below a body's bytes while its buffer holds them."""
 
     def __init__(self, limit):
         self.limit, self.held, self.cond = limit, 0, threading.Condition()
         self.tickets = set()  # every ticket holding a share
+        self.grower, self.growth = None, 0  # the one request waiting while it holds a share, and what it needs
 
-    def take(self, ticket, n, deadline, reclaimed):
+    def take(self, ticket, n, deadline, reclaimed, grow=False):
         """Add `n` to `ticket`'s share; False when it was evicted (cancelled) or the deadline passed
-        first. `reclaimed(ticket)` is called, outside the lock and AT ONCE, for each stalled request
+        first, or -- `grow`, a body read in full that holds a share and needs `n` more for its
+        parse -- at once when another such body already waits (the grower: see the class's
+        invariant). A take other than the grower's fits only beside what the grower still needs.
+        `reclaimed(ticket)` is called, outside the lock and AT ONCE, for each stalled request
         whose share was taken back, to evict it: its thread then ends and gives its buffer back, and
         this wait goes on for that (re-attack of c952fa4f: the evictions ran only once the wait was
         over, so a stalled 32 MB body kept its buffer charge and a 32 MB call behind it got 503). A
         wait whose deadline passes while an evicted request's buffer is still on its way back waits
         up to RELEASE_WAIT_S more for it."""
         grace = deadline + RELEASE_WAIT_S
-        while True:
-            victims = []
-            try:
-                with self.cond:
-                    if ticket.cancelled:
-                        return False
-                    if self.held + n > self.limit:
-                        victims = self._reclaim(n)
-                    if self.held + n <= self.limit:
-                        self.held += n
-                        ticket.held += n
-                        self.tickets.add(ticket)
-                        return True
-                    if not victims:
-                        now = time.monotonic()
-                        releasing = sum(t.held for t in self.tickets if t.cancelled)
-                        end = grace if self.held - releasing + n <= self.limit else deadline
-                        if now >= end:
+        try:
+            while True:
+                victims = []
+                try:
+                    with self.cond:
+                        if ticket.cancelled:
                             return False
-                        self.cond.wait(min(end - now, RECLAIM_POLL_S))
-            finally:
-                # Every request whose share was taken back is evicted, on every way out of this
-                # step, success included, once the lock is free (Codex round 12 on 419a8435: a take
-                # that the share made fit returned before evicting, and the stalled body kept its
-                # socket and its buffer until its own timeout).
-                for victim in victims:
-                    reclaimed(victim)
+                        if n <= 0:  # nothing to take: never a wait
+                            return True
+                        room = self.limit - (self.growth if self.grower not in (None, ticket) else 0)
+                        if self.held + n > room:
+                            victims = self._reclaim(n, room)
+                        if self.held + n <= room:
+                            self.held += n
+                            ticket.held += n
+                            self.tickets.add(ticket)
+                            if self.grower is ticket:  # served: what it needed is now held, not kept free
+                                self.grower, self.growth = None, 0
+                            return True
+                        if grow and self.grower is None:
+                            self.grower, self.growth = ticket, n
+                        elif grow and self.grower is not ticket:
+                            return False  # another body read in full already waits holding a share
+                        if not victims:
+                            now = time.monotonic()
+                            releasing = sum(t.held for t in self.tickets if t.cancelled)
+                            end = grace if self.held - releasing + n <= room else deadline
+                            if now >= end:
+                                return False
+                            self.cond.wait(min(end - now, RECLAIM_POLL_S))
+                finally:
+                    # Every request whose share was taken back is evicted, on every way out of this
+                    # step, success included, once the lock is free (Codex round 12 on 419a8435: a
+                    # take that the share made fit returned before evicting, and the stalled body
+                    # kept its socket and its buffer until its own timeout).
+                    for victim in victims:
+                        reclaimed(victim)
+        finally:
+            with self.cond:
+                if self.grower is ticket:  # its deadline passed, or it was evicted: its claim on the room ends
+                    self.grower, self.growth = None, 0
+                    self.cond.notify_all()
 
-    def _reclaim(self, n):
+    def _reclaim(self, n, room):
         """Take back, stalest first, what stalled bodies hold past their buffers (which their threads
-        give back as they end), until `n` fits. Lock held. Returns the requests taken from."""
+        give back as they end), until `n` fits under `room`. Lock held. Returns the requests taken
+        from."""
         now, victims = time.monotonic(), []
         for victim in sorted((t for t in self.tickets if t.stalled(now)),
                              key=lambda t: t.got - MIN_BODY_RATE * (now - t.since)):
@@ -1061,7 +1130,7 @@ class _BodyBudget:
             victim.held -= freed
             victim.cancelled, victim.arriving = True, False
             victims.append(victim)
-            if self.held + n <= self.limit:
+            if self.held + n <= room:
                 break
         return victims
 

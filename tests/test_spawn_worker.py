@@ -347,6 +347,20 @@ class TestSpawnWorkerHardening(unittest.TestCase):
                 self.assertFalse(key.startswith("-"), key)
                 self.assertLessEqual(len(key), 80, key)
 
+    def test_the_cli_resolver_ignores_the_callers_python_environment(self):
+        # W4-13 (2026-10-27 audit): the first python3 the script runs (orca_cli.py, which decides
+        # the executable every later call execs) was its one call without -I, so a caller-side
+        # PYTHONPATH sitecustomize ran inside it.
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "sitecustomize-ran"
+            (Path(tmp) / "sitecustomize.py").write_text(
+                f"open({str(marker)!r}, 'w').write('x')\n", encoding="utf-8")
+            p = subprocess.run(["bash", str(SPAWN), "task_test", "active", "t", "claude", "high"],
+                               env={"SW_SELFTEST": "1", "PATH": "/usr/bin:/bin", "PYTHONPATH": tmp},
+                               capture_output=True, text=True)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertFalse(marker.exists(), "a PYTHONPATH sitecustomize ran inside spawn_worker.sh")
+
     def test_invalid_effort_is_refused(self):
         # #43: effort is interpolated into the codex launch command; an unknown value must
         # be rejected (fail closed), never interpolated verbatim. Same strict contract as
@@ -2754,6 +2768,150 @@ class TestUnknownIsNeverAbsent(unittest.TestCase):
                 self.assertIn("parent profile 'ro'", r.stderr)
                 if name == ".pending":
                     target.unlink()
+
+
+class TestIdentityIsTheProcessCredentials(unittest.TestCase):
+    """W4-04, Codex round 10 (P1): the registration scan decided which processes were this uid's
+    by the owner of /proc/<pid>, and skipped every other one before it tried to read the
+    environment. That owner is the process's EFFECTIVE uid alone (and every file inside goes to
+    root when the process is non-dumpable), so a same-uid pane running a setuid program read as
+    another user's: skipped, the scan "complete", registration answered "no process" (3) and the
+    reservation went. Identity now comes from the credentials on the `Uid:` line of
+    /proc/<pid>/status: a process is this uid's when any of its real, effective, saved or
+    filesystem uids is; one whose credentials cannot be read or parsed leaves the scan incomplete
+    (1). Each test ISOLATES the listing (a /proc of the process under test only), so no unrelated
+    unreadable process on the host can supply the expected incomplete answer. Like the suite's
+    other non-dumpable tests these assume a non-root Linux run (CI's), and check that premise."""
+
+    identity = TestUnknownIsNeverAbsent.identity
+    proc_listing = TestUnknownIsNeverAbsent.proc_listing
+    hidden_pane = TestUnknownIsNeverAbsent.hidden_pane
+    roots = TestIdentitySurvivesAScrubbedEnvironment.roots
+    PID = 4242
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def record(self, mod, handle, *extra):
+        with quiet():
+            return mod.main(["record-root", "--registry", str(Path(self.tmp) / ".open-fleet" / "spawn-profiles"),
+                             "--handle", handle, "--profile", "ro", "--wait", "0", *extra])
+
+    def cred_proc(self, status, environ):
+        """A /proc of one running process (pid PID, parent 1) whose `self` names this process.
+        `status` and `environ` are its file contents; None makes that file unreadable (mode 0)."""
+        root = Path(tempfile.mkdtemp(dir=self.tmp))
+        (root / "self").symlink_to(str(os.getpid()))
+        d = root / str(self.PID)
+        d.mkdir()
+        (d / "stat").write_text(" ".join([str(self.PID), "(x)", "S", "1"] + ["0"] * 17 + ["100"]) + "\n")
+        for name, content in (("status", status), ("environ", environ)):
+            f = d / name
+            f.write_bytes(content.encode() if isinstance(content, str) else content or b"")
+            if content is None:
+                f.chmod(0)
+                self.addCleanup(f.chmod, 0o600)
+                with self.assertRaises(PermissionError):  # the premise: a non-root run
+                    f.read_bytes()
+        return root
+
+    @staticmethod
+    def uid_line(uids):
+        return "Name:\tx\nUmask:\t0022\nState:\tS (sleeping)\nUid:\t%s\nGid:\t1\t1\t1\t1\n" % "\t".join(map(str, uids))
+
+    @contextlib.contextmanager
+    def owned_by_root(self, entry):
+        """/proc/<pid> `entry` and every file in it stat as root's, as they do for a process whose
+        effective uid is root (a setuid program) or, for its files, one that is non-dumpable."""
+        real = os.stat
+        entry = str(entry)
+
+        def stat(path, *args, **kwargs):
+            st = real(path, *args, **kwargs)
+            if isinstance(path, (str, os.PathLike)) and (os.fspath(path) == entry
+                                                         or os.fspath(path).startswith(entry + "/")):
+                return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink, 0, 0, st.st_size,
+                                       int(st.st_atime), int(st.st_mtime), int(st.st_ctime)))
+            return st
+        with mock.patch.object(os, "stat", stat):
+            yield
+
+    def test_a_non_dumpable_pane_of_this_uid_is_unknown_with_the_scan_isolated_to_it(self):
+        # The Codex input with a REAL pane: same uid, carries the handle, then prctl(PR_SET_DUMPABLE, 0).
+        mod = self.identity()
+        before = os.getpid()  # this test started before the pane did
+        pid = self.hidden_pane("term_live").pid
+        me = os.getuid()
+        # The premise: its files are root's now, its credentials are still this uid's.
+        self.assertEqual(os.stat(f"/proc/{pid}/environ").st_uid, 0)
+        self.assertIn(f"Uid:\t{me}\t{me}\t{me}\t{me}\n", Path(f"/proc/{pid}/status").read_text())
+        with mock.patch.object(mod, "PROC", self.proc_listing(pid)):
+            self.assertEqual(mod.processes_with_handle("term_live"), ([], False))
+            self.assertEqual(self.record(mod, "term_live", "--since", str(before)), 1)
+            # /proc/<pid> itself reading as root's too (its effective uid, were it running a
+            # setuid program) does not make it another user's: still read, still unknown (1).
+            with self.owned_by_root(f"/proc/{pid}"):
+                self.assertEqual(self.record(mod, "term_live", "--since", str(before)), 1)
+        self.assertEqual(self.roots(), [])
+
+    def test_credentials_of_this_uid_count_whoever_owns_the_proc_entry(self):
+        # A stubbed /proc: the Uid line names this uid, /proc/<pid> and its files stat as root's.
+        mod = self.identity()
+        me = os.getuid()
+        for uids in ((me, me, me, me), (me, 0, 0, 0), (0, 0, me, 0), (0, 0, 0, me)):
+            with self.subTest(uids=uids):
+                # Its environment unreadable: whether it is this launch's pane is unknown (1), never 3.
+                proc = self.cred_proc(self.uid_line(uids), None)
+                with mock.patch.object(mod, "PROC", proc), self.owned_by_root(proc / str(self.PID)):
+                    self.assertEqual(mod.processes_with_handle("term_live"), ([], False))
+                    self.assertEqual(self.record(mod, "term_live"), 1)
+                # Its environment readable and naming the handle: it is the pane, recorded (0).
+                proc = self.cred_proc(self.uid_line(uids), b"PATH=/bin\0ORCA_TERMINAL_HANDLE=term_live\0")
+                with mock.patch.object(mod, "PROC", proc), self.owned_by_root(proc / str(self.PID)):
+                    self.assertEqual(self.record(mod, "term_live"), 0)
+                self.assertEqual(self.roots(), [["ro", "term_live"]])
+                shutil.rmtree(Path(self.tmp) / ".open-fleet")
+
+    def test_credentials_that_cannot_be_read_leave_the_scan_incomplete(self):
+        mod = self.identity()
+        me = os.getuid()
+        good = self.uid_line((me, me, me, me))
+        # The baseline: the same /proc with well-formed credentials is complete, nothing found (3).
+        with mock.patch.object(mod, "PROC", self.cred_proc(good, b"PATH=/bin\0")):
+            self.assertEqual(self.record(mod, "term_live"), 3)
+        for name, status in (("no Uid line", "Name:\tx\nGid:\t1\t1\t1\t1\n"),
+                             ("three uids", f"Name:\tx\nUid:\t{me}\t{me}\t{me}\n"),
+                             ("not a number", f"Name:\tx\nUid:\t{me}\tx\t{me}\t{me}\n"),
+                             ("a fifth field", f"Name:\tx\nUid:\t{me}\t{me}\t{me}\t{me}\t{me}\n"),
+                             ("two Uid lines", good + "Uid:\t0\t0\t0\t0\n"),
+                             ("empty", ""),
+                             ("unreadable", None)):
+            with self.subTest(status=name):
+                with mock.patch.object(mod, "PROC", self.cred_proc(status, b"PATH=/bin\0")):
+                    self.assertEqual(mod.processes_with_handle("term_live"), ([], False))
+                    self.assertEqual(self.record(mod, "term_live"), 1)
+        self.assertEqual(self.roots(), [])
+
+    def test_a_process_none_of_whose_credentials_is_this_uid_is_skipped(self):
+        # Another user's process (here /proc/<pid> stats as THIS uid's, so only its credentials
+        # say whose it is): skipped, whether its environment reads or not, and the scan complete.
+        mod = self.identity()
+        me = os.getuid()
+        for uids in ((me + 1,) * 4, (0, 0, 0, 0)):
+            for environ in (None, b"ORCA_TERMINAL_HANDLE=term_live\0"):
+                with self.subTest(uids=uids, environ=environ):
+                    with mock.patch.object(mod, "PROC", self.cred_proc(self.uid_line(uids), environ)):
+                        self.assertEqual(mod.processes_with_handle("term_live"), ([], True))
+                        self.assertEqual(self.record(mod, "term_live"), 3)
+        self.assertEqual(self.roots(), [])
+        # A real one: pid 1 (init: root's, unless this run is a container's init), the listing
+        # isolated to it.
+        init = next(line.split()[1:] for line in Path("/proc/1/status").read_text().splitlines()
+                    if line.startswith("Uid:"))
+        if str(me) not in init:
+            with mock.patch.object(mod, "PROC", self.proc_listing(1)):
+                self.assertEqual(mod.processes_with_handle("term_live"), ([], True))
 
 
 class TestTheFinalReadingDecides(unittest.TestCase):

@@ -2092,6 +2092,184 @@ class TheBrokerHoldsTheTokenAndTheCap(unittest.TestCase):
         self.assertEqual(self.post(doc=big)[0], 200)
 
 
+    def test_completed_bodies_needing_more_for_their_parses_never_wait_on_one_another(self):
+        # Codex round 13 on 594f7265: 32 bodies of ~1 MB, each full of short JSON values, sent but
+        # for their last byte, then completed together. Their first shares (13 times their bytes,
+        # ~416 MB) left too little for any one's value-based parse charge, and once read in full
+        # none was evictable: each waited for budget the others held until its 30 s deadline, then
+        # 503. The same at small scale -- four such bodies, a budget all four first shares fit but no
+        # larger charge does while they hold, nothing stalled -- must answer every request at once:
+        # at most one body read in full waits for more while holding its share, any other is
+        # refused (503) at once and gives its share back, and the one waiting is then served.
+        n = 4
+        head = (b'{"model":"claude-haiku-5-5","max_tokens":10,"messages":[{"role":"user","content":"hi"}],'
+                b'"stop_sequences":[')
+        body = head + b"1," * 2000 + b"1]}"
+        first, cost = lb.WORST_PER_BYTE * len(body), lb.parse_cost(body, 1 << 40)
+        self.assertGreater(cost, first, "the body's parse needs no more than its first share")
+        budget = n * first + (cost - first) // 2  # the first shares fit; no larger charge does beside them
+        self.assertGreaterEqual(budget, cost, "one body alone could not be parsed")
+        wait_s = 6.0
+        for patch in (mock.patch.object(lb, "BODY_BUDGET", budget), mock.patch.object(lb, "BODY_WAIT_S", wait_s),
+                      mock.patch.object(lb, "BODY_GRACE_S", 60.0)):  # nothing here stalls: none is evictable
+            patch.start()
+            self.addCleanup(patch.stop)
+        server = self.served_broker()
+        conns = []
+        for _ in range(n):
+            conn = socket.create_connection(("127.0.0.1", self.port), timeout=wait_s * 3)
+            self.addCleanup(conn.close)
+            conn.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                         b"Content-Length: %d\r\n\r\n" % len(body) + body[:-1])
+            conns.append(conn)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and server.bodies.held != n * first:
+            time.sleep(0.01)
+        self.assertEqual(server.bodies.held, n * first, "the bodies did not all hold their first shares")
+        started = time.monotonic()
+        for conn in conns:
+            conn.sendall(body[-1:])
+
+        def status(conn):
+            data = b""
+            with contextlib.suppress(OSError):
+                while chunk := conn.recv(65536):
+                    data += chunk
+            return int(data.split(b" ", 2)[1]) if data.startswith(b"HTTP/") else None
+        statuses = [status(conn) for conn in conns]
+        took = time.monotonic() - started
+        self.assertLess(took, wait_s / 2, f"completed bodies waited {took:.1f} s on one another for their parses "
+                                          f"(answers {statuses})")
+        self.assertIn(200, statuses, "no completed body was served")
+        self.assertEqual(sorted(set(statuses) | {200, 503}), [200, 503], statuses)
+        self.assertEqual(len(self.api.requests), statuses.count(200))
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and server.bodies.held:
+            time.sleep(0.01)
+        self.assertEqual(server.bodies.held, 0, "a share was never given back")
+        time.sleep(lb.DROP_RECORD_S + 0.5)  # the ledger's tally line catches up the counts
+        self.assertEqual({e["kind"] for e in self.events() if e["event"] == "refuse"} | {"body-budget"}, {"body-budget"})
+        counts = [e["refused"] for e in self.events() if isinstance(e.get("refused"), dict)]
+        self.assertEqual((counts[-1:] or [{}])[-1].get("body-budget", 0), statuses.count(503), counts[-1:])
+
+    def test_a_bodys_bytes_stay_charged_until_its_buffer_is_freed(self):
+        # Codex round 1 on PR #732 at 9f895d11: a completed body refused because another already
+        # waited for more gave back its whole share, its bytes' charge included, and only then wrote
+        # its 503 and returned, its buffer alive all the while; another request could spend that
+        # charge first, so live buffers sat outside BODY_BUDGET. Every give is watched here: none may
+        # leave a request holding less than its body's bytes while something besides this watch
+        # still references a buffer holding them, and a 503 after a body was read is written only
+        # with its bytes still charged. Losing growers (the scenario above), and a request whose
+        # relay raises after its parse, its frames still holding the buffer as do_POST cleans up.
+        n = 4
+        head = (b'{"model":"claude-haiku-5-5","max_tokens":10,"messages":[{"role":"user","content":"hi"}],'
+                b'"stop_sequences":[')
+        body = head + b"1," * 2000 + b"1]}"
+        first, cost = lb.WORST_PER_BYTE * len(body), lb.parse_cost(body, 1 << 40)
+        wait_s = 6.0
+        buffers, gaps, at_503 = {}, [], []
+        real_read, real_give, real_fail = lb.Broker.read_body, lb._BodyBudget.give, lb.Broker.fail
+
+        def read_body(handler, length):
+            got = real_read(handler, length)
+            if got is not None:
+                buffers[handler.ticket] = got
+            return got
+
+        def give(budget, ticket, count=None):
+            buf = buffers.get(ticket)
+            left = ticket.held - (ticket.held if count is None else min(count, ticket.held))
+            # References: this dict, `buf`, and getrefcount's own argument; any more is the request's.
+            if buf is not None and len(buf) and sys.getrefcount(buf) > 3 and left < len(buf):
+                gaps.append((len(buf), left))
+            return real_give(budget, ticket, count)
+
+        def fail(handler, status, kind, why):
+            buf = buffers.get(getattr(handler, "ticket", None))
+            if status == 503 and buf is not None and len(buf):
+                at_503.append((handler.ticket.held, len(buf)))
+            return real_fail(handler, status, kind, why)
+        for patch in (mock.patch.object(lb, "BODY_BUDGET", n * first + (cost - first) // 2),
+                      mock.patch.object(lb, "BODY_WAIT_S", wait_s), mock.patch.object(lb, "BODY_GRACE_S", 60.0),
+                      mock.patch.object(lb.Broker, "read_body", read_body), mock.patch.object(lb.Broker, "fail", fail),
+                      mock.patch.object(lb._BodyBudget, "give", give)):
+            patch.start()
+            self.addCleanup(patch.stop)
+        server = self.served_broker()
+
+        def send(raw, hold_last):
+            conn = socket.create_connection(("127.0.0.1", self.port), timeout=wait_s * 3)
+            self.addCleanup(conn.close)
+            conn.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                         b"Content-Length: %d\r\n\r\n" % len(raw) + (raw[:-1] if hold_last else raw))
+            return conn
+
+        def answer(conn):
+            data = b""
+            with contextlib.suppress(OSError):
+                while chunk := conn.recv(65536):
+                    data += chunk
+            return int(data.split(b" ", 2)[1]) if data.startswith(b"HTTP/") else None
+        conns = [send(body, True) for _ in range(n)]
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and server.bodies.held != n * first:
+            time.sleep(0.01)
+        self.assertEqual(server.bodies.held, n * first, "the bodies did not all hold their first shares")
+        for conn in conns:
+            conn.sendall(body[-1:])
+        statuses = sorted(answer(conn) for conn in conns)
+        self.assertEqual(statuses, [200, 503, 503, 503])
+        self.assertEqual(len(at_503), 3, at_503)
+        self.assertEqual([held >= size for held, size in at_503], [True] * 3,
+                         f"a refused body's 503 was written with its bytes' charge given back (held, bytes): {at_503}")
+        self.assertEqual(gaps, [], "a request gave back its bytes' charge while its buffer held them (bytes, left)")
+
+        def raises(handler, *args):
+            raise RuntimeError("the relay failed after the parse")
+        with mock.patch.object(lb.Broker, "relay", raises):
+            self.assertIsNone(answer(send(json.dumps(self.body()).encode(), False)), "a failed relay was answered")
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and server.bodies.held:
+            time.sleep(0.01)
+        self.assertEqual(gaps, [], "a request gave back its bytes' charge while its frames held its buffer")
+        self.assertEqual(server.bodies.held, 0, "a share was never given back")
+        self.assertIn("handler", {e.get("where") for e in self.events() if e["event"] == "fault"})
+
+    def test_at_most_one_request_waits_for_budget_while_holding_a_share(self):
+        # The invariant behind the test above, on the budget itself. Of two holders that each need
+        # more than fits, one waits (the grower) and the other is refused at once; while the grower
+        # waits, a first take that would fit the free budget but not beside what the grower still
+        # needs waits too, holding nothing; once the refused holder gives its share back the grower
+        # is served, and the newcomer once the grower's share comes back.
+        budget, none = lb._BodyBudget(100), (lambda _ticket: None)
+        a, b, c = (lb._Ticket(None, 1) for _ in range(3))
+        self.assertTrue(budget.take(a, 40, time.monotonic() + 1, none))
+        self.assertTrue(budget.take(b, 40, time.monotonic() + 1, none))
+        got = {}
+
+        def take(name, ticket, n, grow):
+            got[name] = budget.take(ticket, n, time.monotonic() + 10, none, grow=grow)
+        threads = {"a": threading.Thread(target=take, args=("a", a, 50, True), daemon=True),
+                   "c": threading.Thread(target=take, args=("c", c, 15, False), daemon=True)}
+        threads["a"].start()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and budget.grower is not a:
+            time.sleep(0.01)
+        self.assertIs(budget.grower, a, "the first holder needing more did not wait for it")
+        started = time.monotonic()
+        self.assertFalse(budget.take(b, 50, time.monotonic() + 10, none, grow=True))
+        self.assertLess(time.monotonic() - started, 1, "a second holder waited for more beside the first")
+        threads["c"].start()
+        time.sleep(0.3)
+        self.assertEqual(got, {}, "a take was granted past what the waiting holder needs")
+        budget.give(b)  # refused: its share goes back
+        threads["a"].join(5)
+        self.assertEqual((got.get("a"), a.held, budget.grower), (True, 90, None))
+        self.assertNotIn("c", got, "the newcomer was granted past the budget")
+        budget.give(a)
+        threads["c"].join(5)
+        self.assertEqual((got.get("c"), budget.held), (True, 15))
+
 # ---------------------------------------------------------------------------- the arm's `claude`
 
 def load_wrapper():

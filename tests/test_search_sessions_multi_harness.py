@@ -1522,6 +1522,130 @@ class TestParsingNeverMultipliesPastTheScansMemory(_Base):
             self.assertLess(got["own_kib"], 100 * 1024,
                             f"the parent peaked at {got['own_kib']} KiB holding a hit's whole record")
 
+    def evidence_runs(self):
+        """A --runs-dir holding one merged unit on src/app.py, and the hint's argv naming an evidence
+        file (written by the caller)."""
+        runs = self.tmp / "runs"
+        (runs / "real").mkdir(parents=True, exist_ok=True)
+        (runs / "real" / "manifest.json").write_text(json.dumps(
+            {"units": [{"id": "U-1", "status": "merged", "files_touched": ["src/app.py"], "head_sha": "a" * 40}]}),
+            encoding="utf-8")
+        evidence = self.tmp / "evidence.json"
+        return runs, evidence, ["--episodic-hint", "--path", "src/app.py", "--runs-dir", str(runs),
+                                "--current-evidence", str(evidence)]
+
+    def test_the_parent_never_json_loads_the_current_evidence(self):
+        # Codex round 13 on 594f7265: main read --current-evidence under the byte cap and then
+        # json.loads-ed it HERE, before hp.load_observations looked at its shape, so a ~60 MiB array
+        # of empty objects built some 20 million dicts in the unrestricted parent. Every json.loads
+        # this process makes is recorded (a forked child's calls land in the child's own copy of the
+        # list, never here), and one past 1 MiB here is refused without parsing it, so the unfixed
+        # code fails on the record, not on the host's memory. The hostile file (20 MiB of {}, the
+        # same shape) is refused, said, and never parsed here; an ordinary file still supersedes the
+        # hint it contradicts, and its text is not parsed here either: only the child's checked
+        # observations are.
+        runs, evidence, argv = self.evidence_runs()
+        real, parent, here = json.loads, os.getpid(), []
+
+        def recorded(data, *args, **kwargs):
+            if os.getpid() == parent:
+                text = data.decode("utf-8", "replace") if isinstance(data, (bytes, bytearray)) else str(data)
+                here.append(text if len(text) <= 4096 else f"<{len(text)} characters>")
+                if len(text) > 1 << 20:
+                    raise json.JSONDecodeError("parsed in the parent", text[:64], 0)
+            return real(data, *args, **kwargs)
+
+        def hint():
+            out, err = io.StringIO(), io.StringIO()
+            here.clear()
+            with mock.patch.object(json, "loads", recorded), mock.patch.object(self.mod, "SCAN_MEMORY_BYTES", 128 << 20), \
+                    mock.patch.dict(os.environ, self.env, clear=True), \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = self.mod.main(argv)
+            return rc, out.getvalue(), err.getvalue()
+        evidence.write_bytes(b"[" + b"{}," * ((20 << 20) // 3) + b"{}]")
+        rc, _out, err = hint()
+        self.assertEqual([t for t in here if t.startswith("<")], [],
+                         "the parent json-loaded the --current-evidence file itself")
+        self.assertEqual(rc, 2, err[-2000:])
+        self.assertIn(f"REFUSED: episodic hint: --current-evidence {evidence}", err)
+        text = json.dumps({"observations": [{"path": "./src/app.py", "outcome": "fail", "source": "the frozen test"}]})
+        evidence.write_text(text, encoding="utf-8")
+        rc, out, err = hint()
+        self.assertEqual(rc, 0, err[-2000:])
+        self.assertIn("PRIOR_RUNS=1 ", out)
+        self.assertIn("SUPERSEDED=1 ", out, "the current evidence did not supersede the hint it contradicts")
+        self.assertNotIn(text, here, "the parent json-loaded the --current-evidence file itself")
+
+    def test_the_current_evidence_is_parsed_in_the_contained_child_never_in_the_parent(self):
+        # The same attack measured: the recall runs here under a 1 GiB data limit of its own (so a
+        # parse in the parent fails there, not on the host), its scan child at 128 MiB. The
+        # reviewer's ~60 MiB array of empty objects, and 60 MiB of nesting, are each refused
+        # (exit 2) and said, and the parent stays under 100 MiB; an ordinary file still supersedes
+        # the hint it contradicts.
+        _runs, evidence, argv = self.evidence_runs()
+        size = 60 << 20
+        hostile = {"empty objects": (b"[" + b"{}," * ((size - 3) // 3) + b"{}]", "memory limit"),
+                   "nested arrays": (b"[" * size, "maximum recursion depth")}
+        for what, (data, why) in hostile.items():
+            with self.subTest(evidence=what):
+                evidence.write_bytes(data)
+                self.assertLessEqual(evidence.stat().st_size, self.mod.MAX_FILE_BYTES, "the byte cap would refuse it")
+                got = self.hint_in_a_child(argv)
+                if sys.platform.startswith("linux"):
+                    self.assertLess(got["own_kib"], 100 * 1024,
+                                    f"the parent peaked at {got['own_kib']} KiB on current evidence ({what})")
+                self.assertEqual(got["rc"], 2, got["err"][-2000:])
+                self.assertIn(f"REFUSED: episodic hint: --current-evidence {evidence}", got["err"])
+                if what != "empty objects" or sys.platform.startswith("linux"):
+                    self.assertIn(why, got["err"])  # elsewhere it parses, unbounded, and is refused on its shape
+        evidence.write_text(json.dumps([{"path": "src/app.py", "outcome": "fail", "source": "the frozen test"}]),
+                            encoding="utf-8")
+        got = self.hint_in_a_child(argv)
+        self.assertEqual(got["rc"], 0, got["err"][-2000:])
+        self.assertIn("PRIOR_RUNS=1 ", got["out"])
+        self.assertIn("SUPERSEDED=1 ", got["out"], "the current evidence did not supersede the hint it contradicts")
+
+    def test_what_the_current_evidence_carries_back_is_bounded_and_refused_whole_past_it(self):
+        # What crosses back from the evidence's child is the checked observations, at most
+        # MAX_OBSERVATIONS of them, each path at most PATH_CHARS: past either the file is refused
+        # whole (exit 2), never cut -- a dropped observation could be the one that supersedes a hint
+        # -- and so is the same evidence handed to the library entry already parsed.
+        runs, evidence, argv = self.evidence_runs()
+        many = [{"path": f"src/m{i}.py", "outcome": "pass"} for i in range(self.mod.MAX_OBSERVATIONS + 1)]
+        long_path = [{"path": "src/" + "a" * self.mod.PATH_CHARS, "outcome": "pass"}]
+        for what, (doc, why) in {"too many observations": (many, f"over {self.mod.MAX_OBSERVATIONS}"),
+                                 "a path too long": (long_path, f"over {self.mod.PATH_CHARS} characters")}.items():
+            with self.subTest(evidence=what):
+                evidence.write_text(json.dumps(doc), encoding="utf-8")
+                err = io.StringIO()
+                with mock.patch.dict(os.environ, self.env, clear=True), contextlib.redirect_stderr(err), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    rc = self.mod.main(argv)
+                self.assertEqual(rc, 2, err.getvalue()[-2000:])
+                self.assertIn(f"REFUSED: episodic hint: --current-evidence {evidence}: ", err.getvalue())
+                self.assertIn(why, err.getvalue())
+                with self.assertRaisesRegex(self.mod.hp.ProvenanceError, why):
+                    self.mod.build_episodic_selection(["src/app.py"], runs_dir=str(runs), current_evidence=doc)
+        at_cap = many[:self.mod.MAX_OBSERVATIONS] + [{"path": "src/app.py", "outcome": "fail"}]
+        evidence.write_text(json.dumps(at_cap[1:]), encoding="utf-8")
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.mod.main(argv), 0)
+        self.assertIn("SUPERSEDED=1 ", out.getvalue(), "evidence at the cap was not read whole")
+
+    def hint_in_a_child(self, argv):
+        """AMPLIFY_CHILD with a 1 GiB data limit of its own (where RLIMIT_DATA exists), its scan
+        child at LIMIT_MIB; what it reported, whatever main returned."""
+        limited = ("import resource\n"
+                   "if hasattr(resource, 'RLIMIT_DATA'):\n"
+                   "    resource.setrlimit(resource.RLIMIT_DATA, (1 << 30, resource.getrlimit(resource.RLIMIT_DATA)[1]))\n")
+        proc = subprocess.run([sys.executable, "-I", "-c", limited + AMPLIFY_CHILD, str(SEARCH_PY), json.dumps(self.env),
+                               json.dumps(argv), str(self.LIMIT_MIB)], capture_output=True, text=True, timeout=600)
+        self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
+        return json.loads(proc.stdout.strip().splitlines()[-1])
+
     def test_a_source_past_its_wall_clock_is_skipped_and_said_and_the_rest_is_read(self):
         slow = self.tmp / "claude" / "projects" / "-workspace-slow" / "slow-session.jsonl"
         _jsonl(slow, [{"type": "user", "sessionId": "slow", "cwd": "/w", "timestamp": "2026-10-10T12:00:00Z",
