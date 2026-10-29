@@ -369,7 +369,7 @@ jobs:
     # is left here is what needs the shards' own output: the D9 coverage combine.
     needs: [tests, floor, checks, vfbench, vfbench_replay]
     if: always()
-    runs-on: codebuild-gha-open-fleet-${{ github.run_id }}-${{ github.run_attempt }}
+    runs-on: ubuntu-latest  # combines coverage recorded on GitHub-hosted shards (path-sensitive)
     timeout-minutes: 10
     steps:
       - name: Every needed job succeeded (a failed, cancelled or skipped need fails gates)
