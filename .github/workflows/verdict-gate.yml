@@ -50,7 +50,7 @@ permissions: {}
 jobs:
   resolve:
     if: github.event.workflow_run.event == 'pull_request_review'
-    runs-on: ubuntu-latest
+    runs-on: codebuild-gha-open-fleet-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -85,7 +85,7 @@ jobs:
 
   gate:
     needs: resolve
-    runs-on: ubuntu-latest
+    runs-on: codebuild-gha-open-fleet-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 10
     environment: verdict-gate
     permissions:

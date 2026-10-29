@@ -21,7 +21,7 @@ permissions:
 
 jobs:
   pytest:
-    runs-on: ubuntu-latest
+    runs-on: codebuild-gha-open-fleet-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 15
     defaults:
       run:
@@ -35,7 +35,7 @@ jobs:
       - run: uv run pytest
 
   ruff:
-    runs-on: ubuntu-latest
+    runs-on: codebuild-gha-open-fleet-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (same pin as validate.yml)
@@ -57,7 +57,7 @@ jobs:
 
   migrate:
     # F3 freeze proof: boot pins 0002 while 0003 sits pending on disk.
-    runs-on: ubuntu-latest
+    runs-on: codebuild-gha-open-fleet-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 20
     defaults:
       run:
@@ -101,7 +101,7 @@ jobs:
 
   smoke:
     # SPEC AC3.3: build + /healthz + one PromQL query + one Loki query + teardown.
-    runs-on: ubuntu-latest
+    runs-on: codebuild-gha-open-fleet-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 20
     defaults:
       run:

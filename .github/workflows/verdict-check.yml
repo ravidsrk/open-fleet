@@ -57,7 +57,7 @@ jobs:
   relay:
     # Always runs: a completed run of this workflow is what wakes verdict-gate.yml.
     # It reads nothing and decides nothing — the gate re-derives every verdict.
-    runs-on: ubuntu-latest
+    runs-on: codebuild-gha-open-fleet-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 5
     steps:
       - run: echo "review received; verdict-gate.yml evaluates it from the default branch"
@@ -76,7 +76,7 @@ jobs:
        github.event.review.author_association == 'MEMBER' ||
        github.event.review.author_association == 'COLLABORATOR' ||
        github.event.review.user.login == github.event.pull_request.user.login)
-    runs-on: ubuntu-latest
+    runs-on: codebuild-gha-open-fleet-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 10
     steps:
       # The checker comes from the BASE sha, into its own path: the PR's tree is
