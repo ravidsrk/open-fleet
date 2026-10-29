@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   bind:
-    runs-on: ubuntu-latest
+    runs-on: codebuild-gha-open-fleet-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 15
     steps:
       # The PR's tree goes in its own directory, beside the base checkout rather than above it:

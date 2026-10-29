@@ -24,7 +24,7 @@ permissions:
 
 jobs:
   guard:
-    runs-on: ubuntu-latest
+    runs-on: codebuild-gha-open-fleet-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 15
     steps:
       # The PR's tree goes in its own directory: a second checkout nested inside the scanned tree
