@@ -37,6 +37,14 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 (Node 24, #367)
         with:
           python-version: "3.13"  # pin: CI 3.x was a moving target (G-03)
+      - name: register setup-python's libpython with ldconfig (CodeBuild runners)
+        # Subprocesses that drop LD_LIBRARY_PATH otherwise fail to load libpython.
+        run: |
+          if [ -n "${pythonLocation:-}" ] && [ -d "$pythonLocation/lib" ]; then
+            SUDO=""; [ "$(id -u)" = 0 ] || SUDO=sudo
+            echo "$pythonLocation/lib" | $SUDO tee /etc/ld.so.conf.d/zz-setup-python.conf >/dev/null
+            $SUDO ldconfig
+          fi
       - name: Install coverage from the hashed lock
         # Same lock + --require-hashes shape as gates (#301): each matrix job
         # traces its own shard, so each needs the pinned tracer. The whole
@@ -116,6 +124,14 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 (Node 24, #367)
         with:
           python-version: ${{ matrix.python }}
+      - name: register setup-python's libpython with ldconfig (CodeBuild runners)
+        # Subprocesses that drop LD_LIBRARY_PATH otherwise fail to load libpython.
+        run: |
+          if [ -n "${pythonLocation:-}" ] && [ -d "$pythonLocation/lib" ]; then
+            SUDO=""; [ "$(id -u)" = 0 ] || SUDO=sudo
+            echo "$pythonLocation/lib" | $SUDO tee /etc/ld.so.conf.d/zz-setup-python.conf >/dev/null
+            $SUDO ldconfig
+          fi
       - name: Install coverage from the hashed lock
         run: |
           set -euo pipefail
@@ -151,6 +167,14 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 (Node 24, #367)
         with:
           python-version: "3.13"  # pin: CI 3.x was a moving target (G-03)
+      - name: register setup-python's libpython with ldconfig (CodeBuild runners)
+        # Subprocesses that drop LD_LIBRARY_PATH otherwise fail to load libpython.
+        run: |
+          if [ -n "${pythonLocation:-}" ] && [ -d "$pythonLocation/lib" ]; then
+            SUDO=""; [ "$(id -u)" = 0 ] || SUDO=sudo
+            echo "$pythonLocation/lib" | $SUDO tee /etc/ld.so.conf.d/zz-setup-python.conf >/dev/null
+            $SUDO ldconfig
+          fi
       - name: No co-author or tool-attribution trailers in this PR's commits
         # #628 / CONTRIBUTING.md "Commit and PR conventions": the rule was prose only, and 12 of
         # the last 200 commits on main broke it (2026-10-23 review, §5 Commit hygiene). Only the
@@ -375,6 +399,14 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 (Node 24, #367)
         with:
           python-version: "3.13"  # pin: CI 3.x was a moving target (G-03)
+      - name: register setup-python's libpython with ldconfig (CodeBuild runners)
+        # Subprocesses that drop LD_LIBRARY_PATH otherwise fail to load libpython.
+        run: |
+          if [ -n "${pythonLocation:-}" ] && [ -d "$pythonLocation/lib" ]; then
+            SUDO=""; [ "$(id -u)" = 0 ] || SUDO=sudo
+            echo "$pythonLocation/lib" | $SUDO tee /etc/ld.so.conf.d/zz-setup-python.conf >/dev/null
+            $SUDO ldconfig
+          fi
       - name: Install coverage from the hashed lock
         # Same lock + --require-hashes shape as every other job (#301): the combine below runs
         # the pinned tracer's own reader, never a re-resolved one.
@@ -433,6 +465,14 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 (Node 24, #367)
         with:
           python-version: "3.13"  # pin: CI 3.x was a moving target (G-03)
+      - name: register setup-python's libpython with ldconfig (CodeBuild runners)
+        # Subprocesses that drop LD_LIBRARY_PATH otherwise fail to load libpython.
+        run: |
+          if [ -n "${pythonLocation:-}" ] && [ -d "$pythonLocation/lib" ]; then
+            SUDO=""; [ "$(id -u)" = 0 ] || SUDO=sudo
+            echo "$pythonLocation/lib" | $SUDO tee /etc/ld.so.conf.d/zz-setup-python.conf >/dev/null
+            $SUDO ldconfig
+          fi
       - name: VF-Bench soundness gate (verify.py false-done must be 0)
         # #412: 0% false-done is a held property, not a historical fact. Fails on
         # corpus drift off VERSION+CANARY, any skipped trap, verify.py false_done
@@ -460,6 +500,14 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 (Node 24, #367)
         with:
           python-version: "3.13"  # pin: CI 3.x was a moving target (G-03)
+      - name: register setup-python's libpython with ldconfig (CodeBuild runners)
+        # Subprocesses that drop LD_LIBRARY_PATH otherwise fail to load libpython.
+        run: |
+          if [ -n "${pythonLocation:-}" ] && [ -d "$pythonLocation/lib" ]; then
+            SUDO=""; [ "$(id -u)" = 0 ] || SUDO=sudo
+            echo "$pythonLocation/lib" | $SUDO tee /etc/ld.so.conf.d/zz-setup-python.conf >/dev/null
+            $SUDO ldconfig
+          fi
       - name: Reproduce the published VF-Bench replay in this environment
         run: |
           set -euo pipefail

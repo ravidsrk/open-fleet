@@ -40,6 +40,14 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 (Node 24, #367)
         with:
           python-version: "3.13"  # pin: CI 3.x was a moving target (G-03)
+      - name: register setup-python's libpython with ldconfig (CodeBuild runners)
+        # Subprocesses that drop LD_LIBRARY_PATH otherwise fail to load libpython.
+        run: |
+          if [ -n "${pythonLocation:-}" ] && [ -d "$pythonLocation/lib" ]; then
+            SUDO=""; [ "$(id -u)" = 0 ] || SUDO=sudo
+            echo "$pythonLocation/lib" | $SUDO tee /etc/ld.so.conf.d/zz-setup-python.conf >/dev/null
+            $SUDO ldconfig
+          fi
       - name: From-scratch install into an empty HOME
         # No orca/gh/claude credentials exist here by construction — the
         # installer must exit 0 with warnings, never fail on the absent
