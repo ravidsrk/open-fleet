@@ -109,7 +109,7 @@ jobs:
 
   smoke:
     # SPEC AC3.3: build + /healthz + one PromQL query + one Loki query + teardown.
-    runs-on: codebuild-gha-open-fleet-${{ github.run_id }}-${{ github.run_attempt }}
+    runs-on: ubuntu-latest  # pulls from Docker Hub; CodeBuild IPs hit the anonymous pull limit
     timeout-minutes: 20
     defaults:
       run:
