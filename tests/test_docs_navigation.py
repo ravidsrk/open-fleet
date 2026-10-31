@@ -777,6 +777,29 @@ class TestDocsNavigation(unittest.TestCase):
             self.assertEqual(int(m.group(1)), counts[tier],
                              f"distribution.md {tier} count is stale (live: {counts[tier]})")
 
+    def test_distribution_kit_proof_mix_matches_reality(self):
+        # #235: the listing kit leads every blurb with the proof mix, so it must track the live
+        # proof_status rollup like distribution.md does. Every occurrence is checked, not the first.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "proof_status", ROOT / "runtime" / "scripts" / "proof_status.py")
+        ps = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ps)
+        counts = ps.rollup(ps.collect(ROOT / "skills", ROOT))
+        text = (DOCS / "distribution-kit.md").read_text(encoding="utf-8")
+        for tier in ("doctrine-only", "self-run", "external-run"):
+            found = [int(n) for n in re.findall(rf"(\d+)\s+{re.escape(tier)}", text)]
+            self.assertTrue(found, f"distribution-kit.md omits the {tier} count (live: {counts[tier]})")
+            self.assertEqual(set(found), {counts[tier]},
+                             f"distribution-kit.md {tier} count is stale (live: {counts[tier]})")
+        # Catalog totals ("22-mission", "22 outcome-named") too. Fenced blocks hold quoted stale
+        # third-party text (buildwithclaude's "10 outcome-named"), so they are skipped.
+        prose = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+        totals = [int(n) for n in re.findall(r"\b(\d+)(?:-mission|\s+outcome-named)", prose)]
+        self.assertTrue(totals, "distribution-kit.md states no catalog total")
+        self.assertEqual(set(totals), {counts["total"]},
+                         f"distribution-kit.md catalog total is stale (live: {counts['total']})")
+
     def test_about_description_is_canonical_and_count_free(self):
         # The GitHub About box is a repository setting, so nothing in CI can read the live
         # value. What CI *can* hold is the text a maintainer pastes into it. That text went
