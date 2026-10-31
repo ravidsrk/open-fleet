@@ -14,8 +14,6 @@ functions, so they are a gentle way into the security-critical code.
 No production code changes. Floor guard stays clean.
 """
 import importlib.util
-import os
-import sys
 import unittest
 from pathlib import Path
 
