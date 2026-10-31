@@ -1,0 +1,4 @@
+{
+  "seconds": 0.1,
+  "measured": "2026-10-30: one run of tests.test_gitexec_helpers at 38e0161f5f (Linux x86_64, Python 3.12.3) took under 0.1 s; 12 pure-function tests, no subprocesses"
+}
