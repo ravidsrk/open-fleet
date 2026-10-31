@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Direct unit tests for runtime/scripts/diffparse.py (#736).
 
-diffparse.records is the hunk-counting unified-diff reader that floor_guard.py
-and verify.py depend on. These tests pin its grammar so a refactor cannot bring
-back the prefix-only bug its docstring records: a removed ``-- note`` line is
+diffparse.records is the hunk-counting unified-diff reader floor_guard.py reads
+diffs with. verify.py's _diff_records keeps its own copy of the same grammar, so
+these tests pin diffparse only. They stop a refactor from bringing back the
+prefix-only bug its docstring records: a removed ``-- note`` line is
 ``--- note`` on the wire, and a reader that took it for a file header renamed
 the rest of the hunk.
 """
