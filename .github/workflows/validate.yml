@@ -23,7 +23,7 @@ jobs:
     # fails unless every need succeeded: branch protection requires the `gates`
     # context, and a need that fails SKIPS a plain dependent, which GitHub counts
     # as a passing required check (2026-10-23 review, P1-5).
-    runs-on: ubuntu-latest  # needs non-root + system-custody git; stays GitHub-hosted
+    runs-on: instabox-medium  # needs non-root + system-custody git; stays GitHub-hosted
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -109,7 +109,7 @@ jobs:
     # job above proves 3.13 (the CI pin, and the job that carries the D9 coverage data); this
     # matrix proves the floor and the minor between it and the pin. Same shards, same runner, no
     # artifacts; `gates` needs it so a red floor blocks the merge.
-    runs-on: ubuntu-latest  # needs non-root + system-custody git
+    runs-on: instabox-medium  # needs non-root + system-custody git
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -156,7 +156,7 @@ jobs:
     # min, most of it the secret scan's test_verify re-run. Nothing here reads a shard artifact,
     # so nothing here waits. A job no required context depends on is advisory, so `gates` NEEDS this one and its
     # first step fails unless it succeeded: every check below still blocks the merge.
-    runs-on: ubuntu-latest  # needs non-root + system-custody git
+    runs-on: instabox-medium  # needs non-root + system-custody git
     timeout-minutes: 20
     steps:
       - id: checkout
@@ -369,7 +369,7 @@ jobs:
     # is left here is what needs the shards' own output: the D9 coverage combine.
     needs: [tests, floor, checks, vfbench, vfbench_replay]
     if: always()
-    runs-on: ubuntu-latest  # combines coverage recorded on GitHub-hosted shards (path-sensitive)
+    runs-on: instabox-medium  # combines coverage recorded on GitHub-hosted shards (path-sensitive)
     timeout-minutes: 10
     steps:
       - name: Every needed job succeeded (a failed, cancelled or skipped need fails gates)
@@ -455,7 +455,7 @@ jobs:
           coverage combine "${files[@]}"
           coverage report
   vfbench:
-    runs-on: ubuntu-latest  # needs non-root + system-custody git; stays GitHub-hosted
+    runs-on: instabox-medium  # needs non-root + system-custody git; stays GitHub-hosted
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24; Node 20 left runners 2026-09-23, #367)
@@ -490,7 +490,7 @@ jobs:
     # a deleted or edited corpus case or pinned fixture fails the replay, and the held-out protocol
     # is checked against the shipped corpus. The report uploads whatever happened, so a mismatch
     # can be read and compared (`replay.py compare`) against a local run of the same revision.
-    runs-on: ubuntu-latest  # needs non-root + system-custody git; stays GitHub-hosted
+    runs-on: instabox-medium  # needs non-root + system-custody git; stays GitHub-hosted
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24; Node 20 left runners 2026-09-23, #367)
