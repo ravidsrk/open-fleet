@@ -19,6 +19,16 @@ issue-tracked, so this surface cannot drift into "nothing open" while gaps stand
   [#515](https://github.com/ravidsrk/open-fleet/issues/515) and
   [#518](https://github.com/ravidsrk/open-fleet/issues/518) were still open; the ordered path past
   the 0.7.0 cut is the road-to-1.0 epic [#526](https://github.com/ravidsrk/open-fleet/issues/526).
+- **The 2026-10-27 security audit** —
+  [`docs/runs/2026-10-27-security-audit.md`](docs/runs/2026-10-27-security-audit.md) (#717):
+  a tree-wide `harden-it` audit-only run over every first-party executable surface. It found 78
+  findings, 3 of them P0, and closed HARDENED-WITH-OPEN-ITEMS. The wave files and verifier reports
+  are under [`docs/runs/2026-10-27-security-audit/`](docs/runs/2026-10-27-security-audit/). Its
+  follow-up fixes landed as #718 to #734, each naming the finding IDs it closes in its title, with
+  a `changelog.d/secaudit-*.md` fragment. The report's findings table records each finding's state
+  at run close, and the run-close sha256 inventory pins it, so nobody edits it afterwards. The live
+  open set is the rows of that table whose ID no merged fix PR names. No issue label tracks the
+  audit's findings.
 - **Standing gaps** — [`docs/completion/GAPS.md`](docs/completion/GAPS.md): every finding
   between HEAD and the completion definition with a FINISH / CUT / DEFER decision (a dated
   snapshot; live proof counts are in the README's generated proof-status sentence). G-09
