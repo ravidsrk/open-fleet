@@ -3457,6 +3457,21 @@ class TestAuditFindingsF1F2F7(ReviewHookBase):
             "busybox sed -e 'e git push --force origin main' f",
         ), bounded_modes=self.BOTH)
 
+    def test_busybox_install_before_a_shell_applet_is_judged_as_the_shell(self):
+        # #740: --install shifted the applet, so busybox --install sh -c BODY was allowed with its
+        # body never read. _peel_busybox skips --install (and -s) and judges the shell, failing
+        # closed. Real busybox takes the word after them as DIR; denying here over-denies.
+        self.expect("deny", (
+            "busybox --install sh -c 'git push --force origin main'",
+            "/bin/busybox --install sh -c 'git push --force origin main'",
+            "busybox --install -s sh -c 'git push --force origin main'",
+        ), bounded_modes=self.BOTH, reason="default branch")
+        # Negative control: no applet follows, so nothing is peeled and the decision is unchanged.
+        self.expect("allow", (
+            "busybox --install -s /tmp/bin",
+            "busybox --install",
+        ), bounded_modes=self.BOTH)
+
     def raw(self, payload):
         # A non-Claude tool name (local_shell, exec_command) is STRICT: it blocks with exit 2.
         r = self.fire(json.dumps(payload))

@@ -2424,9 +2424,15 @@ def _canon_interp(head):
 
 
 def _peel_busybox(head, rest):
-    """(head, rest) with a leading busybox/toybox applet peeled: busybox awk PROG -> awk PROG."""
-    if head in ("busybox", "busybox.static", "toybox") and rest and rest[0] in _BUSYBOX_APPLETS:
-        return rest[0], rest[1:]
+    """(head, rest) with a leading busybox/toybox applet peeled: busybox awk PROG -> awk PROG.
+    A leading --install (and its -s) is skipped first (#740): busybox --install sh -c BODY is
+    judged as sh -c BODY, which fails closed. Without an applet after them nothing is peeled,
+    so busybox --install -s DIR keeps its decision."""
+    if head in ("busybox", "busybox.static", "toybox"):
+        opts = list(rest[:2])
+        skip = 2 if opts == ["--install", "-s"] else 1 if opts[:1] == ["--install"] else 0
+        if len(rest) > skip and rest[skip] in _BUSYBOX_APPLETS:
+            return rest[skip], rest[skip + 1:]
     return head, rest
 
 
