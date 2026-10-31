@@ -792,6 +792,13 @@ class TestDocsNavigation(unittest.TestCase):
             self.assertTrue(found, f"distribution-kit.md omits the {tier} count (live: {counts[tier]})")
             self.assertEqual(set(found), {counts[tier]},
                              f"distribution-kit.md {tier} count is stale (live: {counts[tier]})")
+        # Catalog totals ("22-mission", "22 outcome-named") too. Fenced blocks hold quoted stale
+        # third-party text (buildwithclaude's "10 outcome-named"), so they are skipped.
+        prose = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+        totals = [int(n) for n in re.findall(r"\b(\d+)(?:-mission|\s+outcome-named)", prose)]
+        self.assertTrue(totals, "distribution-kit.md states no catalog total")
+        self.assertEqual(set(totals), {counts["total"]},
+                         f"distribution-kit.md catalog total is stale (live: {counts['total']})")
 
     def test_about_description_is_canonical_and_count_free(self):
         # The GitHub About box is a repository setting, so nothing in CI can read the live

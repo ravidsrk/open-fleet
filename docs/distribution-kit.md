@@ -16,8 +16,9 @@ moves past `doctrine-only` only through a run report that binds: a `RUN:` header
 the run's own directory, and an inventory that re-hashes at the commit it names. Today the
 22-mission catalog holds 2 external-run (`ship-it`, `review-it`), 3 self-run (`clean-sweep`,
 `prove-it`, `harden-it`) and 17 doctrine-only missions. Before pasting, re-read the counts with
-`python3 runtime/scripts/proof_status.py`. `tests/test_docs_navigation.py` fails if this page
-falls behind.
+`python3 runtime/scripts/proof_status.py`. `tests/test_docs_navigation.py` fails if a tier count
+or a catalog total on this page falls behind. Quoted stale text sits in fenced blocks, which the
+test skips.
 
 Never describe a doctrine-only mission as proven, and never claim a listing, an install count or a
 does-it-load score that doesn't exist yet.
@@ -34,8 +35,8 @@ does-it-load score that doesn't exist yet.
   the validation history, the policy holds the bundle README discloses, and the JSON entry.
 - **Blurb:**
 
-  > **proof: 2 external-run · 3 self-run · 17 doctrine-only, and every tier is bound to a
-  > re-hashable run report.** open-fleet is 22 outcome-named autonomous fleets for coding agents
+  > **proof: 2 external-run · 3 self-run · 17 doctrine-only. Each self-run and external-run
+  > mission is bound to a re-hashable run report.** open-fleet is 22 outcome-named autonomous fleets for coding agents
   > on Orca, POSIX and multi-runtime orchestrators. Each mission is one outcome with its own state
   > machine. A unit of work is done only when an independent verifier re-derives its SHA-bound
   > evidence manifest, never on a worker's narration. One router per worker. MIT.
@@ -46,8 +47,8 @@ does-it-load score that doesn't exist yet.
   by email to `chekkutech@gmail.com` (or WhatsApp) and reviews each one by hand.
 - **Fields:** name, logo, install line, repository and category, from
   [distribution.md](distribution.md#claudemarketplacenet).
-- **One-line summary:** *Autonomous fleets whose `proof:` tier is bound to a run report: 2
-  external-run, 3 self-run, 17 doctrine-only.*
+- **One-line summary:** *Autonomous fleets that publish their `proof:` tier: 2 external-run and
+  3 self-run missions bound to run reports, 17 doctrine-only.*
 - **Longer description:** the Anthropic directory blurb above, followed by the proof link
   `https://github.com/ravidsrk/open-fleet/tree/main/docs/runs`.
 
@@ -74,8 +75,9 @@ does-it-load score that doesn't exist yet.
 - **What is stale (read 2026-10-31):** the `marketplace` record `@ravidsrk/orca-fleet` was
   re-crawled on 2026-10-28 and still reads:
 
-  > 10 outcome-named autonomous fleets for the Orca runtime — SHA-bound evidence definition of
-  > done, best-of-breed worker recipes, one router per worker.
+  ```text
+  10 outcome-named autonomous fleets for the Orca runtime — SHA-bound evidence definition of done, best-of-breed worker recipes, one router per worker.
+  ```
 
   That's a cache of a long-gone About string. The count, the runtime and the name (`orca-fleet`)
   are all wrong. The `plugin` record (2026-10-07) is count-free but still points at
