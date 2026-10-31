@@ -52,7 +52,7 @@ single-use. List them with `rg -n codebuild-gha-open-fleet .github/workflows`.
 | GitHub-hosted `ubuntu-latest` | `tests`, `floor`, `checks`, `vfbench` and `vfbench_replay` (validate.yml) | they need a non-root user and system-custody git. CodeBuild runs as root, where the ownership-boundary tests would skip silently. |
 | GitHub-hosted | `gates` (validate.yml) | it combines the coverage recorded on the GitHub-hosted shards, and those paths are runner-specific |
 | GitHub-hosted | `smoke` (fixture-target-app.yml) | it pulls from Docker Hub, and CodeBuild's shared IPs hit the anonymous pull limit |
-| GitHub-hosted | `dist` (publish-dist.yml), `publish` (release.yml) | release publishing stays on GitHub-hosted runners for npm provenance |
+| GitHub-hosted | `dist` (publish-dist.yml), `publish` (release.yml) | #735 left the release publishers where they were. They push the `dist` branch (with its `DIST-PROVENANCE.txt`) and create the GitHub Release, and the workflows record no further reason |
 
 A CodeBuild job sets up Python with `actions/setup-python` and then registers its `libpython`
 with `ldconfig` (the step named "register setup-python's libpython with ldconfig (CodeBuild
