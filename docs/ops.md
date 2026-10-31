@@ -39,6 +39,49 @@ checks, changing an immutable tag, or treating a review from the author as an in
 review. #530 closed on 2026-09-30 without that review; H-10 in HUMAN_ACTIONS is done
 instead by the owner's disposition (#595, below).
 
+## CI runners
+
+Since #735 (2026-10-29), most jobs run on AWS CodeBuild-hosted GitHub Actions runners. A job
+asks for one with `runs-on: codebuild-gha-open-fleet-${{ github.run_id }}-${{ github.run_attempt }}`.
+The label names the CodeBuild project, and the run ID and attempt make each job's runner
+single-use. List them with `rg -n codebuild-gha-open-fleet .github/workflows`.
+
+| Runs on | Jobs | Why |
+|---|---|---|
+| CodeBuild | `guard` (guard.yml), `pinned-demo` (negative-control.yml), `from-scratch` (install.yml), `bind` (bind-check.yml), `pytest`, `ruff` and `migrate` (fixture-target-app.yml), `probe` (upstream-drift.yml), `health` (main-health.yml), `alert` (alert-on-failure.yml), `relay` and `verdict` (verdict-check.yml), `resolve` and `gate` (verdict-gate.yml) | the pilot's default |
+| GitHub-hosted `ubuntu-latest` | `tests`, `floor`, `checks`, `vfbench` and `vfbench_replay` (validate.yml) | they need a non-root user and system-custody git. CodeBuild runs as root, where the ownership-boundary tests would skip silently. |
+| GitHub-hosted | `gates` (validate.yml) | it combines the coverage recorded on the GitHub-hosted shards, and those paths are runner-specific |
+| GitHub-hosted | `smoke` (fixture-target-app.yml) | it pulls from Docker Hub, and CodeBuild's shared IPs hit the anonymous pull limit |
+| GitHub-hosted | `dist` (publish-dist.yml), `publish` (release.yml) | release publishing stays on GitHub-hosted runners for npm provenance |
+
+A CodeBuild job sets up Python with `actions/setup-python` and then registers its `libpython`
+with `ldconfig` (the step named "register setup-python's libpython with ldconfig (CodeBuild
+runners)"). Without that step, a subprocess that drops `LD_LIBRARY_PATH` cannot load Python.
+
+**AWS prerequisites.** Both are account settings, not files in this tree. Only the owner changes
+them.
+- A CodeBuild project named `gha-open-fleet` in `us-east-1`, configured as a GitHub Actions
+  runner project for this repository. It reports its own check, "AWS CodeBuild us-east-1
+  (gha-open-fleet)", on each run.
+- An AWS CodeConnections GitHub connection that gives that project access to
+  `ravidsrk/open-fleet` and its workflow-job webhook.
+
+**Forks and contributors.** A pull request from a fork into this repository runs here, so its
+CodeBuild jobs use this project like any other PR, once a maintainer approves the run where
+the repository's fork-approval setting asks for it (it did for #741). A fork running CI in its own repository
+has no `gha-open-fleet` project, so those jobs sit in "Queued" until GitHub cancels them after
+24 hours. To run them there, change the fork's own copy of each `runs-on: codebuild-gha-open-fleet-…`
+line to `runs-on: ubuntu-latest`. The libpython step is a no-op where it is not needed. Never send
+that edit upstream: a PR that changes `.github/workflows/` from a fork fails `verdict-gate`
+(the grader rule above).
+
+**A job stuck in "Queued".** Here it means CodeBuild never picked the job up. Check the
+project's build history in the AWS console. If no build started and the project and connection
+are healthy, the webhook was dropped: cancel the run and re-run it (`gh run cancel <id>`, then
+`gh run rerun <id>`). Re-running the same queued run does not help until it is cancelled. On
+2026-10-30, jobs queued for 18 minutes to 10 hours, and each ran normally after a cancel and
+re-run.
+
 ## Merge gate
 
 Required contexts on `main` (API read-back, 2026-10-27): `gates`, `guard` and `pinned-demo` from
