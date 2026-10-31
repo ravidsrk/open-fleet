@@ -71,6 +71,8 @@ Current indexing status across external skill and plugin directories (last audit
 
 ## Maintainer submission kit (H-02)
 
+Per-aggregator blurbs that lead with the `proof:` framing, every submission URL, and the replacement buildwithclaude blurb are in the [listing kit](distribution-kit.md).
+
 Shared lead for external directory submissions:
 
 > **open-fleet** is 22 outcome-named autonomous fleets for coding agents across the open-fleet Runtime Provider Interface (RPI) — running standalone on POSIX (`OPEN_FLEET_RUNTIME=posix`), on the Orca runtime, or across 12 external multi-agent orchestrators. Each mission is one outcome with its own state machine and an evidence-backed definition of done: every unit of work closes with a SHA-bound evidence manifest an independent verifier re-derives, never a worker's narration. Its own catalog holds five binding proof reports — two external-run (`ship-it`, `review-it`) and three self-run (`clean-sweep`, `prove-it`, `harden-it`) — with `17 doctrine-only` protocols ready to run. One router per worker; MIT.
