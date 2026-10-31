@@ -24,11 +24,11 @@ issue-tracked, so this surface cannot drift into "nothing open" while gaps stand
   a tree-wide `harden-it` audit-only run over every first-party executable surface. It found 78
   findings, 3 of them P0, and closed HARDENED-WITH-OPEN-ITEMS. The wave files and verifier reports
   are under [`docs/runs/2026-10-27-security-audit/`](docs/runs/2026-10-27-security-audit/). Its
-  follow-up fixes landed as #718 to #734, each naming the finding IDs it closes in its title, with
-  a `changelog.d/secaudit-*.md` fragment. The report's findings table records each finding's state
-  at run close, and the run-close sha256 inventory pins it, so nobody edits it afterwards. The live
-  open set is the rows of that table whose ID no merged fix PR names. No issue label tracks the
-  audit's findings.
+  follow-up fixes landed as #718 to #734. The report's findings table records each finding's state
+  at run close. A fix's disposition, including what it leaves open, is in its
+  `changelog.d/secaudit-*.md` fragment. A PR title can cover more than the fix closes: #723 names
+  W5-01 to W5-21, but its fragment keeps W5-15 open. The live open set is therefore the table's
+  rows that no fragment reports fixed. No issue label tracks the audit's findings.
 - **Standing gaps** — [`docs/completion/GAPS.md`](docs/completion/GAPS.md): every finding
   between HEAD and the completion definition with a FINISH / CUT / DEFER decision (a dated
   snapshot; live proof counts are in the README's generated proof-status sentence). G-09
