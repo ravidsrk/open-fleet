@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   pinned-demo:
-    runs-on: codebuild-gha-open-fleet-${{ github.run_id }}-${{ github.run_attempt }}
+    runs-on: ubuntu-latest  # CodeBuild project gha-open-fleet allows 1 concurrent build; this job queued alongside others got HTTP 400 and never started (#749 follow-up)
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24; same pin as validate.yml)
