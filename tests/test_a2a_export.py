@@ -60,9 +60,29 @@ class TestA2AExport(unittest.TestCase):
         self.assertIn("deploy", contracts["governance"]["one_way_door_ids"])
 
     def test_report_only_mission_card_uses_report_only_verifier(self):
-        card = self.mod.build_catalog_cards(mission="review-it")
-        self.assertFalse(card["proof"]["mutating"])
-        self.assertEqual(card["contracts"]["output"]["verifier"], "report-only")
+        for name in ("review-it", "attest-it"):
+            with self.subTest(mission=name):
+                card = self.mod.build_catalog_cards(mission=name)
+                self.assertFalse(card["proof"]["mutating"])
+                self.assertEqual(card["proof"]["class"], "report-only")
+                self.assertEqual(card["contracts"]["output"]["verifier"], "report-only")
+                std = self.mod.build_standard_card(ENDPOINT, "JSONRPC", mission=name)
+                self.assertIn("report-only", std["skills"][0]["tags"])
+                self.assertNotIn("planning", std["skills"][0]["tags"])
+
+    def test_planning_mission_cards_use_artifact_verification_semantics(self):
+        # #750 C17: map-it and root-cause are planning units (evidence-manifest.md §3), not
+        # report-only units; A2A export must classify their class, verifier, and skill tags as
+        # planning / artifact-verification rather than report-only.
+        for name in ("map-it", "root-cause"):
+            with self.subTest(mission=name):
+                card = self.mod.build_catalog_cards(mission=name)
+                self.assertFalse(card["proof"]["mutating"])
+                self.assertEqual(card["proof"]["class"], "planning")
+                self.assertEqual(card["contracts"]["output"]["verifier"], "artifact-verification")
+                std = self.mod.build_standard_card(ENDPOINT, "JSONRPC", mission=name)
+                self.assertIn("planning", std["skills"][0]["tags"])
+                self.assertNotIn("report-only", std["skills"][0]["tags"])
 
     def test_cli_check_and_out_file(self):
         with tempfile.TemporaryDirectory() as tmp:

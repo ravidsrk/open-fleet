@@ -194,7 +194,7 @@ class CrashRecoveryBase(unittest.TestCase):
         self.addCleanup(self._no_tripwire_hit)
         self.addCleanup(self._kill_all)
         self.agent("sleeper")
-        self.task = self.restart().task_create(spec="inert work")["task"]["id"]
+        self.task = self.restart().task_create(spec="inert work", run="run-r04")["task"]["id"]
 
     # --- fixtures ---
     def agent(self, kind):
@@ -1306,7 +1306,7 @@ class TestClosedGateSkipsTheSyncGrace(CrashRecoveryBase):
                 if m["subject"].startswith(f"worker_died:{dispatch_id}")]
 
     def test_stop_and_abandon_of_a_never_launched_dispatch_do_not_wait_the_grace(self):
-        tasks = {"stop": self.task, "abandon": self.restart().task_create(spec="inert work 2")["task"]["id"]}
+        tasks = {"stop": self.task, "abandon": self.restart().task_create(spec="inert work 2", run="run-r04")["task"]["id"]}
         for verb, task in tasks.items():
             info = self.unlaunched_danger(task_id=task)
             prov = self.restart()

@@ -67,10 +67,9 @@ head_sha). Rules:
   read), or its sha256 is listed in `artifacts[]` and matches. Untracked and unhashed is a claim ABOUT a file, not evidence.
 - `negative_control` is REQUIRED for any unit that claims a fix or a test: show the proof FAILS when the change is reverted/mutated (a green test over reverted code
   proves nothing). Bind it to a NAMED mutation tool + a PINNED mutant id with a killed/survived verdict — a surviving criterion-violating mutant is a tautological suite
-  and FAILS. Tools: `mutmut`/`cosmic-ray`/`stryker`/`pitest`/`cargo-mutants`/`go-mutesting` (per language), `hand` (compile-preserving hand-written mutant, diff quoted in
-  the artifact), or `revert` (restore `paths` from `base_sha`). `command` + (for `revert`) `paths` make it RE-EXECUTABLE by §2's `--execute-nc` (NON-ZERO under the
-  control in a throwaway worktree at `head_sha`, ZERO at clean `head_sha`); both are REQUIRED in the review-waiver lanes (`dark-eligible`, `--no-gh`), where the control
-  is the only oracle and an artifact nobody ran is just text. Carve-outs: a perf fix compares before/after to the metric contract; a behaviour-preserving deepening
+  and FAILS. Tools: `mutmut`/`cosmic-ray`/`stryker`/`pitest`/`cargo-mutants`/`go-mutesting` (quote mutant diff in artifact for `--execute-nc`), `hand` (diff quoted in
+  artifact), or `revert` (restore `paths` from `base_sha`). `command` + (`revert`) `paths` make it RE-EXECUTABLE by §2's `--execute-nc` (NON-ZERO under control at
+  `head_sha`, ZERO at clean `head_sha`); both are REQUIRED in review-waiver lanes (`dark-eligible`, `--no-gh`, quiet `oss-contribute` `awaiting-maintainer-merge`). Carve-outs: a perf fix compares before/after to the metric contract; a behaviour-preserving deepening
   (reshape-it) proves the seam's pinned mutant stays KILLED at head_sha AND reverting enlarges the interface measurement; a doctrine patch (pin-it) archives the pre-patch
   refutation receipt (the old claim's probe RED, tool `revert`), re-run post-merge.
 - **Coordinator oracle scope:** test-only characterization and documentation units may put `oracle_scope` in the coordinator's digest-bound JSON contract (never the
@@ -86,8 +85,8 @@ head_sha). Rules:
   <cmd>`: a transparent wrapper (the child's exit code always passes through) that appends the record above, fingerprinting the tree with `wtree.sh` BEFORE the run. That
   fingerprint binds a run to content — §2 needs an exit-0 record whose `wtree` is `head_sha`'s tree; anything else is STALE.
 - `pr.reviewed_sha` is the SHA the build-blind reviewer actually reviewed (see reviewed-sha-freshness.md). It gates the merge.
-- `review.artifact` (the local reviewer record at head_sha) is REQUIRED on a mutation unit in the no-gh lane (dispatch `--no-gh`; merge-serialization.md) — the
-  coordinator-attested stand-in for §2's GitHub review lookup; the gh lane and report-only/planning units omit it.
+- `review.artifact` (local reviewer record at head_sha) is REQUIRED on a mutation unit in the no-gh lane (`--no-gh`; merge-serialization.md) and on a quiet `oss-contribute`
+  PR parked `awaiting-maintainer-merge` — the coordinator-attested stand-in when upstream approval is absent; report-only/planning units omit it.
 - `intent` is REQUIRED on mutation units: goal · ruled_out · why, all non-empty (else verification fails) — discarded agent reasoning captured, not the completion oracle.
 - `lighting` is `lit` (default) or `dark-eligible` per gate-classification.md; what the verifier machine-checks is §2's "Lighting is legal" and review-WAIVER rows — the
   stop-list decision stays a human dispatch gate.
@@ -114,9 +113,9 @@ read build-change.md "The invocation" for its command line, lane flags included 
 | Tests pass at that exact SHA in a clean env *(coordinator-run — not verify.py)* | check out `head_sha` in a fresh worktree, run the suite, confirm green — do NOT trust the pasted output alone for the critical path |
 | No credential reached the evidence *(verify.py `check_redaction`)* | the manifest JSON and every artifact it names are scanned for credential shapes (AWS keys, `ghp_`/`github_pat_`, private-key blocks, `password=`/`secret=` with a value, Slack tokens) — built-in patterns always, plus Gitleaks when installed; every consumer uses the same pinned bytes. Unreadable named evidence fails closed. A hit FAILS the unit: a SHA-pinned manifest is permanent, so rotate and re-emit |
 | Each criterion binds to a test that exercises it — criterion↔test binding audit *(coordinator/human sample — not verify.py)* | on a sample of `criteria[].id`s (ALL of them when the unit has ≤3): quote the criterion, quote the test claimed to cover it, and confirm that test goes RED against an implementation that violates the criterion (mutate the behavior the criterion names via the manifest's named mutation tool — the pinned mutant must be KILLED; build-change.md's tautology guard covers authoring, this is its verifier-side twin). A green suite whose tests don't bind (tautological, wrong behavior, passes both ways) fails HERE, not at the clean-env re-run; coverage is logged in the manifest's `binding_audit` |
-| The negative control really fails — EXECUTED, not read | mutation units: `--execute-nc`, exactly as **The executed negative control** below states. Report-only/planning units: the class analogue of §3 is re-checked (quoted lines exist at reviewed_sha / the frozen DAG re-verifies / the repro command re-runs red) |
-| The review is fresh AND real *(mutation units)* | `pr.reviewed_sha == head_sha` (a rebase after review voids it — reviewed-sha-freshness.md — unless `reviewed_wtree` matches the head's tree, i.e. the move was content-identical) AND an APPROVED review at `head_sha` by a non-author OWNER/MEMBER/COLLABORATOR (`gh api repos/<repo>/pulls/<n>/reviews`) — a worker-set `reviewed_sha` is not evidence a review occurred — AND **no** independent reviewer's latest review within this content's history is `CHANGES_REQUESTED`: derive equivalent trees from all authoritative review commits, regardless of the worker's selected SHA, and fail closed on unresolved objects. A later unrelated review cannot withdraw a relevant objection; COMMENTED/DISMISSED on equivalent content can. A second approval cannot override it (#317) |
-| The review-WAIVER lanes are closed to text | `dark-eligible` (gate-classification.md) and the no-gh lane (dispatch `--no-gh`, whose review is the manifest's `review.artifact`, a local record at head_sha) both remove the GitHub authority, leaving the negative control as the ONLY oracle. Both therefore pass ONLY with an EXECUTED control (`--execute-nc`) on top of the out-of-band coordinator contract; without it the unit is RED with a message naming the lane |
+| The negative control really fails — EXECUTED (`--execute-nc`) or disclosed as static corroboration | mutation units: under `--execute-nc` (REQUIRED in waiver lanes and signed `execute_nc: true`), re-executed as below; omitted on the gh lane, `verify.py` binds paths/hunks statically and emits a `NOTE:` that the control was corroborated from the artifact only. Report-only/planning units: §3's analogue is re-checked (quoted lines exist at reviewed_sha / frozen DAG re-verifies / repro command re-runs red) |
+| The review is fresh AND real *(mutation units)* | `pr.reviewed_sha == head_sha` (a rebase after review voids it — reviewed-sha-freshness.md — unless `reviewed_wtree` matches head's tree) AND an APPROVED review at `head_sha` by a non-author OWNER/MEMBER/COLLABORATOR (`gh api repos/<repo>/pulls/<n>/reviews`) — or, for `oss-contribute` at `awaiting-maintainer-merge`, `review.artifact` at `head_sha` + coordinator contract + `--execute-nc` — AND **no** independent reviewer's latest review within this content's history is `CHANGES_REQUESTED`: derive equivalent trees from all authoritative review commits, failing closed on unresolved objects. A later unrelated review cannot withdraw a relevant objection; COMMENTED/DISMISSED on equivalent content can (#317) |
+| The review-WAIVER lanes are closed to text | `dark-eligible` (gate-classification.md), no-gh (`--no-gh`, `review.artifact` at `head_sha`), and quiet `oss-contribute` `awaiting-maintainer-merge` PRs lack upstream `APPROVED` review, leaving the negative control as the decisive oracle: all three pass ONLY with an EXECUTED control (`--execute-nc`) + out-of-band coordinator contract |
 | The change is real on base *(mutation units)* | after merge, a file/symbol from the unit is greppable on `origin/<base_branch>` |
 | Deployed == reviewed (ship only) *(coordinator-verified)* | the deployed revision equals the reviewed/merged SHA |
 | The metric contract is met (measurement units) | the benchmark/coverage/streak satisfies the manifest's `metric_contract` (pre-declared target + confidence + method), not a lucky single run |
@@ -125,17 +124,17 @@ read build-change.md "The invocation" for its command line, lane flags included 
 | Lighting is legal | `lighting` is `lit` or `dark-eligible` AND matches the dispatch-supplied value — a swap fails (verify.py); with dispatch-supplied `--lane`, a lane swap, a Lane-0 mutation, and dark outside Lane A also fail — the stop-list eligibility itself stays a human gate at dispatch (gate-classification.md) |
 
 **The executed negative control** (§2, mutation units, `--execute-nc`): `verify.py` checks out `head_sha` in a throwaway worktree, APPLIES the control (`revert`: `git
-checkout <base_sha> -- <negative_control.paths>`, falling back to `git revert --no-commit base..head` only when no paths are given and the range is linear; `hand`: `git
-apply` the diff quoted in the artifact), seals it as a throwaway commit, and requires `negative_control.command` to exit 0 clean, NON-ZERO under it, 0 clean again (each
-in a fresh worktree/HOME/TMPDIR, so no phase can tell which one it is in). That command is NOT the unit's to choose: the coordinator supplies it out of band as
+checkout <base_sha> -- <negative_control.paths>`, or `git revert --no-commit base..head` when no paths are given and the range is linear; `hand` and diff-quoting mutation
+tools: `git apply` the diff in the artifact), seals it as a throwaway commit, and requires `negative_control.command` to exit 0 clean, NON-ZERO under it, 0 clean again (each
+in a fresh worktree/HOME/TMPDIR). That command is NOT the unit's to choose: the coordinator supplies it out of band as
 `--nc-command` and the manifest must agree, with no fallback (#279) — the `commands[]` ledger is worker-run (`evidence-run.py`), so manifest and ledger are one authority
-twice, and a worker nominating its own command picks one failing under the control and passing clean (`grep -q FIXED calc.py`) without ever running the proof. The control
-must BIND TO THE CHANGE (#280): the paths it restores — and every endpoint in a `hand` diff — must be production paths `base_sha..head_sha` really changes (except the
+twice, and a worker nominating its own command picks one failing under the control and passing clean (`grep -q FIXED calc.py`) without running the proof. The control
+must BIND TO THE CHANGE (#280): the paths it restores — and every endpoint in a mutant diff — must be production paths `base_sha..head_sha` really changes (except the
 coordinator oracle scope above), with every edited coordinate bound to the Git-applied diff before running the proof (offset relocation is refused); context cannot
 authorize a mutant, nor can a decoy or TEST/runner-config path (reverting the test kills the oracle, not the behaviour); the range fallback is refused at admission when
 the unit touches test/oracle inputs; and the RED must carry an assertion failure, not an ImportError (a STILLBORN MUTANT) or silence. A command that passes under the
 control is TAUTOLOGICAL and fails; so does a control that changes nothing, a tool with no replay, a missing command, or any git error. The static artifact is read for
-corroboration (a "survived / not killed" artifact fails) but is NEVER sufficient alone — it is worker-written text.
+corroboration (a "survived / not killed" artifact fails) but is NEVER sufficient alone in waiver lanes — it is worker-written text.
 
 Verification failing on any required check → NOT done; re-dispatch, or SUSPECT if provenance says done but git disagrees.
 

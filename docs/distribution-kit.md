@@ -47,8 +47,8 @@ does-it-load score that doesn't exist yet.
   by email to `chekkutech@gmail.com` (or WhatsApp) and reviews each one by hand.
 - **Fields:** name, logo, install line, repository and category, from
   [distribution.md](distribution.md#claudemarketplacenet).
-- **One-line summary:** *Autonomous fleets that publish their `proof:` tier: 2 external-run and
-  3 self-run missions bound to run reports, 17 doctrine-only.*
+- **One-line summary:** *proof: 2 external-run · 3 self-run · 17 doctrine-only — autonomous fleets
+  whose self-run and external-run missions bind to re-hashable run reports.*
 - **Longer description:** the Anthropic directory blurb above, followed by the proof link
   `https://github.com/ravidsrk/open-fleet/tree/main/docs/runs`.
 
@@ -82,12 +82,13 @@ does-it-load score that doesn't exist yet.
   That's a cache of a long-gone About string. The count, the runtime and the name (`orca-fleet`)
   are all wrong. The `plugin` record (2026-10-07) is count-free but still points at
   `github.com/ravidsrk/orca-fleet`.
-- **Replacement blurb** to ask for. It's the canonical [About text](about.md), which is count-free
-  so it can't go stale the same way:
+- **Replacement blurb** to ask for. Lead with the `proof:` framing (re-read with
+  `python3 runtime/scripts/proof_status.py` before pasting), followed by the count-free
+  [About text](about.md):
 
-  > Outcome-named autonomous fleets for coding agents across Orca, POSIX, and multi-runtime
-  > orchestrators — SHA-bound evidence definition of done, best-of-breed worker recipes, one
-  > router per worker.
+  > **proof: 2 external-run · 3 self-run · 17 doctrine-only.** Outcome-named autonomous fleets for
+  > coding agents across Orca, POSIX, and multi-runtime orchestrators — SHA-bound evidence
+  > definition of done, best-of-breed worker recipes, one router per worker.
 
   Also ask them to update the name to `open-fleet` and the repository URL to
   `https://github.com/ravidsrk/open-fleet`.

@@ -48,6 +48,7 @@ from .base import (
 from .local_state import LocalStateStore
 from ._external import release_claim_on_failure
 from ._external import (
+    _filter_upstream_records,
     call_runner,
     foreign_dirty_paths,
     insert_dispatch,
@@ -368,6 +369,8 @@ class SupersetProvider(RuntimeProvider):
         *,
         run: str | None = None,
         task: str | None = None,
+        terminal_state: str | None = None,
+        include_remote: bool = False,
         limit: int | None = None,
         cursor: str | None = None,
         **kwargs: Any,
@@ -378,7 +381,38 @@ class SupersetProvider(RuntimeProvider):
             terminals = (ws.get("terminals") or []) if isinstance(ws, dict) else []
             live.update(str(t["id"]) for t in terminals if isinstance(t, dict) and t.get("id"))
         with self.state._connect() as conn:
-            rows = conn.execute("SELECT * FROM dispatches WHERE backend = ? ORDER BY created_at ASC", (self.name,)).fetchall()
+            rows = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT * FROM dispatches WHERE backend = ? ORDER BY created_at ASC, dispatch_id ASC",
+                    (self.name,),
+                ).fetchall()
+            ]
+        filtered = [
+            r
+            for r in rows
+            if (not run or r["run_id"] == run)
+            and (not task or r["task_id"] == task)
+            and (not terminal_state or r["terminal_state"] == terminal_state)
+        ]
+        start_idx = 0
+        if cursor is not None and str(cursor) != "":
+            s_cur = str(cursor)
+            if s_cur.isdigit():
+                start_idx = int(s_cur)
+            else:
+                for idx, r in enumerate(filtered):
+                    if r.get("dispatch_id") == s_cur:
+                        start_idx = idx + 1
+                        break
+        total = len(filtered)
+        if limit is not None and int(limit) > 0:
+            lim = int(limit)
+            page_rows = filtered[start_idx : start_idx + lim]
+            next_cursor = str(start_idx + lim) if (start_idx + lim) < total else None
+        else:
+            page_rows = filtered[start_idx:]
+            next_cursor = None
         workers = [
             {
                 "dispatchId": r["dispatch_id"],
@@ -389,12 +423,15 @@ class SupersetProvider(RuntimeProvider):
                 "worktree": r["worktree"],
                 "terminalLive": (r["session_id"] in live) if r["session_id"] else None,
             }
-            for r in rows
-            if (not run or r["run_id"] == run) and (not task or r["task_id"] == task)
+            for r in page_rows
         ]
-        if limit is not None:
-            workers = workers[:limit]
-        return {"workers": workers, "snapshot": raw}
+        snap = raw if include_remote else _filter_upstream_records(raw, page_rows)
+        return {
+            "workers": workers,
+            "scope": {"source": self.name},
+            "page": {"nextCursor": next_cursor},
+            "snapshot": snap,
+        }
 
     def _target(self, eff: dict[str, Any]) -> list[str]:
         return ["--workspace", str(eff["workspaceId"]), "--terminal", str(eff["terminalId"]), "--local", "--json"]

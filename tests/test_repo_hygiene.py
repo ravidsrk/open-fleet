@@ -831,6 +831,30 @@ class EveryWorkflowToolComesFromAHashedLock(unittest.TestCase):
         wanted = {re.split(r"[<>=!~\[ ;]", d, maxsplit=1)[0].lower().replace("_", "-")
                   for d in project["project"]["dependencies"]}
         self.assertEqual(sorted(wanted - set(pinned)), [], "a runtime dependency is not pinned")
+        # #750 C4: pyproject.toml must not declare an unlocked [build-system] (e.g. hatchling)
+        # that `uv sync --locked` resolves dynamically outside uv.lock; package = false keeps the
+        # fixture virtual in uv.lock.
+        self.assertNotIn("build-system", project,
+                         "pyproject.toml must not declare an unlocked [build-system]")
+        self.assertIs(project.get("tool", {}).get("uv", {}).get("package"), False,
+                      "pyproject.toml must set [tool.uv] package = false so uv sync builds no wheel")
+        target_pkg = next(p for p in lock["package"] if p["name"] == "target-app")
+        self.assertEqual(target_pkg.get("source"), {"virtual": "."},
+                         "target-app in uv.lock must use a virtual source rather than editable build")
+
+    def test_setup_uv_steps_pin_version_and_checksum(self):
+        # #750 C4: astral-sh/setup-uv without version + checksum installs whatever uv binary is
+        # latest at run time.
+        for path in WORKFLOWS:
+            text = path.read_text(encoding="utf-8")
+            for job, body in _jobs(text).items():
+                for step in _steps(body):
+                    block = "\n".join(step)
+                    if "astral-sh/setup-uv@" not in block:
+                        continue
+                    with self.subTest(workflow=path.name, job=job):
+                        self.assertRegex(block, r'(?m)^\s*version:\s*"[0-9]+\.[0-9]+\.[0-9]+"\s*$')
+                        self.assertRegex(block, r'(?m)^\s*checksum:\s*"[0-9a-f]{64}"\s*$')
 
     def test_the_image_scan_can_actually_see_one(self):
         digest = "@sha256:" + "c" * 64

@@ -186,6 +186,13 @@ def build_mission_card(skill_dir, door_ids=None):
         raise ExportError(f"{skill_md}: no composed protocols found")
 
     mutating = name in validate.MUTATING_MISSIONS
+    planning = name in getattr(validate, "PLANNING_MISSIONS", {"map-it", "root-cause"})
+    mission_class = "mutation" if mutating else ("planning" if planning else "report-only")
+    verifier = (
+        "runtime/scripts/verify.py"
+        if mutating
+        else ("artifact-verification" if planning else "report-only")
+    )
     card = {
         "schema": CARD_SCHEMA,
         "kind": DESCRIPTOR_KIND,
@@ -205,6 +212,7 @@ def build_mission_card(skill_dir, door_ids=None):
             "tier": proof_tier,
             "evidence": meta.get("proof_evidence"),
             "mutating": mutating,
+            "class": mission_class,
         },
         "identity": identity,
         "composition": {
@@ -219,7 +227,7 @@ def build_mission_card(skill_dir, door_ids=None):
             },
             "output": {
                 "evidence_manifest": "runtime/evidence-manifest.md",
-                "verifier": "runtime/scripts/verify.py" if mutating else "report-only",
+                "verifier": verifier,
                 "failure_handover": "runtime/scripts/watchdog.py --handover",
             },
             "governance": {
@@ -355,7 +363,7 @@ def build_standard_card(endpoint, binding, protocol_version="1.0", agent_version
             "name": d["name"],
             "description": d["description"],
             "tags": ["open-fleet", "mission",
-                     "mutating" if d["proof"]["mutating"] else "report-only",
+                     "mutating" if d["proof"]["mutating"] else d["proof"].get("class", "report-only"),
                      f"proof:{d['proof']['tier']}"],
         })
         missions[d["id"]] = {key: d[key] for key in MISSION_ONLY_KEYS}

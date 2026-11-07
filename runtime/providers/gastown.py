@@ -308,6 +308,7 @@ class GastownProvider(RuntimeProvider):
         if not target_rig:
             raise ProviderError("missing_rig", "gastown worker-start needs a rig (--rig or OPEN_FLEET_GASTOWN_RIG)")
         task_prompt = self.resolve_task_prompt(task_id, prompt)
+        ro_cmd = self._ro_alias_command(agent) if profile == "ro" else None
 
         # The bead description IS the assignment a polecat reads; keep it equal to the prompt.
         bead_id = self.bead_for(task_id) if task_id else None
@@ -320,8 +321,7 @@ class GastownProvider(RuntimeProvider):
 
         if profile == "ro":
             agent_alias = f"{agent}-ro"
-            ro_cmd = self._ro_alias_command(agent)
-            self._run(["gt", "config", "agent", "set", agent_alias, ro_cmd])
+            self._run(["gt", "config", "agent", "set", agent_alias, str(ro_cmd)])
         else:
             agent_alias = agent
 
@@ -449,7 +449,7 @@ class GastownProvider(RuntimeProvider):
             key = (str(eff.get("address")), str(eff.get("beadId") or ""))
             # A polecat name now holding another bead is NOT this dispatch's worker.
             stages[str(r["dispatch_id"])] = live.get(key, "superseded-or-gone")
-        return local_worker_list(self.state, self.name, run=run, task=task, limit=limit, stages=stages, upstream=raw)
+        return local_worker_list(self.state, self.name, run=run, task=task, limit=limit, stages=stages, upstream=raw, **kwargs)
 
     def worker_show(self, *, dispatch_id: str = "", **kwargs: Any) -> dict[str, Any]:
         row = load_dispatch(self.state, dispatch_id, self.name)

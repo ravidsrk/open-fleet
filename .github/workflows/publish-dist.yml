@@ -116,6 +116,7 @@ jobs:
           python3 scripts/bundle.py --check
           python3 scripts/bundle.py --out "$RUNNER_TEMP/dist"
           test -d "$RUNNER_TEMP/dist/skills"
+          test ! -L LICENSE && test ! -L THIRD_PARTY_NOTICES.md
           cp LICENSE THIRD_PARTY_NOTICES.md "$RUNNER_TEMP/dist/"
           printf 'Built by scripts/bundle.py from %s at %s.\nEvery mission under skills/ carries its playbooks and runtime docs under references/.\nSource: https://github.com/%s\n' \
             "${TAG}" "$(git rev-parse HEAD)" "${GITHUB_REPOSITORY}" > "$RUNNER_TEMP/dist/DIST-PROVENANCE.txt"

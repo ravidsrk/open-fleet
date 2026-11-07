@@ -42,6 +42,7 @@ import importlib.util
 import json
 import os
 import re
+import stat
 import subprocess
 from pathlib import Path
 
@@ -124,8 +125,7 @@ def trust_key(batch_path, pin_ref=None):
                         "swap or delete (W3-06)")
     dec = _decisions()
     if dec is None:
-        root = next((p for p in Path(batch_path).resolve().parents if (p / ".git").exists()),
-                    Path(__file__).resolve().parent.parent.parent)
+        root = batch_repo(batch_path)
         if pin_ref or sound_lane() or (root / ".orca" / "human-grant-pubkey").exists():
             raise GateError("decisions.py, which reads and verifies the human grant key, is not "
                             "beside this script — a human answer cannot be told from a typed "
@@ -202,11 +202,63 @@ def _git(root, *args):
         raise GateError(f"git {args[0]} failed to run: {err}") from err
 
 
+def _read_gitfile_text(path):
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        return os.read(fd, 4096).decode("utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    finally:
+        os.close(fd)
+
+
+def _linked_worktree_of(inner, outer):
+    """True when `inner` is a genuine `git worktree add` linked worktree of `outer` (W5-03, C20)."""
+    gitfile, admin = inner / ".git", outer / ".git" / "worktrees"
+    if (outer / ".git").is_symlink():
+        return False
+    text = _read_gitfile_text(gitfile)
+    if not text or not text.startswith("gitdir:"):
+        return False
+    target = Path(text[len("gitdir:"):].strip())
+    target = Path(os.path.realpath(target if target.is_absolute() else inner / target))
+    if target.parent != Path(os.path.realpath(admin)) or not target.is_dir():
+        return False
+    back = _read_gitfile_text(target / "gitdir")
+    if not back:
+        return False
+    back_path = Path(back) if Path(back).is_absolute() else target / back
+    return os.path.realpath(back_path) == os.path.realpath(gitfile)
+
+
 def batch_repo(batch_path):
-    """The repository a batch belongs to, found as decisions.py finds the key's: the first
-    ancestor of the resolved path that carries .git, else this script's own."""
-    real = Path(batch_path).resolve()
-    return next((p for p in real.parents if (p / ".git").exists()), repo_root())
+    """The repository a batch belongs to, found as decisions.py finds the key's: the enclosing
+    repository of the path, refusing nested submodules or planted `.git` directories that are not
+    genuine linked worktrees of their enclosing repository (C20)."""
+    lexical = Path(os.path.abspath(batch_path))
+    real = lexical.resolve()
+    found = []
+    for candidate in (*real.parents, *lexical.parents):
+        if os.path.lexists(candidate / ".git"):
+            rp = Path(os.path.realpath(candidate))
+            if rp not in found:
+                found.append(rp)
+    if not found:
+        return repo_root()
+    if len(found) == 1:
+        return found[0]
+    if len(found) == 2 and _linked_worktree_of(found[0], found[1]):
+        return found[0]
+    raise GateError(
+        f"the nearest repository root {found[0]} is nested inside the repository {found[-1]} "
+        "(a submodule, vendored repository or planted .git): refusing to resolve the governance "
+        "anchor in a nested repository (C20)"
+    )
 
 
 def anchor_commit(root, pin_ref):

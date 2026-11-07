@@ -2417,6 +2417,76 @@ class TheArmsClaudeTalksToTheBroker(unittest.TestCase):
                       "the image does not verify the binary the wrapper execs")
         self.assertNotIn("SECRET", vars(self.wrapper), "the arm's claude knows where a token would be")
 
+    def test_broker_restart_recovers_spend_unsettled_reservations_and_call_ids_c39(self):
+        with tempfile.TemporaryDirectory(prefix="broker-c39-") as tmp:
+            ledger_path = Path(tmp) / "spend.jsonl"
+            first = lb.Ledger(ledger_path, 1.0)
+            c1 = first.reserve("claude-haiku-5-5", 0.35)
+            self.assertEqual(c1, 1)
+            first.settle(c1, 0.25, 200, {}, True)
+            c2 = first.reserve("claude-haiku-5-5", 0.50)
+            self.assertEqual(c2, 2)
+            # Simulate crash before c2 settles: close file without settling c2
+            first.fh.close()
+
+            # Restart against the same ledger: settled spend must include 0.25 + unsettled 0.50 = 0.75,
+            # and next call ID must be 3 (not 1).
+            restarted = lb.Ledger(ledger_path, 1.0)
+            try:
+                self.assertAlmostEqual(restarted.settled, 0.75)
+                self.assertEqual(restarted.n, 2)
+                self.assertIsNone(restarted.reserve("claude-haiku-5-5", 0.30),
+                                  "restarted broker allowed cumulative spend above cap")
+                c3 = restarted.reserve("claude-haiku-5-5", 0.20)
+                self.assertEqual(c3, 3)
+                restarted.settle(c3, 0.15, 200, {}, True)
+            finally:
+                restarted.fh.close()
+
+            summary = lc.spend(ledger_path)
+            self.assertEqual(summary["calls"], 3)
+            self.assertAlmostEqual(summary["settled_usd"], 0.40)
+            self.assertEqual(summary["unsettled_calls"], 1)
+            self.assertAlmostEqual(summary["unsettled_reserved_usd"], 0.50)
+
+            # Corrupt existing ledger must fail closed on reopen
+            corrupt_path = Path(tmp) / "corrupt.jsonl"
+            corrupt_path.write_text('{"event": "open"}\nnot-json\n', encoding="utf-8")
+            with self.assertRaises(ValueError):
+                lb.Ledger(corrupt_path, 1.0)
+
+    def test_refusals_never_persist_client_request_fragments_in_ledger_c41(self):
+        with tempfile.TemporaryDirectory(prefix="broker-c41-") as tmp:
+            ledger_path = Path(tmp) / "spend.jsonl"
+            ledger = lb.Ledger(ledger_path, 5.0)
+            self.addCleanup(ledger.fh.close)
+            secret_field = "secret_field_canary_9911"
+            secret_model = "model_canary_8822"
+            secret_tier = "tier_canary_7733"
+            secret_geo = "geo_canary_6644"
+            secret_speed = "speed_canary_5555"
+            secret_tool = "tool_canary_4466_20260101"
+
+            bodies = [
+                {"model": "claude-haiku-5-5", "max_tokens": 10, "messages": [], secret_field: "1"},
+                {"model": secret_model, "max_tokens": 10, "messages": []},
+                {"model": "claude-haiku-5-5", "max_tokens": 10, "messages": [], "service_tier": secret_tier},
+                {"model": "claude-haiku-5-5", "max_tokens": 10, "messages": [], "inference_geo": secret_geo},
+                {"model": "claude-haiku-5-5", "max_tokens": 10, "messages": [], "speed": secret_speed},
+                {"model": "claude-haiku-5-5", "max_tokens": 10,
+                 "messages": [{"role": "user", "content": [{"type": secret_tool}]}]},
+            ]
+            for doc in bodies:
+                facts = lb._parse_facts(json.dumps(doc).encode())
+                self.assertTrue(facts["why"])
+                # Reset rate-limit timer so every refusal writes a ledger line
+                ledger.written.clear()
+                ledger.refuse("terms", facts["why"], facts["model"])
+
+            raw_ledger = ledger_path.read_text(encoding="utf-8")
+            for canary in (secret_field, secret_model, secret_tier, secret_geo, secret_speed, secret_tool):
+                self.assertNotIn(canary, raw_ledger)
+
 
 if __name__ == "__main__":
     unittest.main()

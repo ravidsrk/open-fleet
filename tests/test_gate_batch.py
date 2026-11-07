@@ -1137,6 +1137,25 @@ class TheOwedSetIsReadWhereTheKeyIsRead(unittest.TestCase):
                 self.assertEqual(r.stdout, "")
                 self.assertIn("not a valid ref name", r.stderr)
 
+    def test_nested_submodule_or_git_dir_cannot_substitute_governance_anchor(self):
+        # C20: an initialized submodule (.git file -> ../../../.git/modules/sub) or nested .git
+        # directory inside the outer repository must fail closed rather than substituting its own
+        # .orca/human-grant-pubkey and empty gate-batch anchor.
+        import subprocess
+        sub_run = self.tmp / "docs" / "runs" / "sub"
+        sub_run.mkdir(parents=True)
+        mod_git = self.tmp / ".git" / "modules" / "sub"
+        subprocess.run(["git", "init", "-q", "--bare", str(mod_git)], check=True)
+        (sub_run / ".git").write_text("gitdir: ../../../.git/modules/sub\n", encoding="utf-8")
+        sub_batch = sub_run / "gate-batch.json"
+        data = gb.init_batch(sub_batch, run_id="run_sub", run_title="sub")
+        gb.save_batch(sub_batch, data)
+
+        r = self.cli("--pin-ref", "refs/remotes/origin/main", "list", "--status", "owed",
+                     batch=sub_batch)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("nested repository", r.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

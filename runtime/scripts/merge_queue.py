@@ -517,16 +517,29 @@ class EffectLock:
 class Git:
     """git in the conductor's clone, under the caller's identity and credentials, never prompting."""
 
+    HARDENED_CONFIG = (
+        "-c", "core.hooksPath=/dev/null",
+        "-c", "core.fsmonitor=false",
+        "-c", "core.symlinks=false",
+    )
+
     def __init__(self, repo_dir: Path, env: dict[str, str]):
         self.repo_dir = str(repo_dir)
         found = shutil.which("git", path=env.get("PATH"))
         self.bin = os.path.abspath(found) if found else "git"
-        self.env = {**env, "GIT_TERMINAL_PROMPT": "0", "GIT_NO_REPLACE_OBJECTS": "1"}
+        self.env = {
+            **env,
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
 
     def run(self, *args: str, check: bool = True, env: dict[str, str] | None = None,
             pass_fds: tuple[int, ...] = (), timeout: float = 300.0, cwd: str | None = None) -> subprocess.CompletedProcess:
         try:
-            proc = subprocess.run([self.bin, "-C", cwd or self.repo_dir, *args], capture_output=True, text=True,
+            proc = subprocess.run([self.bin, *self.HARDENED_CONFIG, "-C", cwd or self.repo_dir, *args],
+                                  capture_output=True, text=True,
                                   env={**self.env, **(env or {})}, pass_fds=pass_fds, timeout=timeout)
         except (OSError, subprocess.SubprocessError) as exc:
             raise QueueError("git_failed", f"git {' '.join(args[:2])} could not run: {exc}") from exc
@@ -1366,26 +1379,160 @@ class MergeQueue:
     # never the conductor's credentials (GH_TOKEN, SSH_AUTH_SOCK, …) — the gate runs the UNIT's own
     # test code — plus whatever the operator lists in MQ_GATE_ENV_KEEP (comma-separated names, e.g.
     # a proxy setting the tests need). The same floor verify.py gives an executed control.
-    GATE_ENV_KEEP = ("PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "TERM", "SHELL", "USER", "LOGNAME")
+    GATE_ENV_KEEP = ("PATH", "LANG", "TERM", "SHELL", "USER", "LOGNAME")
     GATE_ENV_KEEP_PREFIX = ("LC_",)
+    GATE_ENV_FORBID_PREFIX = (
+        "GH_", "GITHUB_", "GIT_", "SSH_", "ORCA_", "OPEN_FLEET_", "MQ_", "AWS_",
+        "ANTHROPIC_", "OPENAI_", "CLAUDE_",
+    )
+    GATE_ENV_FORBID_SUFFIX = ("_TOKEN", "_SECRET", "_KEY", "_PASSWORD", "_CREDENTIAL", "_CREDENTIALS")
+    GATE_ENV_ISOLATED_KEYS = ("HOME", "TMPDIR", "TMP", "TEMP", "XDG_CONFIG_HOME", "GH_CONFIG_DIR")
+    _SHELL_BUILTINS = frozenset({
+        "true", "false", "test", "[", "echo", "printf", "exit", "cd", "pwd",
+        "export", "set", "unset", "shift", "return", "break", "continue", ":",
+        "if", "then", "else", "elif", "fi", "for", "in", "while", "until", "do", "done", "case", "esac",
+    })
 
-    def _gate_env(self, e: dict[str, Any], commit: str) -> dict[str, str]:
-        keep = set(self.GATE_ENV_KEEP) | {k.strip() for k in (self.env.get("MQ_GATE_ENV_KEEP") or "").split(",") if k.strip()}
+    @classmethod
+    def _allowed_extra_keep(cls, name: str) -> bool:
+        up = name.upper()
+        if up in cls.GATE_ENV_ISOLATED_KEYS or up == "PATH":
+            return False
+        if up.startswith(cls.GATE_ENV_FORBID_PREFIX) or up.endswith(cls.GATE_ENV_FORBID_SUFFIX):
+            return False
+        return True
+
+    def _clean_gate_path(self) -> str:
+        raw = self.env.get("PATH") or "/usr/bin:/bin"
+        return os.pathsep.join(
+            os.path.normpath(p)
+            for p in raw.split(os.pathsep)
+            if p and os.path.isabs(p)
+        )
+
+    def _gate_env(self, e: dict[str, Any], commit: str, *, gate_home: Path | None = None,
+                  gate_tmp: Path | None = None) -> dict[str, str]:
+        extra = {
+            k.strip()
+            for k in (self.env.get("MQ_GATE_ENV_KEEP") or "").split(",")
+            if k.strip() and self._allowed_extra_keep(k.strip())
+        }
+        keep = set(self.GATE_ENV_KEEP) | extra
         env = {k: v for k, v in self.env.items() if k in keep or k.startswith(self.GATE_ENV_KEEP_PREFIX)}
-        env.update({"MQ_ENTRY": e["entry_id"], "MQ_UNIT": e["unit"], "MQ_PREFIX_COMMIT": commit, "GIT_TERMINAL_PROMPT": "0"})
+        env["PATH"] = self._clean_gate_path()
+        if gate_home is not None:
+            xdg = gate_home / ".config"
+            gh_cfg = xdg / "gh"
+            xdg.mkdir(mode=0o700, parents=True, exist_ok=True)
+            gh_cfg.mkdir(mode=0o700, parents=True, exist_ok=True)
+            env.update({
+                "HOME": str(gate_home),
+                "XDG_CONFIG_HOME": str(xdg),
+                "GH_CONFIG_DIR": str(gh_cfg),
+            })
+        if gate_tmp is not None:
+            env.update({
+                "TMPDIR": str(gate_tmp),
+                "TMP": str(gate_tmp),
+                "TEMP": str(gate_tmp),
+            })
+        env.update({
+            "MQ_ENTRY": e["entry_id"],
+            "MQ_UNIT": e["unit"],
+            "MQ_PREFIX_COMMIT": commit,
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+        })
         return env
+
+    @classmethod
+    def _extract_gate_executables(cls, gate_cmd: str) -> list[str]:
+        tokens: list[str] = []
+        for seg in re.split(r"(?:\|\||&&|[;|\n])+", gate_cmd):
+            words = seg.strip().split()
+            idx = 0
+            while idx < len(words) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[idx]):
+                idx += 1
+            while idx < len(words) and words[idx] in ("env", "/usr/bin/env", "command", "exec", "nohup"):
+                if words[idx] not in ("command", "exec"):
+                    tokens.append(words[idx])
+                idx += 1
+                while idx < len(words) and (
+                    words[idx].startswith("-") or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[idx])
+                ):
+                    idx += 1
+            if idx < len(words):
+                tok = words[idx].strip("()'\"")
+                if tok and tok not in cls._SHELL_BUILTINS:
+                    tokens.append(tok)
+        return tokens
+
+    def _gate_fingerprint(self, gate_cmd: str, cwd: Path | None = None) -> tuple[str, list[str]]:
+        clean_path = self._clean_gate_path()
+        items: list[dict[str, Any]] = []
+        problems: list[str] = []
+        candidates = ["/bin/sh", *self._extract_gate_executables(gate_cmd)]
+        seen: set[str] = set()
+        for tok in candidates:
+            if tok in seen:
+                continue
+            seen.add(tok)
+            resolved: str | None
+            if "/" in tok:
+                if not os.path.isabs(tok):
+                    if cwd is not None:
+                        cand = (cwd / tok).resolve()
+                        resolved = str(cand) if cand.exists() else None
+                    else:
+                        resolved = None
+                    items.append({"tok": tok, "kind": "relative", "resolved": resolved})
+                    if resolved is None:
+                        continue
+                else:
+                    resolved = tok
+            else:
+                resolved = shutil.which(tok, path=clean_path)
+            if not resolved:
+                items.append({"tok": tok, "resolved": None})
+                continue
+            try:
+                real = os.path.realpath(resolved)
+                st = os.stat(real)
+                digest = hashlib.sha256(Path(real).read_bytes()).hexdigest()
+                items.append({
+                    "tok": tok,
+                    "real": real,
+                    "dev": st.st_dev,
+                    "ino": st.st_ino,
+                    "sha256": digest,
+                })
+            except OSError as exc:
+                problems.append(f"{tok}: {exc}")
+                items.append({"tok": tok, "error": str(exc)})
+        payload = json.dumps({"path": clean_path, "items": items}, sort_keys=True).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest(), problems
 
     def _run_gate(self, gate_cmd: str, commit: str, e: dict[str, Any], timeout: float) -> dict[str, Any]:
         tmp = tempfile.mkdtemp(prefix="mq-gate-")
+        os.chmod(tmp, 0o700)
         checkout = Path(tmp) / "prefix"
+        gate_home = Path(tmp) / "home"
+        gate_tmp = Path(tmp) / "tmp"
+        gate_home.mkdir(mode=0o700)
+        gate_tmp.mkdir(mode=0o700)
         try:
-            # Its own clone (`--shared`: no object copy), never a worktree of the conductor's clone:
-            # a worktree shares the conductor's .git, whose config (core.hooksPath, aliases) and
-            # hooks the unit's test code could rewrite to run under the conductor's next git call
-            # (2026-10-26 review). The prefix commit is read through the clone's alternates.
-            self.git.run("clone", "--quiet", "--shared", "--no-checkout", self.git.repo_dir, str(checkout))
+            # Isolated object copy (`git init` + direct `fetch` of `commit`), never `--shared` or a
+            # worktree of the conductor's clone, with `.git/FETCH_HEAD` removed so the gate checkout
+            # carries neither `.git/objects/info/alternates` nor `remote.origin.url` nor `FETCH_HEAD`
+            # pointing at the conductor's repo (C21).
+            self.git.run("init", "--quiet", str(checkout))
+            self.git.run("fetch", "--quiet", "--no-tags", self.git.repo_dir, commit, cwd=str(checkout))
             self.git.run("checkout", "--quiet", "--detach", commit, cwd=str(checkout))
-            env = self._gate_env(e, commit)
+            (checkout / ".git" / "FETCH_HEAD").unlink(missing_ok=True)
+            env = self._gate_env(e, commit, gate_home=gate_home, gate_tmp=gate_tmp)
+            pre_fp, pre_problems = self._gate_fingerprint(gate_cmd, cwd=checkout)
+            plan_fp, _ = self._gate_fingerprint(gate_cmd)
             # Its own session, so a timeout kills everything the gate started: a grandchild left
             # holding the output pipe would otherwise stretch the timeout to its own lifetime.
             proc = subprocess.Popen(["/bin/sh", "-c", gate_cmd], cwd=checkout, env=env, stdout=subprocess.PIPE,
@@ -1398,15 +1545,19 @@ class MergeQueue:
                     os.killpg(proc.pid, signal.SIGKILL)
                 proc.communicate()
                 code, tail = 124, f"gate timed out after {timeout}s"
-            return {"cmd": gate_cmd, "exit": code, "tail": tail, "commit": commit}
+            post_fp, post_problems = self._gate_fingerprint(gate_cmd, cwd=checkout)
+            post_plan_fp, _ = self._gate_fingerprint(gate_cmd)
+            if pre_problems or post_problems or pre_fp != post_fp or plan_fp != post_plan_fp:
+                code = 1 if code == 0 else code
+                tail = (tail + "\n[C19: gate executable changed during gate execution]")[-500:]
+            return {"cmd": gate_cmd, "exit": code, "tail": tail, "commit": commit, "fingerprint": post_plan_fp}
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
-    @staticmethod
-    def plan_passed(e: dict[str, Any], gate_cmd: str | None) -> bool:
+    def plan_passed(self, e: dict[str, Any], gate_cmd: str | None) -> bool:
         """Whether the entry's saved plan covers this request: a tested merge tree and, when a gate
-        is asked for, THAT gate passed on THAT prefix commit (PR #647: a saved plan that ran no
-        gate, or another one, let a requested gate be skipped)."""
+        is asked for, THAT gate passed on THAT prefix commit with the same resolved executable
+        fingerprint (PR #647, C19)."""
         if not e.get("tested_tree"):
             return False
         if gate_cmd is None:
@@ -1415,8 +1566,15 @@ class MergeQueue:
             gate = json.loads(e.get("gate_json") or "null")
         except ValueError:
             return False
-        return (isinstance(gate, dict) and gate.get("cmd") == gate_cmd and gate.get("exit") == 0
-                and bool(e.get("prefix_commit")) and gate.get("commit") == e.get("prefix_commit"))
+        if not (isinstance(gate, dict) and gate.get("cmd") == gate_cmd and gate.get("exit") == 0
+                and bool(e.get("prefix_commit")) and gate.get("commit") == e.get("prefix_commit")):
+            return False
+        saved_fp = gate.get("fingerprint")
+        if saved_fp is not None:
+            current_fp, problems = self._gate_fingerprint(gate_cmd)
+            if problems or saved_fp != current_fp:
+                return False
+        return True
 
     def merge(self, token: str, *, entry_id: str | None = None, delete_branch: bool = True,
               require_gate: str | None = None) -> dict[str, Any]:

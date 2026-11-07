@@ -361,6 +361,83 @@ class BundleClosureTests(unittest.TestCase):
                         finally:
                             path.write_bytes(saved)
 
+    def test_source_symlinks_are_refused_across_all_bundle_inputs(self):
+        # #750 C2: shutil.copy2 / shutil.copytree dereference source symlinks into regular files,
+        # allowing host content outside the tagged tree to be published into dist across mission,
+        # runtime, protocol, plugin, support-document, root-doc, and directory variants.
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            outside = base / "outside-secret.txt"
+            outside.write_text("TOP_SECRET_HOST_CONTENT\n", encoding="utf-8")
+            outside_dir = base / "outside-dir"
+            outside_dir.mkdir()
+            (outside_dir / "leaked.py").write_text("SECRET = 'leaked'\n", encoding="utf-8")
+            source = base / "source"
+            for directory in ("skills", "playbooks", "runtime", "docs", ".claude-plugin", "hooks"):
+                shutil.copytree(ROOT / directory, source / directory)
+            for name in ("ARCHITECTURE.md", "LICENSE", "THIRD_PARTY_NOTICES.md"):
+                shutil.copy2(ROOT / name, source / name)
+            with mock.patch.object(bundle, "ROOT", source), \
+                    mock.patch.object(bundle, "SKILLS_DIR", source / "skills"), \
+                    mock.patch.object(bundle.validate, "PLAYBOOKS_DIR", source / "playbooks"), \
+                    mock.patch.object(bundle.validate, "RUNTIME_DIR", source / "runtime"):
+                # 1. Mission extra file symlink & directory symlink
+                mission_link = source / "skills" / "ship-it" / "leaked.txt"
+                mission_link.symlink_to(outside)
+                try:
+                    built, problems = bundle.build(base / "out-mission-file")
+                    self.assertEqual(built, 0)
+                    self.assertTrue(any("source symlink refused: skills/ship-it/leaked.txt" in p
+                                        for p in problems), problems)
+                    self.assertFalse((base / "out-mission-file").exists())
+                finally:
+                    mission_link.unlink()
+
+                mission_dir_link = source / "skills" / "ship-it" / "resources"
+                mission_dir_link.symlink_to(outside_dir, target_is_directory=True)
+                try:
+                    built, problems = bundle.build(base / "out-mission-dir")
+                    self.assertEqual(built, 0)
+                    self.assertTrue(any("source symlink refused: skills/ship-it/resources" in p
+                                        for p in problems), problems)
+                finally:
+                    mission_dir_link.unlink()
+
+                # 2. Replaced existing files across runtime, protocol, plugin, support-doc, root-doc
+                for relative in ("runtime/scripts/verify.py", "runtime/scripts/extra_helper.py",
+                                 "playbooks/build-change.md", "runtime/evidence-manifest.md",
+                                 ".claude-plugin/plugin.json", ".claude-plugin/bundle-README.md",
+                                 "LICENSE", "docs/runs/TEMPLATE.md", "ARCHITECTURE.md"):
+                    with self.subTest(symlink_input=relative):
+                        target = source / relative
+                        saved = target.read_bytes() if target.exists() else None
+                        if saved is not None:
+                            target.unlink()
+                        target.symlink_to(outside)
+                        try:
+                            built, problems = bundle.build(base / "out-file")
+                            self.assertEqual(built, 0)
+                            self.assertTrue(any(f"source symlink refused: {relative}" in p
+                                                for p in problems), (relative, problems))
+                        finally:
+                            target.unlink()
+                            if saved is not None:
+                                target.write_bytes(saved)
+
+                # 3. Directory ancestor symlink variant (e.g. docs/runs or hooks swapped for symlink)
+                hooks_dir = source / "hooks"
+                hooks_backup = base / "hooks-backup"
+                shutil.move(str(hooks_dir), str(hooks_backup))
+                hooks_dir.symlink_to(hooks_backup, target_is_directory=True)
+                try:
+                    built, problems = bundle.build(base / "out-dir-anc")
+                    self.assertEqual(built, 0)
+                    self.assertTrue(any("source symlink refused: hooks" in p for p in problems),
+                                    problems)
+                finally:
+                    hooks_dir.unlink()
+                    shutil.move(str(hooks_backup), str(hooks_dir))
+
     def test_the_bundle_carries_what_the_directory_listing_reads(self):
         # #235: the developer portal blocked dist for having no README of at least 40 words in the
         # plugin folder, and takes .claude-plugin/icon.png as the listing icon: a square PNG or

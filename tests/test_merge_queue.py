@@ -350,6 +350,25 @@ class GateSelection(QueueCase):
         self.assertEqual(ran.read_text().splitlines(), ["ran"], "a passed gate ran again for the same prefix")
         self.assertEqual(len(self.w.merge_log()), 1)
 
+    def test_a_saved_plan_whose_gate_executable_was_replaced_is_not_reused_c19(self):
+        bin_dir = self.w.tmp / "gate-bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        tool = bin_dir / "gate-check"
+        tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        tool.chmod(0o755)
+        self.w.env["PATH"] = f"{bin_dir}:{self.w.env.get('PATH', '/usr/bin:/bin')}"
+
+        token, entry = self._plan("--gate-cmd", "gate-check")
+        # Now replace the gate executable on PATH so it exits 1
+        tool.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        tool.chmod(0o755)
+        rc, out = self.w.cli("merge", "--token", token, "--require-gate", "gate-check")
+        self.assertEqual((rc, out.get("code")), (1, "gate_not_run"), out)
+        self.w.cli("release", "--token", token)
+        rc, out = self.w.cli("drain", "--base", W.BASE, "--holder", "c1", "--gate-cmd", "gate-check", "--ack")
+        self.assertEqual((rc, out.get("code")), (1, "queue_frozen"), out)
+        self.assertEqual(self.state_of(entry), "failed")
+
     def test_merge_refuses_a_plan_that_did_not_pass_the_required_gate(self):
         token, entry = self._plan()
         rc, out = self.w.cli("merge", "--token", token, "--require-gate", "true")
@@ -500,6 +519,28 @@ class GateRunsIsolated(QueueCase):
         self.assertNotIn("worktrees", common)
         self.assertEqual(self.w.git(self.w.conductor, "worktree", "list").count("\n") + 1, 1,
                          "a gate worktree was left in the conductor's clone")
+
+    def test_the_gate_has_no_alternates_no_origin_remote_and_isolated_home_and_tmp_c21(self):
+        conductor_home = self.w.tmp / "conductor-home"
+        conductor_home.mkdir(parents=True, exist_ok=True)
+        (conductor_home / ".netrc").write_text("machine github.invalid login secret\n", encoding="utf-8")
+        self.w.env["HOME"] = str(conductor_home)
+        self.w.env["TMPDIR"] = str(self.w.tmp)
+        self.w.env["GH_TOKEN"] = "ghp_SENTINEL"
+        self.w.env["MQ_GATE_ENV_KEEP"] = "GH_TOKEN,HOME,TMPDIR,ORCA_MERGE_QUEUE_DB,SAFE_VAR"
+        self.w.env["SAFE_VAR"] = "allowed"
+        tail = self._gate_tail(
+            'test ! -e .git/objects/info/alternates && echo "alt=absent"; '
+            'git remote get-url origin >/dev/null 2>&1 || echo "origin=absent"; '
+            'test ! -e "$HOME/.netrc" && echo "netrc=absent"; '
+            'echo "home=$HOME tmp=$TMPDIR gh=[$GH_TOKEN] safe=[$SAFE_VAR]"'
+        )
+        self.assertIn("alt=absent", tail)
+        self.assertIn("origin=absent", tail)
+        self.assertIn("netrc=absent", tail)
+        self.assertIn("gh=[] safe=[allowed]", tail)
+        self.assertNotIn(str(conductor_home), tail)
+        self.assertNotIn(str(self.w.conductor), tail)
 
 
 class GitLaneFreshness(Freshness):

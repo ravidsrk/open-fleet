@@ -230,10 +230,6 @@ class TestGastownProvider(ProviderTestBase):
         task_id = created["task"]["id"]
         self.assertEqual(created["task"]["beadId"], "bd-1")
 
-        prov.task_update(task_id=task_id, status="completed")
-        self.assertEqual(calls[-1], ["bd", "update", "bd-1", "--status", "closed", "--json"])
-        self.assertEqual(len(prov.task_list()["tasks"]), 1)
-
         # PROFILE=ro registers `<agent>-ro` alias and slings the BEAD with `--no-merge`
         ro_res = prov.worker_start(task_id=task_id, agent="claude", profile="ro")
         alias = [c for c in calls if c[:4] == ["gt", "config", "agent", "set"]][-1]
@@ -243,9 +239,14 @@ class TestGastownProvider(ProviderTestBase):
         self.assertEqual(ro_res["launch"]["effective"]["agentAlias"], "claude-ro")
         self.assertEqual(ro_res["worktree"], str(wt))
 
+        prov.task_update(task_id=task_id, status="ready")
         prov.worker_start(task_id=task_id, agent="codex", profile="rw")
         sling = [c for c in calls if c[:2] == ["gt", "sling"]][-1]
         self.assertEqual(sling, ["gt", "sling", "bd-1", "rig-alpha", "--agent", "codex", "--no-merge"])
+
+        prov.task_update(task_id=task_id, status="completed")
+        self.assertEqual(calls[-1], ["bd", "update", "bd-1", "--status", "closed", "--json"])
+        self.assertEqual(len(prov.task_list()["tasks"]), 1)
 
         # Mail send & check bridge (worker mailboxes are scoped: read the recipient's own)
         prov.send_message(subject="done", msg_type="worker_done", to="mayor", payload="ok")
@@ -668,6 +669,196 @@ class TestMulticlaudeProvider(ProviderTestBase):
         self.assertEqual(ctx.exception.code, "manifest_required")
         self.assertIsNone(prov._verification("mc-1"))
         self.assertFalse(any(m["command"] == "complete_agent" for m in msgs))
+
+
+class TestExternalAdversarialRemediation750(ProviderTestBase):
+    """#750 C8, C24, C29, C33, C37, C38: External orchestrator provider regressions."""
+
+    def test_c8_preserve_worker_head_readback_mismatch_refuses_cleanup(self) -> None:
+        import importlib
+        ext = importlib.import_module("runtime.providers._external")
+        head_sha = "a" * 40
+        mismatch_sha = "b" * 40
+        wt = str(self.tmp_path / "wt")
+
+        def fake_run(argv: list[str]) -> str:
+            if argv[-2:] == ["--verify", "HEAD"]:
+                return head_sha + "\n"
+            if "update-ref" in argv:
+                return ""
+            if len(argv) >= 2 and argv[-2] == "--verify" and argv[-1].startswith("refs/open-fleet/preserved/"):
+                return mismatch_sha + "\n"
+            return str(self.tmp_path / ".git") + "\n"
+
+        with self.assertRaises(ProviderError) as ctx:
+            ext.preserve_worker_head(fake_run, wt, "disp-c8")
+        self.assertEqual(ctx.exception.code, "preserve_failed")
+        self.assertIn(mismatch_sha, ctx.exception.message)
+
+    def test_c24_and_c38_multiclaude_release_preserves_head_and_purges_private_messages(self) -> None:
+        import os
+        import stat
+        home = self.tmp_path / "mc-home"
+        (home / "repos" / "proj").mkdir(parents=True)
+        wt = home / "wts" / "proj" / "mc-24"
+        wt.mkdir(parents=True)
+        head_sha = "1" * 40
+        common_dir = self.tmp_path / "common-git"
+        common_dir.mkdir()
+        msgs: list[dict[str, object]] = []
+        git_calls: list[list[str]] = []
+
+        def runner(msg: dict[str, object], **_kw: object) -> dict[str, object]:
+            msgs.append(msg)
+            if msg["command"] == "spawn_agent":
+                (wt / ".claude").mkdir(parents=True, exist_ok=True)
+                src = home / "repos" / "proj" / ".multiclaude" / "hooks.json"
+                if src.exists():
+                    (wt / ".claude" / "settings.json").write_text(src.read_text())
+                return {"success": True, "data": {"name": "mc-24", "worktree_path": str(wt)}}
+            return {"success": True, "data": {"completed": True}}
+
+        def cli_runner(argv: list[str], **_kw: object) -> dict[str, object]:
+            git_calls.append(argv)
+            if "--verify" in argv and argv[-1] in ("HEAD", "HEAD^{commit}"):
+                return {"stdout": head_sha + "\n", "raw": head_sha + "\n", "stderr": "", "returncode": 0}
+            if "--verify" in argv and argv[-1].startswith("refs/open-fleet/preserved/"):
+                return {"stdout": head_sha + "\n", "raw": head_sha + "\n", "stderr": "", "returncode": 0}
+            if "--git-common-dir" in argv:
+                return {"stdout": str(common_dir) + "\n", "raw": str(common_dir) + "\n", "stderr": "", "returncode": 0}
+            return {"stdout": "", "raw": "", "stderr": "", "returncode": 0}
+
+        prov = MulticlaudeProvider(state=self.state, runner=runner, cli_runner=cli_runner, home=home, repo="proj")
+        prov.worker_start(task_id="t-mc", agent="claude", profile="ro", prompt="Audit", name="mc-24")
+
+        # C38: send_message creates 0700 dirs and 0600 message file even under umask(0)
+        old_umask = os.umask(0)
+        try:
+            prov.send_message(subject="hi", msg_type="info", to="mc-24", payload="secret")
+        finally:
+            os.umask(old_umask)
+        msg_dir = home / "messages" / "proj" / "mc-24"
+        msg_files = list(msg_dir.glob("*.json"))
+        self.assertGreaterEqual(len(msg_files), 1)
+        self.assertEqual(stat.S_IMODE(msg_dir.stat().st_mode), 0o700)
+        for mf in msg_files:
+            self.assertEqual(stat.S_IMODE(mf.stat().st_mode), 0o600)
+
+        # Record durable verification in state DB and release
+        with self.state._connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO multiclaude_verifications(dispatch_id, sha, worktree, verified_at) VALUES (?, ?, ?, ?)",
+                ("mc-24", head_sha, str(wt), 1.0),
+            )
+        rel = prov.worker_fence(verb="release", dispatch_id="mc-24")
+        self.assertEqual(rel["state"], "released")
+        self.assertEqual(rel["preservedRef"], "refs/open-fleet/preserved/mc-24")
+        self.assertEqual(rel["preserved"]["sha"], head_sha)
+        self.assertTrue(any("update-ref" in c for c in git_calls))
+        self.assertTrue(any(m["command"] == "complete_agent" for m in msgs))
+        # C38: agent message files purged on release
+        self.assertEqual(list(msg_dir.glob("*.json")), [])
+
+    def test_c29_and_c33_external_worker_start_claims_local_task_and_binds_retry_payload(self) -> None:
+        wt = self.tmp_path / "wt-ext"
+        wt.mkdir()
+
+        def wt_runner(argv: list[str], **_kw: object) -> object:
+            if argv[:3] == ["wt", "switch", "--create"]:
+                return {"action": "created", "branch": argv[3], "path": str(wt)}
+            if argv[:2] == ["wt", "list"]:
+                return {"items": [{"branch": "feat/t1", "worktree": {"path": str(wt)}}]}
+            return {} if argv[0] == "wt" else ""
+
+        prov = WorktrunkProvider(
+            state=self.state,
+            runner=wt_runner,
+            install_hooks=lambda w, a, p: {},
+        )
+        t1 = self.state.task_create(spec="implement x")["task"]["id"]
+        t2 = self.state.task_create(spec="dependent", deps=[t1])["task"]["id"]
+
+        # Non-ready task is refused with task_not_startable
+        with self.assertRaises(ProviderError) as ctx:
+            prov.worker_start(task_id=t2, agent="claude", profile="rw", prompt="go")
+        self.assertEqual(ctx.exception.code, "task_not_startable")
+
+        # Starting ready t1 transitions it to dispatched
+        res1 = prov.worker_start(
+            task_id=t1, agent="claude", profile="rw", prompt="go", retry_request="req-wt-1"
+        )
+        st = {t["id"]: t["status"] for t in self.state.task_list()["tasks"]}
+        self.assertEqual(st[t1], "dispatched")
+
+        # Duplicate launch without matching retry_request is refused because t1 is now dispatched
+        with self.assertRaises(ProviderError) as ctx:
+            prov.worker_start(task_id=t1, agent="claude", profile="rw", prompt="go")
+        self.assertEqual(ctx.exception.code, "task_not_startable")
+
+        # Exact retry with same retry_request returns cached receipt
+        res_retry = prov.worker_start(
+            task_id=t1, agent="claude", profile="rw", prompt="go", retry_request="req-wt-1"
+        )
+        self.assertEqual(res1["dispatchId"], res_retry["dispatchId"])
+
+        # C33: Reusing retry_request with different prompt raises request_mismatch
+        with self.assertRaises(ProviderError) as ctx:
+            prov.worker_start(
+                task_id=t1, agent="claude", profile="rw", prompt="different", retry_request="req-wt-1"
+            )
+        self.assertEqual(ctx.exception.code, "request_mismatch")
+
+    def test_c37_external_worker_list_filters_paginates_and_scopes_upstream(self) -> None:
+        wt = self.tmp_path / "wt-list"
+        wt.mkdir()
+
+        def wt_runner(argv: list[str], **_kw: object) -> object:
+            if argv[:3] == ["wt", "switch", "--create"]:
+                return {"action": "created", "branch": argv[3], "path": str(wt)}
+            if argv[:2] == ["wt", "list"]:
+                return {
+                    "items": [
+                        {"branch": "feat/w1", "worktree": {"path": str(wt)}},
+                        {"branch": "feat/foreign", "worktree": {"path": "/tmp/foreign"}},
+                    ]
+                }
+            return {} if argv[0] == "wt" else ""
+
+        prov = WorktrunkProvider(
+            state=self.state,
+            runner=wt_runner,
+            install_hooks=lambda w, a, p: {},
+        )
+        t1 = self.state.task_create(spec="one")["task"]["id"]
+        t2 = self.state.task_create(spec="two")["task"]["id"]
+        w1 = prov.worker_start(task_id=t1, agent="claude", profile="ro", prompt="one")
+        w2 = prov.worker_start(task_id=t2, agent="claude", profile="ro", prompt="two")
+
+        # Default include_remote=False emits scope + page and paginates with cursor + limit
+        listed = prov.worker_list(limit=1)
+        self.assertEqual(len(listed["workers"]), 1)
+        self.assertEqual(listed["scope"]["source"], "worktrunk")
+        self.assertIsNotNone(listed["page"]["nextCursor"])
+
+        page2 = prov.worker_list(cursor=listed["page"]["nextCursor"], limit=1)
+        self.assertEqual(len(page2["workers"]), 1)
+        self.assertIsNone(page2["page"]["nextCursor"])
+        self.assertEqual(
+            {listed["workers"][0]["dispatchId"], page2["workers"][0]["dispatchId"]},
+            {w1["dispatchId"], w2["dispatchId"]},
+        )
+
+        # GastownProvider filters raw upstream records when include_remote=False
+        gt_prov = GastownProvider(
+            state=self.state,
+            runner=lambda argv, **_kw: [{"name": "Toast"}, {"name": "ForeignPolecat"}] if argv[:3] == ["gt", "polecat", "list"] else {},
+            rig="rig-alpha",
+            install_hooks=lambda w, a, p: {},
+        )
+        gt_list = gt_prov.worker_list(include_remote=False)
+        self.assertEqual(gt_list["upstream"], [])
+        gt_list_remote = gt_prov.worker_list(include_remote=True)
+        self.assertEqual(len(gt_list_remote["upstream"]), 2)
 
 
 if __name__ == "__main__":

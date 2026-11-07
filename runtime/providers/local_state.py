@@ -15,7 +15,9 @@ Provides a zero-daemon, stdlib-only (`sqlite3` in WAL mode) state store shared b
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import hashlib
+import importlib.util
 import json
 import os
 import socket
@@ -29,22 +31,39 @@ from typing import Any
 
 from .base import ProviderError, env_get
 
+_gitexec_spec = importlib.util.spec_from_file_location(
+    "local_state_gitexec", Path(__file__).resolve().parent.parent / "scripts" / "gitexec.py"
+)
+assert _gitexec_spec and _gitexec_spec.loader
+gitexec = importlib.util.module_from_spec(_gitexec_spec)
+_gitexec_spec.loader.exec_module(gitexec)
+
 TERMINAL_MESSAGE_TYPES = ("worker_done", "merge_ready", "escalation")
 # task_ops.py vocabulary (pending|ready|dispatched|completed|failed) plus the DAG hold `blocked`.
 TASK_STATUSES = ("pending", "ready", "dispatched", "completed", "failed", "blocked")
 FENCED_DISPATCH_STATES = ("stopped", "abandoned", "released")
 COORDINATOR_ALIAS = "coordinator"
+ACTIVE_REQUEST_PAYLOAD_SHA: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "active_request_payload_sha", default=None
+)
 
 
-def _repo_state_id(start: str | None = None) -> str:
+def request_payload_sha256(payload: dict[str, Any]) -> str:
+    """Canonical SHA-256 of a request's semantic arguments (#750 C33)."""
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _repo_state_id(start: str | None = None, env: dict[str, str] | None = None) -> str:
     """Stable per-repository id shared by the main checkout and all of its linked worktrees."""
     cwd = start or os.getcwd()
     root = ""
     try:
         proc = subprocess.run(
-            ["git", "-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            gitexec.argv("-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"),
             capture_output=True,
             timeout=10,
+            env=gitexec.custody_env(env),
         )
         # Bytes, minus the one trailing newline: a `\r`, a trailing space or a non-UTF-8 byte in
         # the path is the path (text mode turned `\r` into `\n`, and died on the byte).
@@ -70,7 +89,7 @@ def default_db_path(env: dict[str, str] | None = None) -> Path:
     # common dir so a coordinator and the workers in its linked worktrees share ONE store while
     # unrelated repositories never share a DB.
     start = (env or os.environ).get("OPEN_FLEET_REPO_ROOT") or env_get("OPEN_FLEET_CLI_CWD", "ORCA_CLI_CWD", env, "")
-    return Path.home() / ".open-fleet" / "state" / _repo_state_id(start or None) / "runtime.db"
+    return Path.home() / ".open-fleet" / "state" / _repo_state_id(start or None, env) / "runtime.db"
 
 
 class _ClosingConnection(sqlite3.Connection):
@@ -382,6 +401,8 @@ class LocalStateStore:
         that fails after claiming calls release_request so a retry can act at once."""
         if not request_id:
             return None
+        if payload_sha256 is None:
+            payload_sha256 = ACTIVE_REQUEST_PAYLOAD_SHA.get()
         now = time.time()
         host = socket.gethostname()
         with self._connect() as conn:
@@ -442,17 +463,42 @@ class LocalStateStore:
             row = conn.execute("SELECT * FROM requests WHERE request_id = ?", (request_id,)).fetchone()
         return dict(row) if row else None
 
-    def save_request(self, request_id: str | None, method: str, state: str, response: dict[str, Any]) -> None:
+    def _save_request_in_tx(
+        self,
+        conn: sqlite3.Connection,
+        request_id: str | None,
+        method: str,
+        state: str,
+        response: dict[str, Any],
+        payload_sha256: str | None = None,
+    ) -> None:
+        """Upsert the request record inside the caller's active transaction (#750 C31)."""
+        if not request_id:
+            return
+        if payload_sha256 is None:
+            payload_sha256 = ACTIVE_REQUEST_PAYLOAD_SHA.get()
+        conn.execute(
+            "INSERT INTO requests(request_id, method, state, response_json, created_at, payload_sha256) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(request_id) DO UPDATE SET method = excluded.method, state = excluded.state, "
+            "response_json = excluded.response_json, "
+            "payload_sha256 = COALESCE(requests.payload_sha256, excluded.payload_sha256)",
+            (request_id, method, state, json.dumps(response), time.time(), payload_sha256),
+        )
+
+    def save_request(
+        self,
+        request_id: str | None,
+        method: str,
+        state: str,
+        response: dict[str, Any],
+        payload_sha256: str | None = None,
+    ) -> None:
         """Complete the claimed request: an upsert that keeps the claim's payload digest and intent."""
         if not request_id:
             return
         with self._connect() as conn:
-            conn.execute(
-                "INSERT INTO requests(request_id, method, state, response_json, created_at) VALUES (?, ?, ?, ?, ?) "
-                "ON CONFLICT(request_id) DO UPDATE SET method = excluded.method, state = excluded.state, "
-                "response_json = excluded.response_json",
-                (request_id, method, state, json.dumps(response), time.time()),
-            )
+            self._save_request_in_tx(conn, request_id, method, state, response, payload_sha256)
 
     def request_show(self, request_id: str) -> dict[str, Any]:
         with self._connect() as conn:
@@ -568,18 +614,40 @@ class LocalStateStore:
         retry_request: str | None = None,
         initial_status: str | None = None,
     ) -> dict[str, Any]:
-        cached = self.get_or_record_request(retry_request, "task-create")
+        run_id = run or "default"
+        deps_list = list(deps or [])
+        payload_sha = request_payload_sha256(
+            {
+                "spec": spec,
+                "title": title,
+                "display_name": display_name,
+                "deps": deps_list,
+                "parent": parent,
+                "run": run_id,
+                "initial_status": initial_status,
+            }
+        )
+        cached = self.get_or_record_request(retry_request, "task-create", payload_sha)
         if cached:
             return cached
         try:
-            run_id = run or "default"
-            deps_list = list(deps or [])
             now = time.time()
             task_id = f"task_{uuid.uuid4().hex[:10]}"
             if initial_status is not None and initial_status not in TASK_STATUSES:
                 raise ProviderError("invalid_status", f"unknown task status {initial_status!r} (want {'|'.join(TASK_STATUSES)})")
             with self._connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
+                if parent is not None:
+                    p_row = conn.execute("SELECT run_id FROM tasks WHERE id = ?", (parent,)).fetchone()
+                    if not p_row:
+                        conn.execute("ROLLBACK")
+                        raise ProviderError("task_not_found", f"parent task {parent!r} not found")
+                    if p_row["run_id"] != run_id:
+                        conn.execute("ROLLBACK")
+                        raise ProviderError(
+                            "cross_run_access",
+                            f"parent task {parent!r} belongs to run {p_row['run_id']!r}, not {run_id!r}",
+                        )
                 if initial_status is not None:
                     status = initial_status
                 elif not deps_list:
@@ -587,14 +655,22 @@ class LocalStateStore:
                 else:
                     placeholders = ",".join("?" for _ in deps_list)
                     rows = conn.execute(
-                        f"SELECT id, status FROM tasks WHERE id IN ({placeholders})",
+                        f"SELECT id, status, run_id FROM tasks WHERE id IN ({placeholders})",
                         deps_list,
                     ).fetchall()
                     by_id = {r["id"]: r["status"] for r in rows}
+                    by_run = {r["id"]: r["run_id"] for r in rows}
                     missing = [d for d in deps_list if d not in by_id]
                     if missing:
                         conn.execute("ROLLBACK")
                         raise ProviderError("task_not_found", f"dependency task(s) not found: {', '.join(missing)}")
+                    foreign = [d for d in deps_list if by_run.get(d) != run_id]
+                    if foreign:
+                        conn.execute("ROLLBACK")
+                        raise ProviderError(
+                            "cross_run_access",
+                            f"dependency task(s) {', '.join(foreign)} belong to another run, not {run_id!r}",
+                        )
                     if any(by_id.get(d) in ("failed", "blocked") for d in deps_list):
                         status = "blocked"
                     elif all(by_id.get(d) == "completed" for d in deps_list):
@@ -613,19 +689,19 @@ class LocalStateStore:
                         "INSERT OR IGNORE INTO task_deps(task_id, dep_id) VALUES (?, ?)",
                         (task_id, dep),
                     )
-                conn.execute("COMMIT")
-            res = {
-                "task": {
-                    "id": task_id,
-                    "status": status,
-                    "spec": spec,
-                    "title": title or display_name or task_id,
-                    "deps": deps_list,
-                    "parent": parent,
-                    "runId": run_id,
+                res = {
+                    "task": {
+                        "id": task_id,
+                        "status": status,
+                        "spec": spec,
+                        "title": title or display_name or task_id,
+                        "deps": deps_list,
+                        "parent": parent,
+                        "runId": run_id,
+                    }
                 }
-            }
-            self.save_request(retry_request, "task-create", "completed", res)
+                self._save_request_in_tx(conn, retry_request, "task-create", "completed", res, payload_sha)
+                conn.execute("COMMIT")
         except BaseException:
             self.release_request(retry_request)  # a failed claim must not block the retry
             raise
@@ -641,6 +717,10 @@ class LocalStateStore:
         """
         promoted: list[str] = []
         now = time.time()
+        root_row = conn.execute("SELECT run_id FROM tasks WHERE id = ?", (changed_task_id,)).fetchone()
+        if not root_row:
+            return promoted
+        run_id = root_row["run_id"]
         queue = [changed_task_id]
         seen: set[str] = set()
         while queue:
@@ -650,14 +730,16 @@ class LocalStateStore:
             seen.add(cur)
             for r in conn.execute("SELECT task_id FROM task_deps WHERE dep_id = ?", (cur,)).fetchall():
                 child_id = r["task_id"]
-                child = conn.execute("SELECT status FROM tasks WHERE id = ?", (child_id,)).fetchone()
-                if not child or child["status"] not in ("pending", "ready", "blocked"):
+                child = conn.execute(
+                    "SELECT status, run_id FROM tasks WHERE id = ?", (child_id,)
+                ).fetchone()
+                if not child or child["run_id"] != run_id or child["status"] not in ("pending", "ready", "blocked"):
                     continue
                 statuses = [
                     x["status"]
                     for x in conn.execute(
-                        "SELECT t.status FROM task_deps d LEFT JOIN tasks t ON t.id = d.dep_id WHERE d.task_id = ?",
-                        (child_id,),
+                        "SELECT t.status FROM task_deps d LEFT JOIN tasks t ON t.id = d.dep_id AND t.run_id = ? WHERE d.task_id = ?",
+                        (run_id, child_id),
                     ).fetchall()
                 ]
                 if self._gate_holds(conn, child_id) or any(st in ("failed", "blocked") for st in statuses):
@@ -679,7 +761,8 @@ class LocalStateStore:
     @staticmethod
     def _gate_holds(conn: sqlite3.Connection, task_id: str) -> bool:
         row = conn.execute(
-            "SELECT 1 FROM gates WHERE task_id = ? AND status = 'pending' LIMIT 1",
+            "SELECT 1 FROM gates g JOIN tasks t ON t.id = g.task_id "
+            "WHERE g.task_id = ? AND g.run_id = t.run_id AND g.status = 'pending' LIMIT 1",
             (task_id,),
         ).fetchone()
         return bool(row)
@@ -694,7 +777,10 @@ class LocalStateStore:
         sender: str | None = None,
         retry_request: str | None = None,
     ) -> dict[str, Any]:
-        cached = self.get_or_record_request(retry_request, "task-update")
+        payload_sha = request_payload_sha256(
+            {"task_id": task_id, "status": status, "result": result, "run": run}
+        )
+        cached = self.get_or_record_request(retry_request, "task-update", payload_sha)
         if cached:
             return cached
         try:
@@ -703,18 +789,24 @@ class LocalStateStore:
             now = time.time()
             with self._connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
-                row = conn.execute("SELECT id FROM tasks WHERE id = ?", (task_id,)).fetchone()
+                row = conn.execute("SELECT id, run_id FROM tasks WHERE id = ?", (task_id,)).fetchone()
                 if not row:
                     conn.execute("ROLLBACK")
                     raise ProviderError("task_not_found", f"task {task_id!r} not found")
+                if run is not None and row["run_id"] != run:
+                    conn.execute("ROLLBACK")
+                    raise ProviderError(
+                        "cross_run_access",
+                        f"task {task_id!r} belongs to run {row['run_id']!r}, not {run!r}",
+                    )
                 conn.execute(
                     "UPDATE tasks SET status = ?, result_json = COALESCE(?, result_json), updated_at = ? WHERE id = ?",
                     (status, result, now, task_id),
                 )
                 promoted = self._recompute_dependents(conn, task_id)
+                res = {"task": {"id": task_id, "status": status, "promotedDependents": promoted}}
+                self._save_request_in_tx(conn, retry_request, "task-update", "completed", res, payload_sha)
                 conn.execute("COMMIT")
-            res = {"task": {"id": task_id, "status": status, "promotedDependents": promoted}}
-            self.save_request(retry_request, "task-update", "completed", res)
         except BaseException:
             self.release_request(retry_request)  # a failed claim must not block the retry
             raise
@@ -771,7 +863,14 @@ class LocalStateStore:
         Atomic under `BEGIN IMMEDIATE` (`INSERT OR IGNORE` + re-read), so N concurrent claimers
         yield exactly one owner and N-1 `consumer_fenced` errors — never a raw IntegrityError.
         """
-        conn.execute("BEGIN IMMEDIATE")
+        if self._own_worker_identity() or terminal in self._worker_handles(conn):
+            raise ProviderError(
+                "worker_cannot_be_coordinator",
+                f"worker handle {terminal!r} cannot claim or adopt run {run_id!r}'s coordinator binding",
+            )
+        own_tx = not conn.in_transaction
+        if own_tx:
+            conn.execute("BEGIN IMMEDIATE")
         try:
             conn.execute(
                 "INSERT OR IGNORE INTO runs(id, coordinator_handle, created_at) VALUES (?, ?, ?)",
@@ -782,9 +881,11 @@ class LocalStateStore:
             if not owner:
                 conn.execute("UPDATE runs SET coordinator_handle = ? WHERE id = ?", (terminal, run_id))
                 owner = terminal
-            conn.execute("COMMIT")
+            if own_tx:
+                conn.execute("COMMIT")
         except BaseException:
-            conn.execute("ROLLBACK")
+            if own_tx:
+                conn.execute("ROLLBACK")
             raise
         if owner != terminal:
             raise ProviderError(
@@ -813,6 +914,13 @@ class LocalStateStore:
             if terminal in self._worker_handles(conn):
                 return [terminal]
             env_coord = env_get("OPEN_FLEET_COORDINATOR_HANDLE", "ORCA_COORDINATOR_HANDLE", self.env, "")
+            row = conn.execute("SELECT coordinator_handle FROM runs WHERE id = ?", (run_id,)).fetchone()
+            bound = row["coordinator_handle"] if row else None
+            if bound and bound != terminal:
+                raise ProviderError(
+                    "consumer_fenced",
+                    f"run {run_id!r} inbox is already fenced to coordinator {bound!r} (rejected {terminal!r})",
+                )
             if run_id != "default" or (env_coord and terminal == env_coord):
                 self._claim_coordinator(conn, run_id, terminal)
             return [terminal, COORDINATOR_ALIAS]
@@ -830,11 +938,21 @@ class LocalStateStore:
         run_id = run or f"run_{uuid.uuid4().hex[:10]}"
         coordinator = self._resolve_terminal(sender)
         with self._connect() as conn:
+            if self._own_worker_identity() or (coordinator and coordinator in self._worker_handles(conn)):
+                raise ProviderError(
+                    "worker_cannot_be_coordinator",
+                    f"worker handle {coordinator!r} cannot create or claim coordinator binding for run {run_id!r}",
+                )
             conn.execute(
                 "INSERT OR IGNORE INTO runs(id, coordinator_handle, objective, created_at) VALUES (?, ?, ?, ?)",
                 (run_id, coordinator, objective or "", time.time()),
             )
             row = conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
+            if coordinator and row["coordinator_handle"] and row["coordinator_handle"] != coordinator:
+                raise ProviderError(
+                    "consumer_fenced",
+                    f"run {run_id!r} is already bound to coordinator {row['coordinator_handle']!r} (rejected {coordinator!r})",
+                )
         return {"run": {"id": run_id, "objective": row["objective"], "coordinator": row["coordinator_handle"]}}
 
     def run_use(self, *, run: str, sender: str | None = None, takeover: bool = False) -> dict[str, Any]:
@@ -844,6 +962,11 @@ class LocalStateStore:
         if not terminal:
             raise ProviderError("invalid_argument", "run-use needs the adopting terminal (--from or OPEN_FLEET_TERMINAL_HANDLE)")
         with self._connect() as conn:
+            if self._own_worker_identity() or terminal in self._worker_handles(conn):
+                raise ProviderError(
+                    "worker_cannot_be_coordinator",
+                    f"worker handle {terminal!r} cannot adopt or take over run {run!r}",
+                )
             row = conn.execute("SELECT coordinator_handle FROM runs WHERE id = ?", (run,)).fetchone()
             if not row:
                 raise ProviderError("run_not_found", f"run {run!r} not found")
@@ -884,6 +1007,34 @@ class LocalStateStore:
         )
         return msg_id, deliv_id
 
+    def _settle_dispatch_task(
+        self,
+        conn: sqlite3.Connection,
+        dispatch_id: str,
+        *,
+        succeeded: bool,
+        now: float,
+    ) -> list[str]:
+        """Settle the task owned by `dispatch_id` and recompute its dependents (#750 C30)."""
+        row = conn.execute(
+            "SELECT task_id, run_id FROM dispatches WHERE dispatch_id = ?",
+            (dispatch_id,),
+        ).fetchone()
+        if not row or not row["task_id"]:
+            return []
+        task_id = row["task_id"]
+        t_row = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if not t_row or t_row["status"] in ("completed", "failed"):
+            return []
+        target_status = "completed" if succeeded else "failed"
+        if target_status == "completed" and self._gate_holds(conn, task_id):
+            target_status = "blocked"
+        conn.execute(
+            "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
+            (target_status, now, task_id),
+        )
+        return self._recompute_dependents(conn, task_id)
+
     def send_message(
         self,
         *,
@@ -893,45 +1044,92 @@ class LocalStateStore:
         outcome: str | None = None,
         sender: str | None = None,
         payload: str | None = None,
+        body: str | None = None,
         run: str | None = None,
         attrs: dict[str, Any] | None = None,
         reply_to: str | None = None,
+        retry_request: str | None = None,
     ) -> dict[str, Any]:
         run_id = run or "default"
         recipient = to or COORDINATOR_ALIAS
         sender_id = sender or self._resolve_terminal(None) or "worker"
-        with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            msg_id, deliv_id = self._insert_message(
-                conn,
-                run_id=run_id,
-                sender=sender_id,
-                recipient=recipient,
-                msg_type=msg_type,
-                subject=subject,
-                outcome=outcome,
-                payload=payload,
-                attrs=attrs,
-                reply_to=reply_to,
-            )
-            conn.execute("COMMIT")
-        message = {
-            "id": msg_id,
-            "deliveryId": deliv_id,
-            "type": msg_type,
-            "subject": subject,
-            "from": sender_id,
-            "to": recipient,
-            "outcome": outcome,
-        }
-        return {
-            "sent": True,
-            "messageId": msg_id,
-            "deliveryId": deliv_id,
-            "message": message,
-            # send_msg.py reads `relay.messageId` (Orca's receipt shape, #578 audit).
-            "relay": {"messageId": msg_id, "deliveryId": deliv_id, "to": recipient},
-        }
+        clean_attrs = dict(attrs or {})
+        body_from_attrs = clean_attrs.pop("body", None) if "body" in clean_attrs and payload is None and body is None else None
+        if retry_request is None and "retry-request" in clean_attrs:
+            retry_request = str(clean_attrs.pop("retry-request"))
+        effective_payload = payload if payload is not None else (body if body is not None else body_from_attrs)
+        payload_sha = request_payload_sha256(
+            {
+                "subject": subject,
+                "msg_type": msg_type,
+                "to": recipient,
+                "outcome": outcome,
+                "sender": sender_id,
+                "payload": effective_payload,
+                "run": run_id,
+                "attrs": clean_attrs,
+                "reply_to": reply_to,
+            }
+        )
+        cached = self.get_or_record_request(retry_request, "send", payload_sha)
+        if cached:
+            return cached
+        try:
+            now = time.time()
+            with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                msg_id, deliv_id = self._insert_message(
+                    conn,
+                    run_id=run_id,
+                    sender=sender_id,
+                    recipient=recipient,
+                    msg_type=msg_type,
+                    subject=subject,
+                    outcome=outcome,
+                    payload=effective_payload,
+                    attrs=clean_attrs,
+                    reply_to=reply_to,
+                )
+                if msg_type == "worker_done":
+                    own_disp = (
+                        env_get("OPEN_FLEET_DISPATCH_ID", "ORCA_DISPATCH_ID", self.env, "")
+                        or clean_attrs.get("dispatchId")
+                        or clean_attrs.get("dispatch-id")
+                        or sender_id
+                    )
+                    disp_row = conn.execute(
+                        "SELECT dispatch_id, state FROM dispatches WHERE run_id = ? AND (dispatch_id = ? OR terminal_handle = ?) "
+                        "ORDER BY created_at DESC LIMIT 1",
+                        (run_id, own_disp, sender_id),
+                    ).fetchone()
+                    if disp_row and disp_row["state"] not in FENCED_DISPATCH_STATES:
+                        ok = outcome != "failed"
+                        self._settle_dispatch_task(conn, disp_row["dispatch_id"], succeeded=ok, now=now)
+                message = {
+                    "id": msg_id,
+                    "deliveryId": deliv_id,
+                    "type": msg_type,
+                    "subject": subject,
+                    "from": sender_id,
+                    "to": recipient,
+                    "outcome": outcome,
+                    "payload": effective_payload,
+                    "body": effective_payload if effective_payload is not None else subject,
+                }
+                res = {
+                    "sent": True,
+                    "messageId": msg_id,
+                    "deliveryId": deliv_id,
+                    "message": message,
+                    # send_msg.py reads `relay.messageId` (Orca's receipt shape, #578 audit).
+                    "relay": {"messageId": msg_id, "deliveryId": deliv_id, "to": recipient},
+                }
+                self._save_request_in_tx(conn, retry_request, "send", "completed", res, payload_sha)
+                conn.execute("COMMIT")
+        except BaseException:
+            self.release_request(retry_request)
+            raise
+        return res
 
     def check_messages(
         self,
@@ -954,76 +1152,95 @@ class LocalStateStore:
         elif isinstance(ack, list):
             ack_ids = [str(x).strip() for x in ack if str(x).strip()]
 
+        payload_sha = request_payload_sha256(
+            {"terminal": terminal, "run": run_id, "ack": ack_ids, "mode": mode, "types": types}
+        )
+        cached = self.get_or_record_request(retry_request, "check", payload_sha)
+        if cached:
+            return cached
+
         type_filter = {x.strip() for x in types.split(",") if x.strip()} if types else None
         deadline = time.time() + ((timeout_ms or 5000) / 1000.0 if wait else 0.0)
         last_keepalive = time.time()
 
-        with self._connect() as conn:
-            allowed_recipients = self._mailbox_scope(conn, run_id, terminal)
-            if ack_ids:
-                now = time.time()
-                placeholders = ",".join("?" for _ in allowed_recipients)
-                for aid in ack_ids:
-                    # Acks are ALWAYS scoped to the caller's own mailbox and run: a worker can
-                    # never drain the coordinator's unread inbox (#591 review).
-                    conn.execute(
-                        "UPDATE deliveries SET acked = 1, acked_at = ? "
-                        f"WHERE (delivery_id = ? OR message_id = ?) AND run_id = ? AND recipient IN ({placeholders})",
-                        [now, aid, aid, run_id, *allowed_recipients],
-                    )
-
-        while True:
+        try:
             with self._connect() as conn:
-                placeholders = ",".join("?" for _ in allowed_recipients)
-                query = f"""
-                    SELECT d.delivery_id, d.acked, m.*
-                    FROM deliveries d
-                    JOIN messages m ON m.id = d.message_id
-                    WHERE d.run_id = ? AND d.recipient IN ({placeholders})
-                """
-                params: list[Any] = [run_id, *allowed_recipients]
-                if mode != "all":
-                    query += " AND d.acked = 0"
-                query += " ORDER BY m.created_at ASC"
-                rows = conn.execute(query, params).fetchall()
-                items: list[dict[str, Any]] = []
-                for r in rows:
-                    if type_filter and r["msg_type"] not in type_filter:
-                        continue
-                    items.append(
-                        {
-                            "id": r["id"],
-                            "messageId": r["id"],
-                            "deliveryId": r["delivery_id"],
-                            "type": r["msg_type"],
-                            "subject": r["subject"],
-                            "from": r["sender"],
-                            "from_handle": r["sender"],
-                            "to": r["recipient"],
-                            "outcome": r["outcome"],
-                            "payload": r["payload"],
-                            "body": r["payload"] or r["subject"],
-                            "replyTo": r["reply_to"],
-                            "attrs": json.loads(r["attrs_json"] or "{}"),
-                            "acked": bool(r["acked"]),
-                            "createdAt": r["created_at"],
+                conn.execute("BEGIN IMMEDIATE")
+                allowed_recipients = self._mailbox_scope(conn, run_id, terminal)
+                if ack_ids:
+                    now = time.time()
+                    placeholders = ",".join("?" for _ in allowed_recipients)
+                    for aid in ack_ids:
+                        # Acks are ALWAYS scoped to the caller's own mailbox and run: a worker can
+                        # never drain the coordinator's unread inbox (#591 review).
+                        conn.execute(
+                            "UPDATE deliveries SET acked = 1, acked_at = ? "
+                            f"WHERE (delivery_id = ? OR message_id = ?) AND run_id = ? AND recipient IN ({placeholders})",
+                            [now, aid, aid, run_id, *allowed_recipients],
+                        )
+                conn.execute("COMMIT")
+
+            while True:
+                with self._connect() as conn:
+                    conn.execute("BEGIN IMMEDIATE")
+                    allowed_recipients = self._mailbox_scope(conn, run_id, terminal)
+                    placeholders = ",".join("?" for _ in allowed_recipients)
+                    query = f"""
+                        SELECT d.delivery_id, d.acked, m.*
+                        FROM deliveries d
+                        JOIN messages m ON m.id = d.message_id
+                        WHERE d.run_id = ? AND d.recipient IN ({placeholders})
+                    """
+                    params: list[Any] = [run_id, *allowed_recipients]
+                    if mode != "all":
+                        query += " AND d.acked = 0"
+                    query += " ORDER BY m.created_at ASC"
+                    rows = conn.execute(query, params).fetchall()
+                    items: list[dict[str, Any]] = []
+                    for r in rows:
+                        if type_filter and r["msg_type"] not in type_filter:
+                            continue
+                        items.append(
+                            {
+                                "id": r["id"],
+                                "messageId": r["id"],
+                                "deliveryId": r["delivery_id"],
+                                "type": r["msg_type"],
+                                "subject": r["subject"],
+                                "from": r["sender"],
+                                "from_handle": r["sender"],
+                                "to": r["recipient"],
+                                "outcome": r["outcome"],
+                                "payload": r["payload"],
+                                "body": r["payload"] or r["subject"],
+                                "replyTo": r["reply_to"],
+                                "attrs": json.loads(r["attrs_json"] or "{}"),
+                                "acked": bool(r["acked"]),
+                                "createdAt": r["created_at"],
+                            }
+                        )
+                    if items or not wait or time.time() >= deadline:
+                        res = {
+                            "messages": items,
+                            "deliveries": items,
+                            "count": len(items),
+                            "deliveryId": items[-1]["deliveryId"] if items else None,
+                            "acked": len(ack_ids),
+                            "waited": bool(wait),
+                            "timedOut": bool(wait and not items),
                         }
-                    )
-                if items or not wait or time.time() >= deadline:
-                    return {
-                        "messages": items,
-                        "deliveries": items,
-                        "count": len(items),
-                        "deliveryId": items[-1]["deliveryId"] if items else None,
-                        "acked": len(ack_ids),
-                        "waited": bool(wait),
-                        "timedOut": bool(wait and not items),
-                    }
-            now = time.time()
-            if now - last_keepalive >= 15.0:
-                print('{"_keepalive": true}', file=sys.stderr, flush=True)
-                last_keepalive = now
-            time.sleep(min(0.1, max(0.01, deadline - now)))
+                        self._save_request_in_tx(conn, retry_request, "check", "completed", res, payload_sha)
+                        conn.execute("COMMIT")
+                        return res
+                    conn.execute("COMMIT")
+                now = time.time()
+                if now - last_keepalive >= 15.0:
+                    print('{"_keepalive": true}', file=sys.stderr, flush=True)
+                    last_keepalive = now
+                time.sleep(min(0.1, max(0.01, deadline - now)))
+        except BaseException:
+            self.release_request(retry_request)
+            raise
 
     def reply_message(
         self,
@@ -1034,11 +1251,15 @@ class LocalStateStore:
         sender: str | None = None,
         retry_request: str | None = None,
     ) -> dict[str, Any]:
-        cached = self.get_or_record_request(retry_request, "reply")
+        payload_sha = request_payload_sha256(
+            {"msg_id": msg_id, "body": body, "run": run, "sender": sender}
+        )
+        cached = self.get_or_record_request(retry_request, "reply", payload_sha)
         if cached:
             return cached
         try:
             with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
                 orig = conn.execute("SELECT * FROM messages WHERE id = ?", (msg_id,)).fetchone()
                 gate = None
                 if not orig:
@@ -1047,41 +1268,62 @@ class LocalStateStore:
                     if gate and gate["message_id"]:
                         orig = conn.execute("SELECT * FROM messages WHERE id = ?", (gate["message_id"],)).fetchone()
                 if not orig:
+                    conn.execute("ROLLBACK")
                     raise ProviderError("message_not_found", f"message {msg_id!r} not found")
+                if run is not None and orig["run_id"] != run:
+                    conn.execute("ROLLBACK")
+                    raise ProviderError(
+                        "cross_run_access",
+                        f"message {msg_id!r} belongs to run {orig['run_id']!r}, not {run!r}",
+                    )
                 attrs = json.loads(orig["attrs_json"] or "{}")
                 gate_id = gate["gate_id"] if gate else attrs.get("gateId")
                 replier = sender or self._resolve_terminal(None) or COORDINATOR_ALIAS
+                gate_row = None
                 if gate_id:
                     gate_row = gate or conn.execute("SELECT * FROM gates WHERE gate_id = ?", (gate_id,)).fetchone()
                     if gate_row:
-                        # Refuse BEFORE the reply message is sent, not only at resolution.
-                        self._check_gate_answerer(conn, gate_row, replier)
+                        if gate_row["run_id"] != orig["run_id"]:
+                            conn.execute("ROLLBACK")
+                            raise ProviderError(
+                                "cross_run_access",
+                                f"gate {gate_id!r} belongs to run {gate_row['run_id']!r}, not {orig['run_id']!r}",
+                            )
+                        try:
+                            # Refuse BEFORE the reply message is sent, not only at resolution.
+                            self._check_gate_answerer(conn, gate_row, replier)
+                        except ProviderError:
+                            conn.execute("ROLLBACK")
+                            raise
                 recipient = orig["sender"]
                 subject = f"Re: {orig['subject']}"
-                run_id = run or orig["run_id"]
-            sent = self.send_message(
-                subject=subject,
-                msg_type="info",
-                to=recipient,
-                sender=replier,
-                payload=body,
-                run=run_id,
-                attrs={"replyTo": orig["id"], **({"gateId": gate_id} if gate_id else {})},
-                reply_to=orig["id"],
-            )
-            resolved = None
-            if gate_id:
-                # Answering a worker's `ask` question by message id resolves its durable gate, so
-                # `ask --resume <id>` returns the human's answer (#591 review: gates never completed).
-                resolved = self.resolve_gate(gate_id, body, status="answered", resolver=replier)
-            res = {
-                "replied": True,
-                "messageId": sent["messageId"],
-                "replyMessageId": sent["messageId"],
-                "to": recipient,
-                "gate": resolved,
-            }
-            self.save_request(retry_request, "reply", "completed", res)
+                run_id = orig["run_id"]
+                reply_msg_id, _ = self._insert_message(
+                    conn,
+                    run_id=run_id,
+                    sender=replier,
+                    recipient=recipient,
+                    msg_type="info",
+                    subject=subject,
+                    outcome=None,
+                    payload=body,
+                    attrs={"replyTo": orig["id"], **({"gateId": gate_id} if gate_id else {})},
+                    reply_to=orig["id"],
+                )
+                resolved = None
+                if gate_id and gate_row:
+                    # Answering a worker's `ask` question by message id resolves its durable gate, so
+                    # `ask --resume <id>` returns the human's answer (#591 review: gates never completed).
+                    resolved = self._resolve_gate_in_tx(conn, gate_row, body, status="answered", who=replier)
+                res = {
+                    "replied": True,
+                    "messageId": reply_msg_id,
+                    "replyMessageId": reply_msg_id,
+                    "to": recipient,
+                    "gate": resolved,
+                }
+                self._save_request_in_tx(conn, retry_request, "reply", "completed", res, payload_sha)
+                conn.execute("COMMIT")
         except BaseException:
             self.release_request(retry_request)  # a failed claim must not block the retry
             raise
@@ -1149,6 +1391,11 @@ class LocalStateStore:
                 row = self._find_gate(conn, resume)
             if not row:
                 raise ProviderError("gate_not_found", f"gate/message {resume!r} not found")
+            if run is not None and row["run_id"] != run:
+                raise ProviderError(
+                    "cross_run_access",
+                    f"gate {row['gate_id']!r} belongs to run {row['run_id']!r}, not {run!r}",
+                )
             self._wait_gate(row["gate_id"], timeout_ms)
             with self._connect() as conn:
                 row = self._find_gate(conn, resume)
@@ -1185,6 +1432,19 @@ class LocalStateStore:
                     """,
                     (gate_id, run_id, asker, to or "human", question, json.dumps(opts), msg_id, time.time()),
                 )
+            else:
+                existing_opts = json.loads(existing["options_json"] or "[]")
+                if (
+                    existing["question"] != question
+                    or existing_opts != opts
+                    or existing["run_id"] != run_id
+                    or existing["recipient"] != (to or "human")
+                ):
+                    conn.execute("ROLLBACK")
+                    raise ProviderError(
+                        "request_mismatch",
+                        f"retry-request {retry_request!r} payload does not match original ask",
+                    )
             conn.execute("COMMIT")
         self._wait_gate(gate_id, timeout_ms)
         with self._connect() as conn:
@@ -1204,7 +1464,10 @@ class LocalStateStore:
         """DAG gate (gate-classification.md): the task is `blocked` until `gate-resolve`."""
         if not task_id or not question:
             raise ProviderError("invalid_argument", "gate-create needs both --task and --question")
-        cached = self.get_or_record_request(retry_request, "gate-create")
+        payload_sha = request_payload_sha256(
+            {"task_id": task_id, "question": question, "options": options, "run": run, "sender": sender}
+        )
+        cached = self.get_or_record_request(retry_request, "gate-create", payload_sha)
         if cached:
             return cached
         try:
@@ -1223,6 +1486,12 @@ class LocalStateStore:
                 if not t:
                     conn.execute("ROLLBACK")
                     raise ProviderError("task_not_found", f"task {task_id!r} not found")
+                if run is not None and t["run_id"] != run:
+                    conn.execute("ROLLBACK")
+                    raise ProviderError(
+                        "cross_run_access",
+                        f"task {task_id!r} belongs to run {t['run_id']!r}, not {run!r}",
+                    )
                 active = conn.execute(
                     "SELECT dispatch_id FROM dispatches WHERE task_id = ? AND state NOT IN "
                     "('stopped','abandoned','released','died','completed') LIMIT 1",
@@ -1239,13 +1508,13 @@ class LocalStateStore:
                     INSERT INTO gates(gate_id, run_id, sender, recipient, question, options_json, status, task_id, prev_status, kind, created_at)
                     VALUES (?, ?, ?, 'human', ?, ?, 'pending', ?, ?, 'dag', ?)
                     """,
-                    (gate_id, run or t["run_id"], sender or COORDINATOR_ALIAS, question, json.dumps(opts), task_id, t["status"], time.time()),
+                    (gate_id, t["run_id"], sender or COORDINATOR_ALIAS, question, json.dumps(opts), task_id, t["status"], time.time()),
                 )
                 conn.execute("UPDATE tasks SET status = 'blocked', updated_at = ? WHERE id = ?", (time.time(), task_id))
                 self._recompute_dependents(conn, task_id)
+                res = {"gate": {"id": gate_id, "taskId": task_id, "status": "pending", "question": question, "options": opts}}
+                self._save_request_in_tx(conn, retry_request, "gate-create", "completed", res, payload_sha)
                 conn.execute("COMMIT")
-            res = {"gate": {"id": gate_id, "taskId": task_id, "status": "pending", "question": question, "options": opts}}
-            self.save_request(retry_request, "gate-create", "completed", res)
         except BaseException:
             self.release_request(retry_request)  # a failed claim must not block the retry
             raise
@@ -1256,13 +1525,44 @@ class LocalStateStore:
         *,
         gate_id: str,
         resolution: str,
+        run: str | None = None,
         sender: str | None = None,
         retry_request: str | None = None,
     ) -> dict[str, Any]:
         if not gate_id or resolution is None:
             raise ProviderError("invalid_argument", "gate-resolve needs --id and --resolution")
-        res = self.resolve_gate(gate_id, resolution, status="resolved", resolver=sender)
-        return {"gate": {"id": gate_id, "status": res["status"], "resolution": resolution, "taskId": res.get("taskId")}}
+        payload_sha = request_payload_sha256(
+            {"gate_id": gate_id, "resolution": resolution, "run": run, "sender": sender}
+        )
+        cached = self.get_or_record_request(retry_request, "gate-resolve", payload_sha)
+        if cached:
+            return cached
+        try:
+            who = sender or self._resolve_terminal(None) or COORDINATOR_ALIAS
+            with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                row = self._find_gate(conn, gate_id)
+                if not row:
+                    conn.execute("ROLLBACK")
+                    raise ProviderError("gate_not_found", f"gate {gate_id!r} not found")
+                if run is not None and row["run_id"] != run:
+                    conn.execute("ROLLBACK")
+                    raise ProviderError(
+                        "cross_run_access",
+                        f"gate {row['gate_id']!r} belongs to run {row['run_id']!r}, not {run!r}",
+                    )
+                try:
+                    res = self._resolve_gate_in_tx(conn, row, resolution, status="resolved", who=who)
+                except ProviderError:
+                    conn.execute("ROLLBACK")
+                    raise
+                out = {"gate": {"id": gate_id, "status": res["status"], "resolution": resolution, "taskId": res.get("taskId")}}
+                self._save_request_in_tx(conn, retry_request, "gate-resolve", "completed", out, payload_sha)
+                conn.execute("COMMIT")
+        except BaseException:
+            self.release_request(retry_request)
+            raise
+        return out
 
     def gate_list(self, *, run: str | None = None, task_id: str | None = None, status: str | None = None) -> dict[str, Any]:
         q = "SELECT * FROM gates WHERE 1=1"
@@ -1289,7 +1589,8 @@ class LocalStateStore:
         }
 
     def _check_gate_answerer(self, conn: sqlite3.Connection, gate_row: sqlite3.Row, resolver: str) -> None:
-        """Only the coordinator/human answers a gate: never a launched worker, never the asker."""
+        """Only the coordinator/human answers a gate: never a launched worker, never the asker,
+        and never a stale coordinator handle after run takeover (#750 C35)."""
         # The asker test applies to a worker's `ask`; a DAG gate's sender is the coordinator
         # that created it, and resolving its own hold is exactly its job.
         is_ask = (gate_row["kind"] or "ask") != "dag"
@@ -1298,6 +1599,80 @@ class LocalStateStore:
                 "gate_answer_refused",
                 f"{resolver!r} cannot answer gate {gate_row['gate_id']!r}: only the coordinator/human may",
             )
+        run_row = conn.execute(
+            "SELECT coordinator_handle FROM runs WHERE id = ?",
+            (gate_row["run_id"],),
+        ).fetchone()
+        bound = run_row["coordinator_handle"] if run_row else None
+        if bound:
+            if resolver == COORDINATOR_ALIAS and gate_row["run_id"] != "default":
+                raise ProviderError(
+                    "consumer_fenced",
+                    f"run {gate_row['run_id']!r} is fenced to coordinator {bound!r}; pass --from {bound!r}",
+                )
+            if resolver not in (COORDINATOR_ALIAS, "human") and resolver != bound:
+                raise ProviderError(
+                    "consumer_fenced",
+                    f"{resolver!r} cannot answer gate {gate_row['gate_id']!r}: run {gate_row['run_id']!r} is fenced to coordinator {bound!r}",
+                )
+
+    def _resolve_gate_in_tx(
+        self,
+        conn: sqlite3.Connection,
+        row: sqlite3.Row,
+        answer: str,
+        *,
+        status: str = "answered",
+        who: str,
+    ) -> dict[str, Any]:
+        """Resolve `row` inside the caller's active transaction (#750 C31)."""
+        self._check_gate_answerer(conn, row, who)
+        if row["status"] != "pending":
+            return {
+                "gateId": row["gate_id"],
+                "status": row["status"],
+                "answer": row["answer"],
+                "taskId": row["task_id"],
+                "alreadyResolved": True,
+            }
+        now = time.time()
+        conn.execute(
+            "UPDATE gates SET status = ?, answer = ?, resolved_at = ? WHERE gate_id = ?",
+            (status, answer, now, row["gate_id"]),
+        )
+        if row["message_id"]:
+            # The question is handled: it must stop reading as unread inbox work (and as
+            # `waiting_input` to the watchdog) once its gate is answered (#592 review).
+            conn.execute(
+                "UPDATE deliveries SET acked = 1, acked_at = ? WHERE message_id = ? AND acked = 0",
+                (now, row["message_id"]),
+            )
+        if row["task_id"]:
+            # Release the DAG hold: re-derive the task's status from its deps.
+            t = conn.execute("SELECT status FROM tasks WHERE id = ?", (row["task_id"],)).fetchone()
+            if t and t["status"] == "blocked" and not self._gate_holds(conn, row["task_id"]):
+                deps = [
+                    x["status"]
+                    for x in conn.execute(
+                        "SELECT t.status FROM task_deps d LEFT JOIN tasks t ON t.id = d.dep_id WHERE d.task_id = ?",
+                        (row["task_id"],),
+                    ).fetchall()
+                ]
+                if any(st in ("failed", "blocked") for st in deps):
+                    new_status = "blocked"
+                elif not deps or all(st == "completed" for st in deps):
+                    # Deps are done NOW: runnable, whatever it was when gated. Restoring a
+                    # stale `pending` left it undispatchable forever (#592 review).
+                    prev = row["prev_status"]
+                    new_status = prev if prev in ("completed", "failed") else "ready"
+                else:
+                    new_status = "pending"
+                conn.execute(
+                    "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
+                    (new_status, now, row["task_id"]),
+                )
+                self._recompute_dependents(conn, row["task_id"])
+        return {"gateId": row["gate_id"], "status": status, "answer": answer, "taskId": row["task_id"]}
 
     def resolve_gate(
         self,
@@ -1305,6 +1680,7 @@ class LocalStateStore:
         answer: str,
         status: str = "answered",
         resolver: str | None = None,
+        run: str | None = None,
     ) -> dict[str, Any]:
         """The ONE boundary every answer path (reply, gate-resolve, ask) crosses (#592 review)."""
         who = resolver or self._resolve_terminal(None) or COORDINATOR_ALIAS
@@ -1314,52 +1690,19 @@ class LocalStateStore:
             if not row:
                 conn.execute("ROLLBACK")
                 raise ProviderError("gate_not_found", f"gate {gate_id!r} not found")
+            if run is not None and row["run_id"] != run:
+                conn.execute("ROLLBACK")
+                raise ProviderError(
+                    "cross_run_access",
+                    f"gate {row['gate_id']!r} belongs to run {row['run_id']!r}, not {run!r}",
+                )
             try:
-                self._check_gate_answerer(conn, row, who)
+                res = self._resolve_gate_in_tx(conn, row, answer, status=status, who=who)
             except ProviderError:
                 conn.execute("ROLLBACK")
                 raise
-            if row["status"] != "pending":
-                conn.execute("COMMIT")
-                return {"gateId": row["gate_id"], "status": row["status"], "answer": row["answer"], "taskId": row["task_id"], "alreadyResolved": True}
-            conn.execute(
-                "UPDATE gates SET status = ?, answer = ?, resolved_at = ? WHERE gate_id = ?",
-                (status, answer, time.time(), row["gate_id"]),
-            )
-            if row["message_id"]:
-                # The question is handled: it must stop reading as unread inbox work (and as
-                # `waiting_input` to the watchdog) once its gate is answered (#592 review).
-                conn.execute(
-                    "UPDATE deliveries SET acked = 1, acked_at = ? WHERE message_id = ? AND acked = 0",
-                    (time.time(), row["message_id"]),
-                )
-            if row["task_id"]:
-                # Release the DAG hold: re-derive the task's status from its deps.
-                t = conn.execute("SELECT status FROM tasks WHERE id = ?", (row["task_id"],)).fetchone()
-                if t and t["status"] == "blocked" and not self._gate_holds(conn, row["task_id"]):
-                    deps = [
-                        x["status"]
-                        for x in conn.execute(
-                            "SELECT t.status FROM task_deps d LEFT JOIN tasks t ON t.id = d.dep_id WHERE d.task_id = ?",
-                            (row["task_id"],),
-                        ).fetchall()
-                    ]
-                    if any(st in ("failed", "blocked") for st in deps):
-                        new_status = "blocked"
-                    elif not deps or all(st == "completed" for st in deps):
-                        # Deps are done NOW: runnable, whatever it was when gated. Restoring a
-                        # stale `pending` left it undispatchable forever (#592 review).
-                        prev = row["prev_status"]
-                        new_status = prev if prev in ("completed", "failed") else "ready"
-                    else:
-                        new_status = "pending"
-                    conn.execute(
-                        "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
-                        (new_status, time.time(), row["task_id"]),
-                    )
-                    self._recompute_dependents(conn, row["task_id"])
             conn.execute("COMMIT")
-        return {"gateId": row["gate_id"], "status": status, "answer": answer, "taskId": row["task_id"]}
+        return res
 
     def has_pending_question(self, worker_id: str, run_id: str | None = None) -> bool:
         """Return True if `worker_id` has an unresolved HITL question gate (`waiting_input`)."""
@@ -1465,7 +1808,7 @@ class LocalStateStore:
         placeholders = ",".join("?" for _ in senders)
         return conn.execute(
             f"""
-            SELECT id, msg_type FROM messages
+            SELECT id, msg_type, outcome FROM messages
             WHERE run_id = ? AND sender IN ({placeholders})
               AND msg_type IN ('worker_done', 'merge_ready', 'escalation')
               AND COALESCE(attrs_json, '') NOT LIKE '%"fileTouchConflict"%'
@@ -1519,19 +1862,22 @@ class LocalStateStore:
             if disp and disp["state"] == "died":
                 conn.execute("COMMIT")
                 return {"syntheticDied": False, "alreadyDied": True}
+            now = time.time()
             row = self._terminal_report(conn, run_id, senders)
             if row:
+                succeeded = row["msg_type"] != "escalation" and row["outcome"] != "failed"
                 conn.execute(
                     "UPDATE dispatches SET state = 'completed', terminal_state = 'exited', head_sha = COALESCE(NULLIF(?, ''), head_sha), "
                     "updated_at = ? WHERE dispatch_id = ? AND state NOT IN ('stopped','abandoned','released')",
-                    (worktree_head_sha, time.time(), dispatch_id),
+                    (worktree_head_sha, now, dispatch_id),
                 )
+                self._settle_dispatch_task(conn, dispatch_id, succeeded=succeeded, now=now)
                 conn.execute("COMMIT")
                 return {"syntheticDied": False, "existingMessageId": row["id"], "type": row["msg_type"]}
             conn.execute(
                 "UPDATE dispatches SET state = 'died', terminal_state = 'failed', head_sha = COALESCE(NULLIF(?, ''), head_sha), "
                 "updated_at = ? WHERE dispatch_id = ?",
-                (worktree_head_sha, time.time(), dispatch_id),
+                (worktree_head_sha, now, dispatch_id),
             )
             payload = json.dumps(
                 {
@@ -1589,6 +1935,14 @@ class LocalStateStore:
             if row:
                 conn.execute("COMMIT")
                 return {"relayed": False, "existingMessageId": row["id"]}
+            now = time.time()
+            succeeded = outcome == "succeeded"
+            conn.execute(
+                "UPDATE dispatches SET state = 'completed', terminal_state = 'exited', head_sha = COALESCE(NULLIF(?, ''), head_sha), "
+                "updated_at = ? WHERE dispatch_id = ?",
+                (head_sha, now, dispatch_id),
+            )
+            self._settle_dispatch_task(conn, dispatch_id, succeeded=succeeded, now=now)
             msg_id, deliv_id = self._insert_message(
                 conn,
                 run_id=run_id,

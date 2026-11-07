@@ -278,7 +278,7 @@ class PaperclipProvider(ExternalDispatchMixin, RuntimeProvider):
         return str(run_id)
 
     def worker_list(self, **kwargs: Any) -> dict[str, Any]:
-        return self._list_local(run=kwargs.get("run"), task=kwargs.get("task"), limit=kwargs.get("limit"))
+        return self._list_local(**kwargs)
 
     def worker_show(self, *, dispatch_id: str = "", **kwargs: Any) -> dict[str, Any]:
         row = self._dispatch_row(dispatch_id)

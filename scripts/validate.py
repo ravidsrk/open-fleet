@@ -1154,10 +1154,14 @@ def check_ledger_rows():
         if read_err:
             failures.append(f"{skill_dir.name}/SKILL.md: {read_err}")
             continue
+        rows = [" ".join(m.split()) for m in re.findall(r"`(\|\s*task_id\s*\|[^`]+)`", text)]
         for line in text.splitlines():
-            row = line.strip().strip("`")
-            if not row.startswith("| task_id |"):
+            if "`" in line:
                 continue
+            row = line.strip()
+            if row.startswith("| task_id |"):
+                rows.append(row)
+        for row in rows:
             missing = [flag for flag in CANONICAL_LEDGER_FLAGS if f"| {flag} |" not in row]
             if missing:
                 failures.append(

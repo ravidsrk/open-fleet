@@ -204,8 +204,10 @@ def format_read(result, want="auto"):
                      f"{source} (fallback "
                      f"{_line(result.get('fallbackReason') or 'unknown')}): refusing "
                      f"to certify terminal output as transcript evidence")
+    cur = result.get("cursor")
+    cur_text = "none" if cur is None or cur == "" else str(cur)
     lines = [f"SOURCE={source}",
-             f"CURSOR={_line(result.get('cursor') or 'none')}"]
+             f"CURSOR={_line(cur_text)}"]
     fallback = result.get("fallbackReason")
     if fallback:
         lines.append(f"FALLBACK={_line(fallback)}")
@@ -260,9 +262,11 @@ def format_list(result):
         raise Failed("worker-list receipt names no workers")
     scope = result.get("scope") or {}
     page = result.get("page") or {}
+    nxt = page.get("nextCursor")
+    nxt_text = "none" if nxt is None or nxt == "" else str(nxt)
     lines = [f"ROWS={len(workers)}",
              f"SCOPE={_line(scope.get('source') or 'unknown')}",
-             f"NEXT_CURSOR={_line(page.get('nextCursor') or 'none')}"]
+             f"NEXT_CURSOR={_line(nxt_text)}"]
     for row in workers:
         if not isinstance(row, dict):
             continue

@@ -44,11 +44,13 @@ from .local_state import LocalStateStore
 from .posix import checkout_worktree
 from ._external import release_claim_on_failure
 from ._external import (
+    claim_local_task,
     insert_dispatch,
     load_dispatch,
     local_worker_list,
     record_fence,
     ref_safe,
+    release_local_task,
     run_cli_text,
     show_from_row,
 )
@@ -304,10 +306,43 @@ class T3CodeProvider(RuntimeProvider):
         if not thread_id:
             raise ProviderError("invalid_handle", "dispatch --to needs a t3:<threadId> handle")
         message = self.resolve_task_prompt(task_id, prompt)
+        claimed, eff_run = claim_local_task(self.state, task_id, run)
+        target_run = eff_run or run or "default"
+        with self.state._connect() as conn:
+            bound = conn.execute(
+                "SELECT run_id FROM dispatches WHERE backend = ? AND (dispatch_id = ? OR terminal_handle = ?) AND run_id != ? LIMIT 1",
+                (self.name, thread_id, f"t3:{thread_id}", target_run),
+            ).fetchone()
+        if bound:
+            if claimed:
+                release_local_task(self.state, task_id)
+            raise ProviderError(
+                "cross_run_access",
+                f"thread {thread_id!r} is bound to run {bound['run_id']!r}, not {target_run!r}",
+            )
         args: dict[str, Any] = {"threadId": thread_id, "message": message, "mode": "queue"}
         if kwargs.get("retry_request"):
             args["clientRequestId"] = str(kwargs["retry_request"])
-        raw = self._tool("t3_thread_send", args)
+        try:
+            raw = self._tool("t3_thread_send", args)
+        except BaseException:
+            if claimed:
+                release_local_task(self.state, task_id)
+            raise
+        if claimed:
+            insert_dispatch(
+                self.state,
+                dispatch_id=thread_id,
+                task_id=task_id,
+                run=target_run,
+                worktree="",
+                agent="claude",
+                profile="ro",
+                handle=f"t3:{thread_id}",
+                backend=self.name,
+                effective={"threadId": thread_id, "mechanism": "mcp.t3_thread_send", "inject": True},
+                session_id=thread_id,
+            )
         return {"injected": True, "threadId": thread_id, "taskId": task_id, "delivery": raw.get("delivery"), "upstream": raw}
 
     def worker_list(
@@ -324,7 +359,7 @@ class T3CodeProvider(RuntimeProvider):
             for t in threads
             if isinstance(t, dict) and t.get("threadId")
         }
-        return local_worker_list(self.state, self.name, run=run, task=task, limit=limit, stages=stages, upstream=raw)
+        return local_worker_list(self.state, self.name, run=run, task=task, limit=limit, stages=stages, upstream=raw, **kwargs)
 
     def worker_show(self, *, dispatch_id: str = "", **kwargs: Any) -> dict[str, Any]:
         row = load_dispatch(self.state, dispatch_id, self.name)

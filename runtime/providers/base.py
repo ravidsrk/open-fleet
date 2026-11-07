@@ -451,13 +451,14 @@ def normalize_read(
     lines: list[Any] | None = None,
     messages: list[dict[str, Any]] | None = None,
     cursor: Any = None,
+    truncated: bool = False,
     fallback_reason: str | None = None,
     handle: str | None = None,
 ) -> dict[str, Any]:
     """Shape a worker-read receipt the way `worker_ops.format_read` consumes it."""
     if source not in ("transcript", "terminal"):
         raise ProviderError("invalid_source", f"unknown worker-read source {source!r}")
-    out: dict[str, Any] = {"source": source, "cursor": cursor}
+    out: dict[str, Any] = {"source": source, "cursor": cursor, "truncated": bool(truncated)}
     if fallback_reason:
         out["fallbackReason"] = fallback_reason
     if source == "transcript":
@@ -466,9 +467,9 @@ def normalize_read(
                 {"id": f"line_{i}", "role": "assistant", "blocks": [{"type": "text", "text": str(ln)}]}
                 for i, ln in enumerate(lines or [])
             ]
-        out["transcript"] = {"messages": messages, "truncated": False}
+        out["transcript"] = {"messages": messages, "truncated": bool(truncated)}
     else:
-        out["terminal"] = {"handle": handle, "tail": [str(ln) for ln in (lines or [])]}
+        out["terminal"] = {"handle": handle, "tail": [str(ln) for ln in (lines or [])], "truncated": bool(truncated)}
     return out
 
 
@@ -811,12 +812,23 @@ class RuntimeProvider:
                         kw["prompt"] = spec
                 return self.worker_start(**kw)
             if sub == "worker-list":
-                return self.worker_list(
-                    run=flags.get("run"),
-                    task=flags.get("task"),
-                    limit=int(flags["limit"]) if "limit" in flags else None,
-                    cursor=flags.get("cursor"),
-                )
+                list_kw: dict[str, Any] = {
+                    "run": flags.get("run"),
+                    "task": flags.get("task"),
+                    "limit": int(flags["limit"]) if "limit" in flags else None,
+                    "cursor": flags.get("cursor"),
+                }
+                try:
+                    sig = inspect.signature(self.worker_list)
+                    params = set(sig.parameters)
+                    has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+                except (TypeError, ValueError):
+                    params, has_var_kw = set(), True
+                if "terminal_state" in params or has_var_kw:
+                    list_kw["terminal_state"] = flags.get("terminal-state")
+                if "include_remote" in params or has_var_kw:
+                    list_kw["include_remote"] = bool(flags.get("include-remote"))
+                return self.worker_list(**list_kw)
             if sub == "worker-show":
                 return self.worker_show(dispatch_id=flags.get("dispatch", ""))
             if sub == "worker-read":
@@ -849,6 +861,7 @@ class RuntimeProvider:
                 return self.worker_wait(**wait_kw)
             if sub in ("worker-stop", "worker-abandon", "worker-release", "worker-retain"):
                 verb = sub.split("-", 1)[1]
+                retry_req = flags.get("retry-request")
                 fence_kw: dict[str, Any] = {
                     "verb": verb,
                     "dispatch_id": flags.get("dispatch", ""),
@@ -856,6 +869,29 @@ class RuntimeProvider:
                 }
                 if "verified" in flags:
                     fence_kw["verified"] = flags["verified"] is True or str(flags["verified"]).lower() in ("1", "true", "yes")
+                try:
+                    sig = inspect.signature(self.worker_fence)
+                    params = set(sig.parameters)
+                except (TypeError, ValueError):
+                    params = set()
+                if "retry_request" in params:
+                    fence_kw["retry_request"] = retry_req
+                    return self.worker_fence(**fence_kw)
+                state = getattr(self, "state", None)
+                if retry_req and state is not None and hasattr(state, "get_or_record_request"):
+                    from .local_state import request_payload_sha256
+
+                    payload_sha = request_payload_sha256(fence_kw)
+                    cached = state.get_or_record_request(retry_req, sub, payload_sha)
+                    if cached:
+                        return cached
+                    try:
+                        res = self.worker_fence(**fence_kw)
+                        state.save_request(retry_req, sub, "completed", res, payload_sha)
+                        return res
+                    except BaseException:
+                        state.release_request(retry_req)
+                        raise
                 return self.worker_fence(**fence_kw)
             if sub == "worker-verify":
                 return self.worker_verify(
@@ -879,18 +915,58 @@ class RuntimeProvider:
                     takeover=bool(flags.get("takeover")),
                 )
             if sub == "send":
-                reserved = {"subject", "type", "to", "outcome", "from", "payload", "run", "environment", "pairing-code"}
+                reserved = {
+                    "subject",
+                    "type",
+                    "to",
+                    "outcome",
+                    "from",
+                    "payload",
+                    "body",
+                    "run",
+                    "environment",
+                    "pairing-code",
+                    "retry-request",
+                }
                 attrs = {k: v for k, v in flags.items() if k not in reserved}
-                return self.send_message(
-                    subject=_text_flag(flags, "subject"),
-                    msg_type=flags.get("type", "info"),
-                    to=flags.get("to"),
-                    outcome=flags.get("outcome"),
-                    sender=flags.get("from"),
-                    payload=flags.get("payload"),
-                    run=flags.get("run"),
-                    attrs=attrs,
-                )
+                payload = flags.get("payload")
+                if payload is None and "body" in flags:
+                    payload = _text_flag(flags, "body")
+                send_kw: dict[str, Any] = {
+                    "subject": _text_flag(flags, "subject"),
+                    "msg_type": flags.get("type", "info"),
+                    "to": flags.get("to"),
+                    "outcome": flags.get("outcome"),
+                    "sender": flags.get("from"),
+                    "payload": payload,
+                    "run": flags.get("run"),
+                    "attrs": attrs,
+                }
+                retry_req = flags.get("retry-request")
+                try:
+                    sig = inspect.signature(self.send_message)
+                    params = set(sig.parameters)
+                except (TypeError, ValueError):
+                    params = set()
+                if "retry_request" in params:
+                    send_kw["retry_request"] = retry_req
+                    return self.send_message(**send_kw)
+                state = getattr(self, "state", None)
+                if retry_req and state is not None and hasattr(state, "get_or_record_request"):
+                    from .local_state import request_payload_sha256
+
+                    payload_sha = request_payload_sha256(send_kw)
+                    cached = state.get_or_record_request(retry_req, "send", payload_sha)
+                    if cached:
+                        return cached
+                    try:
+                        res = self.send_message(**send_kw)
+                        state.save_request(retry_req, "send", "completed", res, payload_sha)
+                        return res
+                    except BaseException:
+                        state.release_request(retry_req)
+                        raise
+                return self.send_message(**send_kw)
             if sub == "check":
                 mode = "all" if flags.get("all") else ("peek" if flags.get("peek") else "unread")
                 return self.check_messages(
@@ -925,6 +1001,7 @@ class RuntimeProvider:
                 return self.gate_resolve(
                     gate_id=flags.get("id", ""),
                     resolution=flags.get("resolution"),
+                    run=flags.get("run"),
                     sender=flags.get("from"),
                     retry_request=flags.get("retry-request"),
                 )

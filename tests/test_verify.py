@@ -2628,6 +2628,105 @@ class EndToEndMutationGreen(MutationFixture):
             self.assertTrue(any('no replay is implemented' in e for e in result[0]), result)
             execute.assert_not_called()
 
+    def test_unexecuted_nc_discloses_static_corroboration_note_c10(self):
+        # #750 C10: when verify() runs on the ordinary GitHub-reviewed lane without --execute-nc,
+        # the verdict must explicitly disclose that the negative control was corroborated from the
+        # artifact only, not executed.
+        path = self._manifest()
+        (fatal, notes), err = verify.verify(path, self.contract, self.digest, repo='o/r',
+                                            unit_class='mutation', execute_nc=False)
+        self.assertIsNone(err)
+        self.assertEqual(fatal, [], fatal)
+        self.assertTrue(any('corroborated from artifact only (--execute-nc not set)' in n
+                            for n in notes), notes)
+
+    def test_all_six_mutation_tools_replay_when_artifact_quotes_diff_c11(self):
+        # #750 C11: all six named mutation tools (mutmut, cosmic-ray, stryker, pitest,
+        # cargo-mutants, go-mutesting) replay deterministically under --execute-nc when their
+        # artifact quotes the mutant's unified diff, and fail closed when it does not.
+        diff = '--- a/app.py\n+++ b/app.py\n@@ -2 +2 @@\n-    return 2\n+    return 1\n'
+        for tool in ('mutmut', 'cosmic-ray', 'stryker', 'pitest', 'cargo-mutants', 'go-mutesting'):
+            with self.subTest(tool=tool):
+                self.write(self.nc_artifact, f'mutant m#7 was KILLED\n{diff}')
+                self.head_sha = self.commit(f'pin {tool} diff')
+                self.head_tree = self.git('rev-parse', 'HEAD^{tree}')
+                nc = {'tool': tool, 'mutant': 'm#7', 'artifact': self.nc_artifact,
+                      'result': 'KILLED', 'command': self.proof_cmd}
+                path = self._manifest(nc=nc)
+                (fatal, notes), err = verify.verify(
+                    path, self.contract, self.digest, repo='o/r',
+                    unit_class='mutation', execute_nc=True, nc_command=self.proof_cmd)
+                self.assertIsNone(err)
+                self.assertEqual(fatal, [], fatal)
+                self.assertTrue(any(f'with the {tool} control applied' in n for n in notes), notes)
+
+    def test_quiet_oss_contribute_pr_verifies_with_review_artifact_and_executed_nc_c15(self):
+        # #750 C15: an oss-contribute unit parked awaiting-maintainer-merge has no upstream
+        # OWNER/MEMBER/COLLABORATOR approval while feedback is quiet; it verifies when
+        # review.artifact binds head_sha, no upstream CHANGES_REQUESTED veto exists, the
+        # coordinator contract is corroborated, and the negative control is EXECUTED.
+        rev_rel = 'docs/reports/u/review.md'
+        rev_bytes = f'Internal review PASS at {self.head_sha}\n'.encode('utf-8')
+        (self.repo / rev_rel).parent.mkdir(parents=True, exist_ok=True)
+        (self.repo / rev_rel).write_bytes(rev_bytes)
+        path = self._manifest(nc=self._revert_nc())
+        m = json.loads(Path(path).read_text(encoding='utf-8'))
+        m['park'] = 'awaiting-maintainer-merge'
+        m['review'] = {'artifact': rev_rel}
+        m['artifacts'] = [{'path': rev_rel, 'sha256': hashlib.sha256(rev_bytes).hexdigest()}]
+        Path(path).write_text(json.dumps(m), encoding='utf-8')
+        with mock.patch.object(verify, 'fetch_reviews', return_value=([], None)):
+            (fatal, notes), err = verify.verify(
+                path, self.contract, self.digest, repo='o/r',
+                unit_class='mutation', execute_nc=True, nc_command=self.proof_cmd)
+            self.assertIsNone(err)
+            self.assertEqual(fatal, [], fatal)
+            self.assertTrue(any('oss-contribute quiet PR (awaiting-maintainer-merge)' in n
+                                for n in notes), notes)
+            # Without --execute-nc, quiet oss-contribute PR fails closed:
+            (fatal_no_nc, _), _ = verify.verify(
+                path, self.contract, self.digest, repo='o/r',
+                unit_class='mutation', execute_nc=False)
+            self.assertTrue(any('no INDEPENDENT APPROVED review' in f for f in fatal_no_nc),
+                            fatal_no_nc)
+        # With an upstream CHANGES_REQUESTED veto, quiet oss-contribute PR fails closed:
+        veto = [{'user': {'login': 'upstream-maint'}, 'author_association': 'OWNER',
+                 'state': 'CHANGES_REQUESTED', 'commit_id': self.head_sha}]
+        with mock.patch.object(verify, 'fetch_reviews', return_value=(veto, None)):
+            (fatal_veto, _), _ = verify.verify(
+                path, self.contract, self.digest, repo='o/r',
+                unit_class='mutation', execute_nc=True, nc_command=self.proof_cmd)
+            self.assertTrue(any('no INDEPENDENT APPROVED review' in f for f in fatal_veto),
+                            fatal_veto)
+
+    def test_mutable_or_worktree_proof_executable_fails_closed_c19(self):
+        # #750 C19: a proof executable inside the repository worktree or one whose binary identity
+        # changes across phases must fail closed under --execute-nc.
+        wt_bin = self.repo / 'bin' / 'pytest'
+        wt_bin.parent.mkdir(parents=True, exist_ok=True)
+        wt_bin.write_text('#!/bin/sh\nexit 0\n', encoding='utf-8')
+        wt_bin.chmod(0o755)
+        recs, err = verify._Authority.nc_exec_identity([str(wt_bin)], str(self.repo))
+        self.assertIsNone(recs)
+        self.assertIn('resolves inside the repository worktree', err)
+
+        # Simulate executable digest replacement between clean and control phases:
+        path = self._manifest(nc=self._revert_nc())
+        real_id = verify._Authority.nc_exec_identity
+        calls = []
+        def tampered_id(argv, top=None, path_env=None, expected=None, when=None):
+            calls.append(when)
+            if when == 'before control':
+                return None, 'proof executable changed before control phase; fail-closed'
+            return real_id(argv, top, path_env, expected, when)
+        with mock.patch.object(verify._Authority, 'nc_exec_identity', side_effect=tampered_id):
+            (fatal, _), err = verify.verify(
+                path, self.contract, self.digest, repo='o/r',
+                unit_class='mutation', execute_nc=True, nc_command=self.proof_cmd)
+        self.assertIsNone(err)
+        self.assertTrue(any('proof executable changed before control phase' in f for f in fatal),
+                        fatal)
+
 
 _edspec = importlib.util.spec_from_file_location("ed25519", ROOT / "runtime" / "scripts" / "ed25519.py")
 ed = importlib.util.module_from_spec(_edspec)
@@ -7214,6 +7313,21 @@ class SoundLaneNeverRunsAWorkerWritableGitleaks(RepoCase):
         with mock.patch.object(verify, "_run", return_value=(0, "", "")):
             errs = verify.check_redaction({"artifacts": [self.pin(art)]}, None)
         self.assertTrue(errs and "github-token" in errs[0], errs)
+
+    def test_built_in_floor_refuses_slack_tokens_when_gitleaks_absent_c7(self):
+        # #750 C7: exercise the built-in-floor Slack token pattern (xox[baprs]-[A-Za-z0-9-]{10,128})
+        # directly with gitleaks absent.
+        verify._Authority.gitleaks = None
+        verify._Authority.gitleaks_custody = "absent"
+        for prefix in ("xoxb", "xoxp", "xoxa", "xoxr", "xoxs"):
+            with self.subTest(prefix=prefix):
+                art = self.artifact(f"SLACK_TOKEN={prefix}-1234567890-abcdefGHIJ\n",
+                                    rel=f"docs/reports/u/slack-{prefix}.txt")
+                errs = verify.check_redaction({"artifacts": [self.pin(art)]}, None)
+                self.assertTrue(errs and "slack-token" in errs[0], errs)
+        # Below the 10-char suffix bound does not false-positive:
+        short_art = self.artifact("xoxb-12345\n", rel="docs/reports/u/slack-short.txt")
+        self.assertEqual(verify.check_redaction({"artifacts": [self.pin(short_art)]}, None), [])
 
     def test_a_system_gitleaks_and_the_advisory_lane_still_consult_it(self):
         for custody, lane in (("system", "provenance=ci"), ("worker-writable", None)):

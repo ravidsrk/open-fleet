@@ -93,9 +93,12 @@ NC_TOOLS = {"mutmut", "cosmic-ray", "stryker", "pitest", "cargo-mutants", "go-mu
             "hand"}  # hand = a hand-written mutant (boundary flip / negated condition / zeroed return, compile-preserving; the diff is quoted in the artifact)
 REVIEWER_MODES = {"cross-vendor", "same-vendor-fresh", "instructed-isolation"}
 LIGHTING_VALUES = {"lit", "dark-eligible"}
-# The two negative-control tools verify.py can REPLAY itself (#255). Any other tool under
-# --execute-nc is fail-closed: an unreplayable control is not an executed one.
-EXECUTABLE_NC_TOOLS = ("revert", "hand")
+# The negative-control tools verify.py can REPLAY itself (#255, #750 C11): `revert` restores
+# base_sha paths (or range-reverts), and `hand` plus the six mutation tools apply the unified diff
+# quoted in negative_control.artifact. Any tool without a replayable control under --execute-nc is
+# fail-closed: an unreplayable control is not an executed one.
+EXECUTABLE_NC_TOOLS = ("revert", "hand", "mutmut", "cosmic-ray", "stryker", "pitest",
+                       "cargo-mutants", "go-mutesting")
 # Criterion ids in a frozen source: hyphenated (AC-1, SC-12, REQ-3) or compact (AC1, SC12). A JSON
 # source may instead declare an explicit criterion_ids array, which is unambiguous and PREFERRED —
 # write frozen contracts as JSON where you can.
@@ -1038,9 +1041,122 @@ class _Authority:
     @classmethod
     def nc_env(cls):
         """The scrubbed environment the EXECUTED CONTROL runs under (h409 F-6): the ambient
-        floor only — no GH_*/GITHUB_*, no ORCA_*, no GIT_*, nothing else the verifier holds."""
-        return {k: v for k, v in os.environ.items()
-                if k in cls.AMBIENT_KEEP or k.startswith(cls.AMBIENT_KEEP_PREFIX)}
+        floor only — no GH_*/GITHUB_*, no ORCA_*, no GIT_*, nothing else the verifier holds.
+        Relative and empty PATH entries are dropped so worktree/cwd binaries cannot shadow PATH."""
+        env = {k: v for k, v in os.environ.items()
+               if k in cls.AMBIENT_KEEP or k.startswith(cls.AMBIENT_KEEP_PREFIX)}
+        if "PATH" in env:
+            env["PATH"] = os.pathsep.join(
+                p for p in env["PATH"].split(os.pathsep) if p and os.path.isabs(p))
+        return env
+
+    @classmethod
+    def unreplayable_tool(cls, m, nc, tool):
+        """True when a mutation-tool control under --execute-nc quotes no unified diff to replay."""
+        if tool in ("revert", "hand"):
+            return False
+        art = nc.get("artifact")
+        if not (isinstance(art, str) and art):
+            return True
+        raw, err = read_artifact(m, art)
+        if err or raw is None:
+            return True
+        return not bool(_extract_diff(raw.decode("utf-8", "replace")))
+
+    @classmethod
+    def nc_exec_identity(cls, argv, top=None, path_env=None, expected=None, when=None):
+        """Resolve and fingerprint the proof executable(s) in `argv` (#750 C19).
+        Refuses executables that cannot be resolved on the scrubbed PATH, are not regular files, or
+        have any path/symlink hop inside the target or evidence worktree. Returns (records, err)."""
+        if not argv:
+            return None, "negative_control.command is empty after parsing"
+        search_path = cls.nc_env().get("PATH", "") if path_env is None else path_env
+        tokens = [argv[0]]
+        if Path(argv[0]).name == "env":
+            for arg in argv[1:]:
+                if arg == "--" or arg.startswith("-") or "=" in arg:
+                    continue
+                tokens.append(arg)
+                break
+        roots = []
+        for root in (top, _toplevel(), _evidence_toplevel()):
+            if root:
+                try:
+                    r = Path(root).resolve()
+                except OSError:
+                    continue
+                if r != Path(r.anchor):
+                    roots.append(r)
+        records = []
+        for tok in tokens:
+            resolved = tok if os.path.isabs(tok) else shutil.which(tok, path=search_path)
+            if not resolved:
+                return None, f"proof executable {tok!r} cannot be resolved on the scrubbed PATH"
+            try:
+                abs_path = os.path.abspath(resolved)
+                nodes = list(cls._nodes(abs_path))
+                real = Path(abs_path).resolve(strict=True)
+                st = os.stat(real)
+                if not stat.S_ISREG(st.st_mode) or not os.access(real, os.X_OK):
+                    return None, f"proof executable {tok!r} is not an executable regular file ({real})"
+                digest = hashlib.sha256(real.read_bytes()).hexdigest()
+            except (OSError, RuntimeError) as exc:
+                return None, f"proof executable {tok!r} cannot be verified ({exc})"
+            for r in roots:
+                if real == r or r in real.parents or any(n == r or r in n.parents for n, _ in nodes):
+                    return None, (f"proof executable {tok!r} resolves inside the repository "
+                                  f"worktree ({real}); fail-closed")
+            records.append((tok, abs_path, str(real), st.st_dev, st.st_ino, digest))
+        out = tuple(records)
+        if expected is not None and out != expected:
+            return None, f"proof executable changed {when} phase; fail-closed"
+        return out, None
+
+    @classmethod
+    def quiet_oss_review(cls, m, reviews, head, author, equivalent, review_shas,
+                         corroborated, nc_executed):
+        """#750 C15: an oss-contribute unit parked `awaiting-maintainer-merge` targets an upstream
+        repository the fleet does not control, so upstream OWNER/MEMBER/COLLABORATOR approval may be
+        absent while feedback is quiet. Accept it on the gh lane ONLY when the manifest declares
+        `awaiting-maintainer-merge`, no upstream reviewer has a standing CHANGES_REQUESTED veto on
+        this content, `review.artifact` is readable and binds `head_sha`, the coordinator supplied
+        the out-of-band contract, and the negative control was EXECUTED."""
+        parked = m.get("parked") if isinstance(m.get("parked"), list) else []
+        is_quiet_oss = any(isinstance(p, dict) and p.get("reason") == "awaiting-maintainer-merge"
+                           for p in parked)
+        if not is_quiet_oss:
+            return False, []
+        ok_shas = {head} | ({equivalent} if equivalent else set())
+        relevant = ok_shas | set(review_shas or ())
+        latest_by_user = {}
+        for rev in reviews or []:
+            if rev.get("commit_id") in relevant:
+                latest_by_user[(rev.get("user") or {}).get("login")] = rev
+        non_author = [rev for who, rev in latest_by_user.items() if author is None or who != author]
+        if any(rev.get("state") == "CHANGES_REQUESTED" for rev in non_author):
+            return False, []
+        art = (m.get("review") or {}).get("artifact")
+        if not (isinstance(art, str) and art):
+            return False, []
+        raw, err = read_artifact(m, art)
+        if err or raw is None or (head and head not in raw.decode("utf-8", "replace")):
+            return False, []
+        if not corroborated or not nc_executed:
+            return False, []
+        return True, [
+            "NOTE: oss-contribute quiet PR (awaiting-maintainer-merge) — no upstream "
+            "CHANGES_REQUESTED veto, internal review.artifact bound to head_sha, coordinator "
+            "contract corroborated, and negative control EXECUTED"
+        ]
+
+    @staticmethod
+    def unexecuted_nc_note(is_mut, nc_executed, fatal):
+        """#750 C10: disclose when a mutation unit's negative control was only statically
+        corroborated from its artifact rather than executed."""
+        if is_mut and not nc_executed and not fatal:
+            return ["NOTE: negative control corroborated from artifact only (--execute-nc not set) "
+                    "— static corroboration, not an executed control"]
+        return []
 
     @classmethod
     def git_env(cls):
@@ -1339,6 +1455,10 @@ def check_review(m, repo, is_mutation, no_gh=False, corroborated=False, dispatch
     if err:
         return [f"mutation unit: cannot establish INDEPENDENT APPROVED review: {err}"]
     if not review_ok(reviews, head, author, also_sha=equivalent, equivalent_shas=review_shas):
+        oss_ok, oss_notes = _Authority.quiet_oss_review(
+            m, reviews, head, author, equivalent, review_shas, corroborated, nc_executed)
+        if oss_ok:
+            return authority + oss_notes
         return [f"mutation unit: no INDEPENDENT APPROVED review at head_sha on {repo}#{number} "
                 f"(the PR author's own approval, superseded reviews, and approvals from accounts "
                 f"whose author_association is not one of "
@@ -2595,7 +2715,7 @@ def execute_negative_control(m, nc_command=None):
             return f"could not check out the {phase} commit: {gerr.strip()}"
         return None
 
-    def _phase_run(top, head, commit, phase, argv):
+    def _phase_run(top, head, commit, phase, argv, pinned_exec=None):
         """Run the bound command once in a FRESH repository at `commit`, under a FRESH empty
         HOME and TMPDIR. Returns (rc, stdout, stderr), or (None, None, err) when no repo was made.
 
@@ -2612,7 +2732,18 @@ def execute_negative_control(m, nc_command=None):
             err = _stage_phase_repo(top, head, commit, repo, phase)
             if err:
                 return None, None, err
-            return _run_at(repo, argv, timeout=NC_TIMEOUT_S, env=env)
+            if pinned_exec is not None:
+                _, exec_err = _Authority.nc_exec_identity(
+                    argv, top, env.get("PATH", ""), pinned_exec, f"before {phase}")
+                if exec_err:
+                    return None, None, exec_err
+            rc, out, errout = _run_at(repo, argv, timeout=NC_TIMEOUT_S, env=env)
+            if pinned_exec is not None:
+                _, post_err = _Authority.nc_exec_identity(
+                    argv, top, env.get("PATH", ""), pinned_exec, f"during {phase}")
+                if post_err:
+                    return None, None, post_err
+            return rc, out, errout
         finally:
             shutil.rmtree(holder, ignore_errors=True)
 
@@ -2620,7 +2751,7 @@ def execute_negative_control(m, nc_command=None):
     # (tests/test_reshape_width_verify.py) holds verify.py's top-level surface fixed.
     nc = m.get("negative_control") or {}
     tool = nc.get("tool")
-    if tool not in EXECUTABLE_NC_TOOLS:
+    if tool not in EXECUTABLE_NC_TOOLS or _Authority.unreplayable_tool(m, nc, tool):
         return False, [f"--execute-nc: no replay is implemented for negative_control.tool {tool!r} "
                        f"— only {list(EXECUTABLE_NC_TOOLS)} can be re-executed here; fail-closed "
                        "(#255)"]
@@ -2636,6 +2767,9 @@ def execute_negative_control(m, nc_command=None):
     argv, err = _nc_command(nc, nc_command)
     if err:
         return False, [f"--execute-nc: {err}"]
+    pinned_exec, exec_err = _Authority.nc_exec_identity(argv, top)
+    if exec_err:
+        return False, [f"--execute-nc: {exec_err}"]
     try:
         mutant, err = _prepare_control(top, head, m, nc, tool, nc_command)
     except _Authority.DriverQueryFailed as fail:
@@ -2647,7 +2781,7 @@ def execute_negative_control(m, nc_command=None):
         return False, [f"--execute-nc: {err}"]
     msgs = []
     for phase, commit in (("clean", head), ("control", mutant), ("clean", head)):
-        rc, out, errout = _phase_run(top, head, commit, phase, argv)
+        rc, out, errout = _phase_run(top, head, commit, phase, argv, pinned_exec)
         if rc is None:
             return False, [f"--execute-nc: {errout}"]
         tail = (errout.strip() or out.strip())[-300:]
@@ -2755,13 +2889,13 @@ def check_negative_control(m, is_mutation, execute=False, nc_command=None):
             elif oracle:
                 errs.append(f"range revert changes test paths or runner oracle inputs {sorted(oracle)}; "
                             "name only production negative_control.paths")
-    elif tool == "hand":
-        # The same bind, one tool over. `hand` declares its target in the quoted diff rather than
-        # in paths[], and checking that the artifact merely CONTAINS diff-shaped text left the
-        # decoy open: a narrated manifest could quote a diff against a file the change never
-        # touched, or an unrelated hunk, and offer its RED as evidence (PR #308 review, P1).
-        # Caught only under --execute-nc before, which is the identical asymmetry #306 closed
-        # for `revert` — the executed lane covering for the narrated one.
+    elif tool in EXECUTABLE_NC_TOOLS:
+        # The same bind, one tool over. `hand` (and any mutation tool that quotes its mutant diff)
+        # declares its target in the quoted diff rather than in paths[], and checking that the
+        # artifact merely CONTAINS diff-shaped text left the decoy open: a narrated manifest could
+        # quote a diff against a file the change never touched, or an unrelated hunk, and offer its
+        # RED as evidence (PR #308 review, P1). Caught only under --execute-nc before, which is the
+        # identical asymmetry #306 closed for `revert` — the executed lane covering for the narrated one.
         quoted = _extract_diff(content)
         # Only when the manifest actually pins its SHAs. A mutation manifest that does not is
         # already refused by check_real_commits, which owns that fact; repeating the refusal here
@@ -3621,7 +3755,7 @@ def check_replay_request(m, is_mutation, execute_nc, nc_command):
         return []
     nc = m.get("negative_control") or {}
     tool = nc.get("tool")
-    if tool not in EXECUTABLE_NC_TOOLS:
+    if tool not in EXECUTABLE_NC_TOOLS or _Authority.unreplayable_tool(m, nc, tool):
         return [f"--execute-nc: no replay is implemented for negative_control.tool {tool!r} "
                 f"— only {list(EXECUTABLE_NC_TOOLS)} can be re-executed here; fail-closed (#255)"]
     _, err = _nc_command(nc, nc_command)
@@ -3711,6 +3845,7 @@ def verify(manifest_path, contract_source=None, contract_digest=None, repo=None,
         lambda: check_review(m, repo, is_mut, no_gh, corroborated, lighting, nc_executed),
         lambda: check_symbol_on_base(symbol, base),
     ))
+    notes.extend(_Authority.unexecuted_nc_note(is_mut, nc_executed, fatal))
     return (fatal, notes), None
 
 

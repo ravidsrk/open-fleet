@@ -307,7 +307,8 @@ class ReleaseCutWalkthrough(unittest.TestCase):
             # where a branch happens to point at HEAD. A rehearsal must not inherit the host's
             # HEAD state any more than it inherits its GIT_* variables.
             run("git", "checkout", "-B", "release-rehearsal")
-            for path in ("docs/ops.md", "docs/releases.json", "tests/test_docs_navigation.py"):
+            for path in ("docs/ops.md", "docs/releases.json", "docs/distribution-kit.md",
+                         "tests/test_docs_navigation.py"):
                 shutil.copyfile(ROOT / path, repo / path)
             inventory = json.loads((repo / "docs/releases.json").read_text())
             historical = inventory["releases"]
@@ -318,7 +319,8 @@ class ReleaseCutWalkthrough(unittest.TestCase):
                     "CHANGELOG.md", ".claude-plugin/plugin.json", ".claude-plugin/marketplace.json")
                 inventory["preparing"] = None
                 (repo / "docs/releases.json").write_text(json.dumps(inventory, indent=2) + "\n")
-            run("git", "add", "docs/ops.md", "docs/releases.json", "tests/test_docs_navigation.py")
+            run("git", "add", "docs/ops.md", "docs/releases.json", "docs/distribution-kit.md",
+                "tests/test_docs_navigation.py")
             run("git", "add", "CHANGELOG.md", ".claude-plugin/plugin.json",
                 ".claude-plugin/marketplace.json")
             run("git", "commit", "--allow-empty", "-m", "Fixture release tooling")
@@ -777,16 +779,7 @@ class TestDocsNavigation(unittest.TestCase):
             self.assertEqual(int(m.group(1)), counts[tier],
                              f"distribution.md {tier} count is stale (live: {counts[tier]})")
 
-    def test_distribution_kit_proof_mix_matches_reality(self):
-        # #235: the listing kit leads every blurb with the proof mix, so it must track the live
-        # proof_status rollup like distribution.md does. Every occurrence is checked, not the first.
-        import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "proof_status", ROOT / "runtime" / "scripts" / "proof_status.py")
-        ps = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(ps)
-        counts = ps.rollup(ps.collect(ROOT / "skills", ROOT))
-        text = (DOCS / "distribution-kit.md").read_text(encoding="utf-8")
+    def _check_distribution_kit(self, text, counts):
         for tier in ("doctrine-only", "self-run", "external-run"):
             found = [int(n) for n in re.findall(rf"(\d+)\s+{re.escape(tier)}", text)]
             self.assertTrue(found, f"distribution-kit.md omits the {tier} count (live: {counts[tier]})")
@@ -799,6 +792,74 @@ class TestDocsNavigation(unittest.TestCase):
         self.assertTrue(totals, "distribution-kit.md states no catalog total")
         self.assertEqual(set(totals), {counts["total"]},
                          f"distribution-kit.md catalog total is stale (live: {counts['total']})")
+        # D3 (#750): every aggregator section under ## Per-aggregator blurbs must lead its
+        # paste-ready blurb/summary with `proof:` and carry the live tier counts.
+        _, heading, rest = prose.partition("## Per-aggregator blurbs\n")
+        self.assertTrue(heading, "distribution-kit.md has no ## Per-aggregator blurbs section")
+        blurbs_body = rest.split("\n## ", 1)[0]
+        sections = re.findall(r"(?ms)^### ([^\n]+)\n(.*?)(?=^### |\Z)", blurbs_body)
+        self.assertGreaterEqual(len(sections), 4,
+                                "distribution-kit.md lost one of its per-aggregator sections")
+        proof_lead = re.compile(
+            r"(?m)(?:^\s*>\s*\*\*proof:\s*|^\s*-\s*\*\*One-line summary:\*\*\s*\*proof:\s*)"
+            r"\d+\s+external-run\s+·\s+\d+\s+self-run\s+·\s+\d+\s+doctrine-only"
+        )
+        for name, sec in sections:
+            self.assertIsNotNone(
+                proof_lead.search(sec),
+                f"aggregator section {name!r} in distribution-kit.md has no proof-first blurb lead",
+            )
+            for tier in ("doctrine-only", "self-run", "external-run"):
+                sec_counts = [int(n) for n in re.findall(rf"(\d+)\s+{re.escape(tier)}", sec)]
+                self.assertEqual(
+                    sec_counts, [counts[tier]],
+                    f"aggregator section {name!r} omits or misstates {tier} count",
+                )
+
+    def test_distribution_kit_proof_mix_matches_reality(self):
+        # #235 / #750 D3: the listing kit leads every blurb with the proof mix, so it must track
+        # the live proof_status rollup like distribution.md does, and every aggregator section must
+        # carry its own proof-first lead.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "proof_status", ROOT / "runtime" / "scripts" / "proof_status.py")
+        ps = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ps)
+        counts = ps.rollup(ps.collect(ROOT / "skills", ROOT))
+        text = (DOCS / "distribution-kit.md").read_text(encoding="utf-8")
+        self._check_distribution_kit(text, counts)
+        # Negative control: stripping any aggregator section's proof-first lead must fail.
+        _, _, rest = text.partition("## Per-aggregator blurbs\n")
+        for m in re.finditer(r"(?ms)^### ([^\n]+)\n(.*?)(?=^### |^## |\Z)", rest):
+            name, sec = m.group(1), m.group(2)
+            with self.subTest(aggregator=name):
+                stripped_sec = re.sub(r"\*\*proof:[^*]+\*\*\s*|\*proof:[^*]+\*", "Feature-led copy.", sec)
+                self.assertNotEqual(stripped_sec, sec, f"failed to mutate proof lead in {name!r}")
+                mutated = text.replace(sec, stripped_sec, 1)
+                with self.assertRaisesRegex(AssertionError, re.escape(name)):
+                    self._check_distribution_kit(mutated, counts)
+
+    def test_ops_ci_runners_match_workflows_and_fork_recovery(self):
+        # #750 D1: docs/ops.md ## CI runners table and fork recovery must reflect the actual
+        # workflow runner labels (`codebuild-gha-open-fleet-...` and `instabox-medium`) rather
+        # than stale `ubuntu-latest` table cells or CodeBuild-only fork substitution instructions.
+        text = (DOCS / "ops.md").read_text(encoding="utf-8")
+        _, heading, rest = text.partition("## CI runners\n")
+        self.assertTrue(heading, "docs/ops.md has no ## CI runners section")
+        section = rest.split("\n## ", 1)[0]
+        table = "\n".join(ln for ln in section.splitlines() if ln.startswith("|"))
+        self.assertIn("codebuild-gha-open-fleet", table)
+        self.assertIn("instabox-medium", table)
+        self.assertNotRegex(
+            table, r"^\|\s*GitHub-hosted(?:\s+`ubuntu-latest`)?\s*\|",
+            "docs/ops.md CI runners table still claims jobs run on GitHub-hosted ubuntu-latest",
+        )
+        fork_m = re.search(r"\*\*Forks and contributors\.\*\*.*?(?=\n\n|\Z)", section, re.DOTALL)
+        self.assertIsNotNone(fork_m, "docs/ops.md CI runners lost its Forks and contributors paragraph")
+        fork_para = fork_m.group(0)
+        for label in ("codebuild-gha-open-fleet", "instabox-medium", "ubuntu-latest"):
+            self.assertIn(label, fork_para,
+                          f"Forks and contributors recovery in docs/ops.md omits {label!r}")
 
     def test_about_description_is_canonical_and_count_free(self):
         # The GitHub About box is a repository setting, so nothing in CI can read the live

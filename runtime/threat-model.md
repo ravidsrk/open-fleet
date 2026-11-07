@@ -79,11 +79,10 @@ choose.
 
 ### 4. Identity and access — who a worker acts for and what it may do
 
-Today: the coordinator signs each unit's contract digest and class out-of-band
-(ed25519, `dispatch-sign.py`) so a worker cannot substitute its own denominator or
-downgrade its class; gates classify every decision mechanical/taste/one-way, one-way
-being human-only and never defaulted on timeout; verification is independent and
-SHA-bound (`evidence-manifest.md`).
+Today: out-of-band dispatch signing (ed25519, `dispatch-sign.py`) is opt-in (`.orca/dispatch-pubkey`
+or `--dispatch-pubkey` to `verify.py`) and dormant by default in current mission/playbook usage;
+gates classify every decision mechanical/taste/one-way, one-way being human-only and never
+defaulted on timeout; verification is independent and SHA-bound (`evidence-manifest.md`).
 
 Residue — the fleet's top risk: **workers hold ambient host credentials** (`gh` auth,
 token files). Nothing issues short-lived, task-scoped credentials, so possession, not

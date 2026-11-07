@@ -344,5 +344,223 @@ class TestSchemaVersionStamp(Base):
         self.assertEqual(self.version(), self.mod.SCHEMA_VERSION + 1, "a refused open changes nothing")
 
 
+class TestRunBoundaryAndTaskSettlement(Base):
+    """#750 C28 & C30: Run boundaries are enforced across tasks, deps, gates, replies, and
+    worker_done / ensure_terminal_or_died settles the dispatch's task and recomputes dependents."""
+
+    def _insert_dispatch(self, dispatch_id: str, task_id: str, handle: str, run_id: str = "default"):
+        with self.store._connect() as conn:
+            conn.execute(
+                "INSERT INTO dispatches(dispatch_id, task_id, run_id, worktree, agent, terminal_handle, state, created_at, updated_at) "
+                "VALUES (?, ?, ?, '/w', 'claude', ?, 'running', 0, 0)",
+                (dispatch_id, task_id, run_id, handle),
+            )
+
+    def _status(self, task_id: str, run: str = "default") -> str:
+        return {t["id"]: t["status"] for t in self.store.task_list(run=run)["tasks"]}[task_id]
+
+    def test_c28_run_boundaries_across_tasks_deps_gates_and_replies(self):
+        self.store.run_create(run="run-a", sender="coord-a")
+        self.store.run_create(run="run-b", sender="coord-b")
+        ta = self.store.task_create(spec="task a", run="run-a")["task"]["id"]
+        tb = self.store.task_create(spec="task b", run="run-b")["task"]["id"]
+
+        # Foreign dep and parent in task_create are refused
+        with self.assertRaises(self.mod.ProviderError) as ctx:
+            self.store.task_create(spec="cross dep", deps=[ta], run="run-b")
+        self.assertEqual(ctx.exception.code, "cross_run_access")
+        with self.assertRaises(self.mod.ProviderError) as ctx:
+            self.store.task_create(spec="cross parent", parent=ta, run="run-b")
+        self.assertEqual(ctx.exception.code, "cross_run_access")
+
+        # Cross-run task_update is refused
+        with self.assertRaises(self.mod.ProviderError) as ctx:
+            self.store.task_update(task_id=ta, status="completed", run="run-b")
+        self.assertEqual(ctx.exception.code, "cross_run_access")
+
+        # Cross-run gate_create and gate_resolve are refused
+        with self.assertRaises(self.mod.ProviderError) as ctx:
+            self.store.gate_create(task_id=ta, question="hold?", sender="coord-b", run="run-b")
+        self.assertEqual(ctx.exception.code, "cross_run_access")
+        gate_a = self.store.gate_create(task_id=ta, question="hold?", sender="coord-a", run="run-a")["gate"]["id"]
+        with self.assertRaises(self.mod.ProviderError) as ctx:
+            self.store.gate_resolve(gate_id=gate_a, resolution="approved", sender="coord-a", run="run-b")
+        self.assertEqual(ctx.exception.code, "cross_run_access")
+
+        # Cross-run ask_human(resume=...) and reply_message are refused
+        self._insert_dispatch("d-a", ta, "w-a", run_id="run-a")
+        ask_res = self.store.ask_human(question="need help?", sender="w-a", run="run-a")
+        with self.assertRaises(self.mod.ProviderError) as ctx:
+            self.store.ask_human(resume=ask_res["messageId"], run="run-b")
+        self.assertEqual(ctx.exception.code, "cross_run_access")
+        with self.assertRaises(self.mod.ProviderError) as ctx:
+            self.store.reply_message(msg_id=ask_res["messageId"], body="yes", sender="coord-a", run="run-b")
+        self.assertEqual(ctx.exception.code, "cross_run_access")
+
+        # Confirm tb in run-b stayed untouched
+        self.assertEqual(self._status(tb, run="run-b"), "ready")
+
+    def test_c30_worker_done_and_died_settle_task_and_dependents(self):
+        t1 = self.store.task_create(spec="first")["task"]["id"]
+        t2 = self.store.task_create(spec="second", deps=[t1])["task"]["id"]
+        self.assertEqual(self._status(t2), "pending")
+
+        self.store.task_update(task_id=t1, status="dispatched")
+        self._insert_dispatch("disp-1", t1, "worker-1")
+        self.assertEqual(self._status(t1), "dispatched")
+
+        # Worker sends worker_done(outcome="succeeded") -> t1 completes and t2 becomes ready
+        w_store = self.mod.LocalStateStore(
+            self.db,
+            env={"OPEN_FLEET_TERMINAL_HANDLE": "worker-1", "OPEN_FLEET_DISPATCH_ID": "disp-1"},
+        )
+        w_store.send_message(subject="done", msg_type="worker_done", outcome="succeeded", payload="done")
+        self.assertEqual(self._status(t1), "completed")
+        self.assertEqual(self._status(t2), "ready")
+
+        # Dispatch t2 and simulate worker_done(outcome="failed") via relay_worker_done -> t2 fails and t3 blocks
+        t3 = self.store.task_create(spec="third", deps=[t2])["task"]["id"]
+        self.store.task_update(task_id=t2, status="dispatched")
+        self._insert_dispatch("disp-2", t2, "worker-2")
+        self.store.relay_worker_done(dispatch_id="disp-2", worker_handle="worker-2", outcome="failed")
+        self.assertEqual(self._status(t2), "failed")
+        self.assertEqual(self._status(t3), "blocked")
+
+        # Reset t2 to ready, dispatch, and test send_message(msg_type="worker_done", outcome="failed") + ensure_terminal_or_died
+        self.store.task_update(task_id=t2, status="ready")
+        self.store.task_update(task_id=t2, status="dispatched")
+        self._insert_dispatch("disp-3", t2, "worker-3")
+        w3_store = self.mod.LocalStateStore(
+            self.db,
+            env={"OPEN_FLEET_TERMINAL_HANDLE": "worker-3", "OPEN_FLEET_DISPATCH_ID": "disp-3"},
+        )
+        w3_store.send_message(subject="done", msg_type="worker_done", outcome="failed", payload="fail")
+        self.assertEqual(self._status(t2), "failed")
+        res = self.store.ensure_terminal_or_died(dispatch_id="disp-3", worker_handle="worker-3", exit_code=1)
+        self.assertFalse(res["syntheticDied"])
+        self.assertEqual(self._status(t2), "failed")
+
+
+class TestAtomicRequestAndPayloadBinding(Base):
+    """#750 C31 & C33: Request receipt is saved in the same transaction as the effect, and
+    reusing a retry_request with a different payload raises request_mismatch."""
+
+    def test_c31_and_c33_payload_bound_idempotency_across_mutations(self):
+        t = self.store.task_create(spec="alpha", title="Alpha", retry_request="req-tc")["task"]
+        # Exact retry returns identical receipt
+        t_again = self.store.task_create(spec="alpha", title="Alpha", retry_request="req-tc")["task"]
+        self.assertEqual(t["id"], t_again["id"])
+        # Changed payload with same retry_request raises request_mismatch
+        with self.assertRaises(self.mod.ProviderError) as ctx:
+            self.store.task_create(spec="beta", title="Alpha", retry_request="req-tc")
+        self.assertEqual(ctx.exception.code, "request_mismatch")
+
+        # task_update
+        self.store.task_update(task_id=t["id"], status="completed", retry_request="req-tu")
+        self.store.task_update(task_id=t["id"], status="completed", retry_request="req-tu")
+        with self.assertRaises(self.mod.ProviderError) as ctx:
+            self.store.task_update(task_id=t["id"], status="failed", retry_request="req-tu")
+        self.assertEqual(ctx.exception.code, "request_mismatch")
+
+        # send_message
+        m1 = self.store.send_message(subject="s1", msg_type="info", payload="p1", to="coordinator", retry_request="req-sm")
+        m2 = self.store.send_message(subject="s1", msg_type="info", payload="p1", to="coordinator", retry_request="req-sm")
+        self.assertEqual(m1["messageId"], m2["messageId"])
+        with self.assertRaises(self.mod.ProviderError) as ctx:
+            self.store.send_message(subject="s1", msg_type="info", payload="p2", to="coordinator", retry_request="req-sm")
+        self.assertEqual(ctx.exception.code, "request_mismatch")
+
+        # gate_create & gate_resolve
+        t2 = self.store.task_create(spec="gated")["task"]["id"]
+        g1 = self.store.gate_create(task_id=t2, question="ok?", retry_request="req-gc")["gate"]
+        g2 = self.store.gate_create(task_id=t2, question="ok?", retry_request="req-gc")["gate"]
+        self.assertEqual(g1["id"], g2["id"])
+        with self.assertRaises(self.mod.ProviderError) as ctx:
+            self.store.gate_create(task_id=t2, question="different?", retry_request="req-gc")
+        self.assertEqual(ctx.exception.code, "request_mismatch")
+
+        r1 = self.store.gate_resolve(gate_id=g1["id"], resolution="yes", retry_request="req-gr")["gate"]
+        r2 = self.store.gate_resolve(gate_id=g1["id"], resolution="yes", retry_request="req-gr")["gate"]
+        self.assertEqual(r1["id"], r2["id"])
+        with self.assertRaises(self.mod.ProviderError) as ctx:
+            self.store.gate_resolve(gate_id=g1["id"], resolution="no", retry_request="req-gr")
+        self.assertEqual(ctx.exception.code, "request_mismatch")
+
+
+class TestDefaultDbPathIgnoresAmbientGitSelectors(unittest.TestCase):
+    """#750 C34: Ambient GIT_DIR / GIT_WORK_TREE / GIT_COMMON_DIR must not redirect default_db_path."""
+
+    def test_c34_ambient_git_env_ignored_when_resolving_repo_state_id(self):
+        mod = _ls()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_a = Path(tmp) / "repo-a"
+            repo_b = Path(tmp) / "repo-b"
+            for r in (repo_a, repo_b):
+                r.mkdir()
+                subprocess.run(["git", "init", "-q", "-b", "main"], cwd=r, check=True)
+            clean_a = mod.default_db_path({"OPEN_FLEET_CLI_CWD": str(repo_a)})
+            poisoned_a = mod.default_db_path({
+                "OPEN_FLEET_CLI_CWD": str(repo_a),
+                "GIT_DIR": str(repo_b / ".git"),
+                "GIT_WORK_TREE": str(repo_b),
+                "GIT_COMMON_DIR": str(repo_b / ".git"),
+            })
+            clean_b = mod.default_db_path({"OPEN_FLEET_CLI_CWD": str(repo_b)})
+            self.assertEqual(clean_a, poisoned_a)
+            self.assertNotEqual(clean_a, clean_b)
+
+
+class TestCoordinatorTakeoverAndWorkerBindingFence(Base):
+    """#750 C35: Workers cannot claim coordinator binding, former coordinators cannot resolve gates
+    after takeover, and check_messages(wait=True) re-checks coordinator fence on takeover."""
+
+    def test_c35_worker_cannot_claim_coordinator_and_takeover_fences_former_coordinator(self):
+        t = self.store.task_create(spec="work")["task"]["id"]
+        with self.store._connect() as conn:
+            conn.execute(
+                "INSERT INTO dispatches(dispatch_id, task_id, run_id, worktree, agent, terminal_handle, state, created_at, updated_at) "
+                "VALUES ('disp-w1', ?, 'default', '/w', 'claude', 'worker-1', 'running', 0, 0)",
+                (t,),
+            )
+
+        # Worker handle cannot create or take over a run as coordinator
+        with self.assertRaises(self.mod.ProviderError) as ctx:
+            self.store.run_create(run="run-x", sender="worker-1")
+        self.assertEqual(ctx.exception.code, "worker_cannot_be_coordinator")
+
+        self.store.run_create(run="run-1", sender="coord-1")
+        with self.assertRaises(self.mod.ProviderError) as ctx:
+            self.store.run_use(run="run-1", sender="worker-1", takeover=True)
+        self.assertEqual(ctx.exception.code, "worker_cannot_be_coordinator")
+
+        # Gate created in run-1; after coord-2 takes over, coord-1 is fenced from resolving the gate
+        t_r1 = self.store.task_create(spec="in run 1", run="run-1")["task"]["id"]
+        gate = self.store.gate_create(task_id=t_r1, question="ship?", sender="coord-1", run="run-1")["gate"]["id"]
+        self.store.run_use(run="run-1", sender="coord-2", takeover=True)
+        with self.assertRaises(self.mod.ProviderError) as ctx:
+            self.store.gate_resolve(gate_id=gate, resolution="yes", sender="coord-1", run="run-1")
+        self.assertEqual(ctx.exception.code, "consumer_fenced")
+        # Active coordinator coord-2 can resolve the gate
+        resolved = self.store.gate_resolve(gate_id=gate, resolution="yes", sender="coord-2", run="run-1")["gate"]
+        self.assertEqual(resolved["status"], "resolved")
+
+        # A waiting check_messages(wait=True) loop by coord-1 is fenced if takeover happens mid-wait
+        self.store.run_create(run="run-wait", sender="coord-1")
+        err_holder: list[str] = []
+
+        def waiter():
+            try:
+                self.store.check_messages(terminal="coord-1", run="run-wait", wait=True, timeout_ms=1500)
+            except self.mod.ProviderError as exc:
+                err_holder.append(exc.code)
+
+        th = threading.Thread(target=waiter)
+        th.start()
+        time.sleep(0.12)
+        self.store.run_use(run="run-wait", sender="coord-2", takeover=True)
+        th.join(timeout=2.0)
+        self.assertEqual(err_holder, ["consumer_fenced"])
+
+
 if __name__ == "__main__":
     unittest.main()

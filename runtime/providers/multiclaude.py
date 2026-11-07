@@ -37,11 +37,15 @@ Source-verified against `internal/socket`, `internal/daemon/daemon.go`, `interna
 """
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import json
+import os
 import re
 import shlex
+import shutil
 import socket
+import stat
 import time
 import uuid
 from datetime import datetime, timezone
@@ -325,18 +329,53 @@ class MulticlaudeProvider(ExternalDispatchMixin, RuntimeProvider):
         self.state.save_request(retry_request, "worker-start", "ready", res)
         return res
 
+    @staticmethod
+    def _ensure_private_dir(path: Path) -> None:
+        if path.is_symlink():
+            raise ProviderError("multiclaude_unsafe_path", f"refusing symlinked message directory {path}")
+        path.mkdir(mode=0o700, exist_ok=True)
+        st = path.lstat()
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+            raise ProviderError("multiclaude_unsafe_path", f"refusing untrusted message directory {path}")
+        os.chmod(path, 0o700)
+
     def _deliver(self, repo: str, to: str, body: str, sender: str = "open-fleet") -> str:
         """Queue a message the multiclaude way (file + `route_messages`)."""
         msg_id = f"msg-{str(uuid.uuid4())[:13]}"
+        if self.home.exists() and not self.home.is_symlink() and self.home.stat().st_uid == os.getuid():
+            with contextlib.suppress(OSError):
+                os.chmod(self.home, 0o700)
+        for cur in (self.home / "messages", self.home / "messages" / repo, self.home / "messages" / repo / to):
+            self._ensure_private_dir(cur)
         msg_dir = self.home / "messages" / repo / to
-        msg_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        (msg_dir / f"{msg_id}.json").write_text(
-            json.dumps({"id": msg_id, "from": sender, "to": to, "timestamp": stamp, "body": body, "status": "pending"}, indent=2),
-            encoding="utf-8",
-        )
+        msg_file = msg_dir / f"{msg_id}.json"
+        if msg_file.is_symlink():
+            raise ProviderError("multiclaude_unsafe_path", f"refusing symlinked message file {msg_file}")
+        data = json.dumps(
+            {"id": msg_id, "from": sender, "to": to, "timestamp": stamp, "body": body, "status": "pending"},
+            indent=2,
+        ).encode("utf-8")
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(str(msg_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | nofollow, 0o600)
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+                raise ProviderError("multiclaude_unsafe_path", f"refusing untrusted message file {msg_file}")
+            os.fchmod(fd, 0o600)
+            os.write(fd, data)
+        finally:
+            os.close(fd)
         self._command("route_messages")
         return msg_id
+
+    def _purge_agent_messages(self, repo: str, agent_name: str) -> None:
+        with contextlib.suppress(OSError):
+            msg_dir = self.home / "messages" / repo / agent_name
+            if msg_dir.is_symlink():
+                msg_dir.unlink(missing_ok=True)
+            elif msg_dir.is_dir() and msg_dir.stat().st_uid == os.getuid():
+                shutil.rmtree(msg_dir, ignore_errors=True)
 
     def _window_gone(self, repo: str, agent_name: str) -> bool:
         session = self._tmux_target(repo, agent_name).rsplit(":", 1)[0]
@@ -448,7 +487,7 @@ class MulticlaudeProvider(ExternalDispatchMixin, RuntimeProvider):
 
     # --- observation & fencing --------------------------------------------------------
     def worker_list(self, **kwargs: Any) -> dict[str, Any]:
-        return self._list_local(run=kwargs.get("run"), task=kwargs.get("task"), limit=kwargs.get("limit"))
+        return self._list_local(**kwargs)
 
     def worker_show(self, *, dispatch_id: str = "", **kwargs: Any) -> dict[str, Any]:
         row = self._dispatch_row(dispatch_id)
@@ -515,16 +554,33 @@ class MulticlaudeProvider(ExternalDispatchMixin, RuntimeProvider):
                     "worktree remove would discard it — commit it (and re-verify) or retain the worker",
                     {"dispatchId": dispatch_id, "dirty": dirty},
                 )
+            preserved = preserve_worker_head(lambda argv: self._cli_text(argv), wt, dispatch_id)
             args = {"repo": repo, "agent": agent_name}
             if reason:
                 args["summary"] = reason
             upstream = self._command("complete_agent", args)
+            self._purge_agent_messages(repo, agent_name)
         elif verb in ("stop", "abandon"):
+            preserved = None
             upstream = self._stop_upstream(repo, agent_name, row["worktree"])
+            self._purge_agent_messages(repo, agent_name)
+        else:
+            preserved = None
         new_state, term_state = self._fence_local(dispatch_id, verb)
         ver = self._verification(dispatch_id)
-        return {"dispatchId": dispatch_id, "verb": verb, "state": new_state, "terminalState": term_state,
-                "verifiedSha": ver["sha"] if ver else None, "reason": reason, "upstream": upstream}
+        out = {
+            "dispatchId": dispatch_id,
+            "verb": verb,
+            "state": new_state,
+            "terminalState": term_state,
+            "verifiedSha": ver["sha"] if ver else None,
+            "reason": reason,
+            "upstream": upstream,
+        }
+        if preserved is not None:
+            out["preserved"] = preserved
+            out["preservedRef"] = preserved["ref"]
+        return out
 
     # --- Mailbox (multiclaude message files + `route_messages`) ---
     def send_message(

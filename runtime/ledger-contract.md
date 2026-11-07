@@ -25,8 +25,8 @@ or it is an allowed park class with a human/OPS ref.
 | `PR_OPEN` | Integrator opened PR against BASE; `baseRefName==BASE` asserted. **`n/a` only** on the documented no-gh local-merge path (merge-serialization.md) — then `MERGED` still requires ancestry-verified local merge + ledger `no-gh: local-merge` |
 | `BOT` | Review-bot wait→ingest→reconcile done, or `n/a` if no bot / bot disabled for the run / no-gh path |
 | `REVIEWED` | Build-blind review PASS at `reviewed_sha` (fresh; voided by later push) |
-| `MERGED` | Ancestry-verified merge into BASE; merge-commit (not squash); closing SHA in evidence |
-| `WT_CLEAN` | Unit worktree retired after merge (dispatch-lifecycle.md guards) |
+| `MERGED` | Ancestry-verified merge into BASE; merge-commit (not squash); closing SHA in evidence (`oss-contribute`: `f` at `awaiting-maintainer-merge`, `n/a` on assist) |
+| `WT_CLEAN` | Unit worktree retired after merge/handoff (dispatch-lifecycle.md guards) |
 
 Canonical row (extend with mission fields, never drop flags):
 
@@ -34,10 +34,9 @@ Canonical row (extend with mission fields, never drop flags):
 
 `lighting` is `lit` (default) or `dark-eligible` (gate-classification.md). Omit-or-empty = `lit`.
 
-`park` is empty or a class below. Advance flags only after the corresponding verify step; never
-batch-flip from memory. The row IS the record: a `BUILD_DONE=t` noted only as a dispatch-log line has
-not advanced the unit — RESUME and convergence read row flags, not narration. Flip the flag in
-the same edit that logs the verify.
+`park` is empty or a class below. Advance flags only after the verify step; never batch-flip from
+memory. The row IS the record: `BUILD_DONE=t` noted only in dispatch logs has not advanced the
+unit — RESUME and convergence read row flags, not narration. Flip the flag in the edit that logs the verify.
 
 ## Park classes (honest incomplete)
 
@@ -48,18 +47,16 @@ the same edit that logs the verify.
 | `VERIFY_AT_SCALE` | OPS queue: load test / prod telemetry / live apply still owed | Companion to `CODE_CLOSED` |
 | `refuted` / `duplicate` / `externally-resolved` | Not real work for this run | Yes after batch gate where required |
 | `out-of-scope` | Wrong mission (hand off) | Not this mission's denominator |
-| `awaiting-maintainer-merge` / `externally-covered` | oss-contribute handoffs (upstream-contribution.md): a posted PR whose feedback went quiet, or an issue another open PR already covers; ref = that PR url | Yes — a handoff, not a degradation (mission-chaining.md) |
-| `needs-contributor` / `design-disagreement` / `cannot-reproduce` | absorb-it inbound-PR parks: the PR needs its author's action, the maintainer alone decides a design dispute, or the report could not be reproduced on current main; ref = the PR url + the follow-up round or reproduction log | No — degraded terminal (the queue is not drained while a real contribution sits unanswered) |
+| `awaiting-maintainer-merge` / `externally-covered` | oss-contribute handoffs (upstream-contribution.md): quiet PR (`BUILD_DONE..FOLLOWED_UP,WT_CLEAN=t`, `MERGED=f`; live unparked `MERGED=f` stays in FOLLOW UP) or covered/assist (`BUILD_DONE..MERGED=n/a`, `FOLLOWED_UP,WT_CLEAN=t`); ref=url | Yes — a handoff, not a degradation (mission-chaining.md) |
+| `needs-contributor` / `design-disagreement` / `cannot-reproduce` | absorb-it inbound-PR parks: PR needs author action, maintainer decides design dispute, or report did not reproduce on main; ref = PR url + round/repro log | No — degraded terminal (queue not drained while a real contribution sits unanswered) |
 
-`CODE_CLOSED` **requires** a written verify plan (command or checklist) and an OPS/human ref in
-the run's OPS actions note under `docs/` (or the ledger OPS section). Never use it to skip a test
-the fleet *can* run.
+`CODE_CLOSED` **requires** a written verify plan (command/checklist) and an OPS/human ref in the
+run's OPS actions note under `docs/` (or ledger OPS section). Never use it to skip a runnable test.
 
 ## DECISIONS log (durable auto-resolves)
 
-Path: a `DECISIONS.md` file under the run's REPO_ROOT `docs/` (create if absent). Every mechanical
-or taste auto-resolve appends one line with `runtime/scripts/decisions.py append` (it refuses a
-malformed line):
+Path: `DECISIONS.md` under the run's REPO_ROOT `docs/` (create if absent). Every mechanical or
+taste auto-resolve appends one line with `runtime/scripts/decisions.py append` (refuses malformed lines):
 
 `ts · gate-or-ask-id · class · answer · why · task_id?`
 

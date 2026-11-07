@@ -819,17 +819,23 @@ class TestCountAgnosticGuards(unittest.TestCase):
     def test_a_ledger_row_dropping_a_canonical_flag_fails(self):
         # #357: absorb-it's row shipped without `lighting` while gate-classification mandates it
         # on every dispatched unit — the guard must catch exactly that drop.
-        with tempfile.TemporaryDirectory() as tmp:
-            skills = Path(tmp) / "skills"
-            (skills / "demo-it").mkdir(parents=True)
-            (skills / "demo-it" / "SKILL.md").write_text(
-                "---\nname: demo-it\n---\n\n`| task_id | unit | BUILD_DONE | PR_OPEN | BOT | "
-                "REVIEWED | MERGED | WT_CLEAN | park | evidence |`\n", encoding="utf-8")
-            with mock.patch.object(validate, "SKILLS_DIR", skills):
-                failures = validate.check_ledger_rows()
-        self.assertEqual(len(failures), 1, failures)
-        self.assertIn("demo-it", failures[0])
-        self.assertIn("lighting", failures[0])
+        # #750 C12: offload-it's inline, multi-line-wrapped row omitted BUILD_DONE and BOT and
+        # escaped `row.startswith("| task_id |")`.
+        for label, row_text, expected_missing in (
+            ("standalone", "`| task_id | unit | BUILD_DONE | PR_OPEN | BOT | REVIEWED | MERGED | WT_CLEAN | park | evidence |`\n", ("lighting",)),
+            ("inline_wrapped", "One row per recipe: `| task_id | recipe | INTERVIEW | SCAFFOLD |\nPROVISION | PR_OPEN | REVIEWED | MERGED | WT_CLEAN | lighting | park | evidence |`.\n", ("BUILD_DONE", "BOT")),
+        ):
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as tmp:
+                skills = Path(tmp) / "skills"
+                (skills / "demo-it").mkdir(parents=True)
+                (skills / "demo-it" / "SKILL.md").write_text(
+                    f"---\nname: demo-it\n---\n\n{row_text}", encoding="utf-8")
+                with mock.patch.object(validate, "SKILLS_DIR", skills):
+                    failures = validate.check_ledger_rows()
+                self.assertEqual(len(failures), 1, failures)
+                self.assertIn("demo-it", failures[0])
+                for flag in expected_missing:
+                    self.assertIn(flag, failures[0])
 
     def test_badge_check_flags_stale(self):
         # tests.json is written CURRENT so the only error can come from missions.json's

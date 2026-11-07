@@ -108,6 +108,7 @@ import importlib.util
 import json
 import os
 import re
+import stat
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -284,6 +285,64 @@ def grant_payload(ident, answer, why_core, task_id="", *, ts, klass="one-way"):
         [ts, ident, klass, answer, why_core, task_id or ""])).encode("utf-8")
 
 
+def _read_gitfile_text(path):
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        return os.read(fd, 4096).decode("utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    finally:
+        os.close(fd)
+
+
+def _linked_worktree_of(inner, outer):
+    """True when `inner` is a genuine `git worktree add` linked worktree of `outer` (W5-03, C20)."""
+    gitfile, admin = inner / ".git", outer / ".git" / "worktrees"
+    if (outer / ".git").is_symlink():
+        return False
+    text = _read_gitfile_text(gitfile)
+    if not text or not text.startswith("gitdir:"):
+        return False
+    target = Path(text[len("gitdir:"):].strip())
+    target = Path(os.path.realpath(target if target.is_absolute() else inner / target))
+    if target.parent != Path(os.path.realpath(admin)) or not target.is_dir():
+        return False
+    back = _read_gitfile_text(target / "gitdir")
+    if not back:
+        return False
+    back_path = Path(back) if Path(back).is_absolute() else target / back
+    return os.path.realpath(back_path) == os.path.realpath(gitfile)
+
+
+def _repo_for_path(target_path, default_root):
+    """Resolve the repository root for `target_path`, refusing nested submodules or planted `.git`
+    ancestors that are not genuine linked worktrees of their enclosing repository (C20)."""
+    lexical = Path(os.path.abspath(target_path))
+    real = lexical.resolve()
+    found = []
+    for candidate in (*real.parents, *lexical.parents):
+        if os.path.lexists(candidate / ".git"):
+            rp = Path(os.path.realpath(candidate))
+            if rp not in found:
+                found.append(rp)
+    if not found:
+        return default_root
+    if len(found) == 1:
+        return found[0]
+    if len(found) == 2 and _linked_worktree_of(found[0], found[1]):
+        return found[0]
+    raise DecisionsError(
+        f"the nearest repository root {found[0]} is nested inside the repository {found[-1]} "
+        "(a submodule, vendored repository or planted .git): refusing to resolve the human-grant "
+        "trust anchor in a nested repository (C20)"
+    )
+
+
 def grant_pubkey(log_path, pin_ref=None):
     """Pinned human-grant pubkey bytes for this log, or None when unpinned.
 
@@ -313,12 +372,7 @@ def grant_pubkey(log_path, pin_ref=None):
                 "grant key would come from the working tree the checked change writes (a swapped "
                 "or deleted pin included). Pass --pin-ref refs/remotes/origin/<default> or a commit "
                 "id (W3-07, #635)")
-    resolved = Path(log_path).resolve()
-    root = Path(__file__).resolve().parent.parent.parent
-    for parent in resolved.parents:
-        if (parent / ".git").exists():
-            root = parent
-            break
+    root = _repo_for_path(log_path, Path(__file__).resolve().parent.parent.parent)
     tree = None
     for pin in [root / GRANT_PUBKEY_REL]:
         try:

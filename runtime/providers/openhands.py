@@ -464,7 +464,7 @@ class OpenHandsProvider(RuntimeProvider):
             for it in items
             if isinstance(it, dict) and it.get("id")
         }
-        return local_worker_list(self.state, self.name, run=run, task=task, limit=limit, stages=stages, upstream=raw)
+        return local_worker_list(self.state, self.name, run=run, task=task, limit=limit, stages=stages, upstream=raw, **kwargs)
 
     def worker_show(self, *, dispatch_id: str = "", **kwargs: Any) -> dict[str, Any]:
         row = load_dispatch(self.state, dispatch_id, self.name)

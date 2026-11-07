@@ -236,7 +236,7 @@ class OverstoryProvider(RuntimeProvider):
             for a in agents
             if isinstance(a, dict) and a.get("agentName")
         }
-        return local_worker_list(self.state, self.name, run=run, task=task, limit=limit, stages=stages, upstream=raw)
+        return local_worker_list(self.state, self.name, run=run, task=task, limit=limit, stages=stages, upstream=raw, **kwargs)
 
     def _inspect(self, agent_name: str) -> dict[str, Any]:
         return self._ov(["ov", "inspect", agent_name, "--json"])

@@ -142,9 +142,10 @@ moves past `reviewed_sha` leaves you holding an opinion about code that no longe
 One: posting the verdict to the PR is the run's only outward action, a one-way gate that needs a
 recorded human grant ([`gate-classification`](../../runtime/gate-classification.md)) — the report
 itself lands without one. Nothing else is held: the run mutates nothing. Workers run
-`PROFILE=ro`, report-only fleets preflight with `preflight.py --mode readonly`
-([`dispatch-lifecycle`](../../runtime/dispatch-lifecycle.md)), and the permission boundary is
-enforced below the model rather than requested of it.
+`PROFILE=ro` (with `OPEN_FLEET_HOOK_READONLY=1` wired into `deny-hook.sh` on POSIX/native launches,
+and provider tool-list restrictions where supported), report-only fleets preflight with
+`preflight.py --mode readonly` ([`dispatch-lifecycle`](../../runtime/dispatch-lifecycle.md)), and
+the permission boundary is enforced below the model where supported rather than requested of it.
 
 The human gate lives *after* the mission: acting on the verdict. Merging to the default branch
 stays a one-way door under [`gate-classification`](../../runtime/gate-classification.md) no matter

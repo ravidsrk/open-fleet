@@ -1,4 +1,4 @@
-- **The deny hook judges `busybox --install sh -c '…'` as the shell it names** (#740). The
-  2026-10-29 audit noted that `--install` shifted the applet, so the body was never read and the
-  line was allowed. `_peel_busybox` now skips a leading `--install` (and its `-s`) before peeling,
-  failing closed. `busybox --install -s DIR`, with no applet after it, keeps its decision.
+- **The deny hook leaves `busybox --install [-s] [DIR]` unpeeled instead of treating `DIR` as an
+  applet** (#740, #750). In BusyBox, `--install [-s] [DIR]` takes an optional target directory
+  operand rather than an applet name; `_peel_busybox` peels only leading applet invocations (`busybox
+  sh -c '…'`), avoiding false denials when `DIR` matches an applet name.

@@ -47,7 +47,7 @@ from .base import (
     require_id,
 )
 from ._external import release_claim_on_failure
-from ._external import call_runner, foreign_dirty_paths, insert_dispatch, load_dispatch, preserve_worker_head, record_fence, run_cli_text, show_from_row
+from ._external import call_runner, foreign_dirty_paths, insert_dispatch, load_dispatch, local_worker_list, preserve_worker_head, record_fence, run_cli_text, show_from_row
 from .local_state import LocalStateStore
 
 def _is_placeholder_worktree(worktree: str | None) -> bool:
@@ -336,23 +336,7 @@ class WorktrunkProvider(RuntimeProvider):
         return res
 
     def worker_list(self, *, run: str | None = None, **kwargs: Any) -> dict[str, Any]:
-        with self.state._connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM dispatches WHERE backend = ? ORDER BY created_at ASC", (self.name,)
-            ).fetchall()
-        workers = [
-            {
-                "dispatchId": r["dispatch_id"],
-                "taskId": r["task_id"],
-                "state": r["state"],
-                "terminalState": r["terminal_state"],
-                "agentTerminalHandle": r["terminal_handle"],
-                "worktree": r["worktree"],
-            }
-            for r in rows
-            if not run or r["run_id"] == run
-        ]
-        return {"workers": workers}
+        return local_worker_list(self.state, self.name, run=run, **kwargs)
 
     def _session_alive(self, session: str) -> bool:
         try:

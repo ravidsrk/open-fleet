@@ -29,6 +29,7 @@ import shutil
 import signal
 import socket
 import sqlite3
+import stat
 import subprocess
 import time
 import uuid
@@ -302,6 +303,8 @@ def install_worktree_hooks(
     # shlex-quoted: a path carrying `$`, a backtick or `"` must never expand in the hook shell.
     qwt, qhook = shlex.quote(str(wt)), shlex.quote(hook)
     boundary = f"OPEN_FLEET_UNIT_WORKTREE={qwt} ORCA_UNIT_WORKTREE={qwt}"
+    if profile == "ro":
+        boundary += " OPEN_FLEET_HOOK_READONLY=1 ORCA_HOOK_READONLY=1"
     cmd_str = f"{boundary} sh {qhook}"
     strict_cmd = f"{boundary} ORCA_HOOK_STRICT_EXIT=1 sh {qhook}"
     installed: dict[str, str] = {"deny_hook": hook}
@@ -429,10 +432,16 @@ def verify_installed_guard(wt_path: str | Path, agent: str, profile: str,
         return
     hook = hook_script or hooks_map.get("deny_hook") or str(CANONICAL_DENY_HOOK)
     launch_env = {**os.environ, "OPEN_FLEET_DENY_HOOK": str(hook), "ORCA_DENY_HOOK_PATH": str(hook),
-                  "OPEN_FLEET_UNIT_WORKTREE": str(wt_path), "ORCA_UNIT_WORKTREE": str(wt_path)}
+                  "OPEN_FLEET_UNIT_WORKTREE": str(wt_path), "ORCA_UNIT_WORKTREE": str(wt_path),
+                  "OPEN_FLEET_SANDBOX_PROFILE": profile, "ORCA_SANDBOX_PROFILE": profile}
+    vs_args = ["sh", str(verifier or hook), "--verify-settings", str(registration), "--harness", agent,
+               "--boundary", str(wt_path)]
+    if profile == "ro":
+        launch_env["OPEN_FLEET_HOOK_READONLY"] = "1"
+        launch_env["ORCA_HOOK_READONLY"] = "1"
+        vs_args.append("--readonly")
     proc = subprocess.run(
-        ["sh", str(verifier or hook), "--verify-settings", str(registration), "--harness", agent,
-         "--boundary", str(wt_path)],
+        vs_args,
         capture_output=True, text=True, timeout=60, env=launch_env,
     )
     if proc.returncode != 0:
@@ -1937,13 +1946,18 @@ if {repr(self.backend)} == "cmux":
             if replay is not None:
                 return replay
 
-        run_id = run or "default"
         # A dead coordinator's unfinished launch of THIS task is settled before a new claim (#597).
         self._reconcile_dead_intents(task_id=task_id)
         with self.state._connect() as conn:
             t_row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         if not t_row:
             raise ProviderError("task_not_found", f"task {task_id!r} not found")
+        if run is not None and t_row["run_id"] != run:
+            raise ProviderError(
+                "cross_run_access",
+                f"task {task_id!r} belongs to run {t_row['run_id']!r}, not {run!r}",
+            )
+        run_id = t_row["run_id"] or "default"
         if t_row["status"] != "ready":
             raise self._not_startable(task_id, t_row["status"])
         spec_text = self.resolve_task_prompt(task_id, prompt if prompt is not None else t_row["spec"])
@@ -2120,6 +2134,7 @@ if {repr(self.backend)} == "cmux":
             "OPEN_FLEET_PARENT_PROFILE": profile,
             "ORCA_PARENT_PROFILE": profile,
             "OPEN_FLEET_ROOT": str(OPEN_FLEET_ROOT),
+            **({"OPEN_FLEET_HOOK_READONLY": "1", "ORCA_HOOK_READONLY": "1"} if profile == "ro" else {}),
         }
         full_command = " ".join(shlex.quote(str(a)) for a in launch["argv"])
         container = ""
@@ -3242,6 +3257,8 @@ if {repr(self.backend)} == "cmux":
         *,
         run: str | None = None,
         task: str | None = None,
+        terminal_state: str | None = None,
+        include_remote: bool = False,
         limit: int | None = None,
         cursor: str | None = None,
     ) -> dict[str, Any]:
@@ -3253,12 +3270,30 @@ if {repr(self.backend)} == "cmux":
         if task:
             q += " AND task_id = ?"
             params.append(task)
-        q += " ORDER BY created_at DESC"
-        if limit:
-            q += f" LIMIT {int(limit)}"
+        q += " ORDER BY created_at DESC, dispatch_id DESC"
         self._reconcile_dead_intents()
         self._sweep_liveness(self._dispatch_rows(q, tuple(params)))
         rows = self._dispatch_rows(q, tuple(params))
+        if terminal_state:
+            rows = [r for r in rows if r["terminal_state"] == terminal_state]
+        start_idx = 0
+        if cursor is not None and str(cursor) != "":
+            s_cur = str(cursor)
+            if s_cur.isdigit():
+                start_idx = int(s_cur)
+            else:
+                for idx, r in enumerate(rows):
+                    if r["dispatch_id"] == s_cur:
+                        start_idx = idx + 1
+                        break
+        total = len(rows)
+        if limit is not None and int(limit) > 0:
+            lim = int(limit)
+            page_rows = rows[start_idx : start_idx + lim]
+            next_cursor = str(start_idx + lim) if (start_idx + lim) < total else None
+        else:
+            page_rows = rows[start_idx:]
+            next_cursor = None
         workers = [
             {
                 "dispatchId": r["dispatch_id"],
@@ -3268,9 +3303,9 @@ if {repr(self.backend)} == "cmux":
                 "agentTerminalHandle": r["terminal_handle"],
                 "worktree": r["worktree"],
             }
-            for r in rows
+            for r in page_rows
         ]
-        return {"workers": workers, "scope": {"source": "posix"}, "page": {"nextCursor": None}}
+        return {"workers": workers, "scope": {"source": "posix"}, "page": {"nextCursor": next_cursor}}
 
     def worker_show(self, dispatch_id: str) -> dict[str, Any]:
         self._reconcile_dead_intents()
@@ -3288,77 +3323,142 @@ if {repr(self.backend)} == "cmux":
             worktree=r["worktree"],
         )
 
-    def worker_read(self, dispatch_id: str, source: str = "transcript", limit: int = 50) -> dict[str, Any]:
+    def worker_read(
+        self,
+        dispatch_id: str,
+        source: str = "transcript",
+        limit: int = 50,
+        cursor: str | int | None = None,
+    ) -> dict[str, Any]:
         rows = self._dispatch_rows("WHERE dispatch_id = ?", (dispatch_id,))
         if not rows:
             raise ProviderError("dispatch_not_found", f"dispatch {dispatch_id!r} not found")
         r = rows[0]
         log_file = Path(r["lane_dir"]) / "events.jsonl" if r["lane_dir"] else None
-        lines: list[str] = []
+        all_lines: list[str] = []
         if log_file and log_file.is_file():
-            lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()[-limit:]
+            all_lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        total = len(all_lines)
+        if cursor is not None and str(cursor) != "":
+            cur_idx = max(0, int(cursor))
+            after = all_lines[cur_idx:]
+            if limit is not None:
+                lim = max(0, int(limit))
+                lines = after[:lim]
+                truncated = len(after) > lim
+            else:
+                lines = after
+                truncated = False
+            next_cursor = cur_idx + len(lines)
+        else:
+            if limit is not None:
+                lim = max(0, int(limit))
+                truncated = total > lim
+                lines = all_lines[-lim:] if lim > 0 else []
+            else:
+                lines = all_lines
+                truncated = False
+            next_cursor = total
         if source == "transcript":
-            return normalize_read("transcript", lines=lines, cursor=len(lines))
-        return normalize_read("terminal", lines=lines, cursor=len(lines), handle=r["terminal_handle"])
-
-    def worker_fence(self, verb: str, dispatch_id: str, reason: str | None = None) -> dict[str, Any]:
-        new_state, term_state = fence_state(verb)
-        with self.state._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            r = conn.execute("SELECT * FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)).fetchone()
-            if not r:
-                conn.execute("ROLLBACK")
-                raise ProviderError("dispatch_not_found", f"dispatch {dispatch_id!r} not found")
-            handle = r["terminal_handle"]
-            if verb != "retain" and handle:
-                conn.execute("UPDATE terminals SET state = ? WHERE handle = ?", (term_state, handle))
-            conn.execute(
-                "UPDATE dispatches SET state = ?, terminal_state = ?, updated_at = ? WHERE dispatch_id = ?",
-                (new_state, term_state, time.time(), dispatch_id),
-            )
-            if verb != "retain":
-                # A fence before any monitor claimed closes the launch gate for good, in the
-                # same transaction: a later retain rewrites the state for inspection, but a
-                # late monitor from a dead coordinator's launcher never runs under it (#597).
-                conn.execute(
-                    "UPDATE dispatches SET gate_closed_at = COALESCE(gate_closed_at, ?) "
-                    "WHERE dispatch_id = ? AND monitor_started_at IS NULL",
-                    (time.time(), dispatch_id),
-                )
-            gated = conn.execute("SELECT * FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)).fetchone()
-            conn.execute("COMMIT")
-        never_ran = self._gate_proves_never_ran(gated)
-        out: dict[str, Any] = {"dispatchId": dispatch_id, "state": new_state, "terminalState": term_state}
-        finished = r["state"] in ("completed", "died", *FENCED_DISPATCH_STATES) or (
-            bool(r["lane_dir"]) and (Path(r["lane_dir"]) / "exit.json").is_file()
+            return normalize_read("transcript", lines=lines, cursor=next_cursor, truncated=truncated)
+        return normalize_read(
+            "terminal",
+            lines=lines,
+            cursor=next_cursor,
+            truncated=truncated,
+            handle=r["terminal_handle"],
         )
-        if verb != "retain" and finished:
-            # Already exited: its pid may belong to an unrelated process group by now, so only
-            # a group proven to be this worker's (a vanished monitor's agent) is still stopped.
-            out["termination"] = {"skipped": "dispatch already finished"}
-            orphans = self._stop_orphaned_group(r)
-            if orphans:
-                out["termination"]["orphans"] = orphans
-        elif verb != "retain":
-            # Record first (the launch gate and the post-spawn check read it), then tear down.
-            container = ""
-            try:
-                container = json.loads(r["launch_effective"] or "{}").get("container") or ""
-            except json.JSONDecodeError:
-                container = ""
-            out["termination"] = self._terminate_backend(
-                r["backend"] or self.backend,
-                handle,
-                # No published pid (its coordinator died first): the gate-recorded one (#597).
-                int(r["pid"] or 0) or int(_col(r, "monitor_pid") or 0),
-                backend_ref=r["backend_ref"],
-                container=container,
-                # A gate closed before any claim: no monitor ran or can, so no sync is coming (#597).
-                lane_dir=None if never_ran else r["lane_dir"],
+
+    @staticmethod
+    def _purge_private_inbox(worktree: str | None) -> None:
+        if not worktree:
+            return
+        with contextlib.suppress(OSError):
+            inbox_dir = Path(worktree) / ".open-fleet"
+            if inbox_dir.is_symlink():
+                return
+            inbox_file = inbox_dir / "inbox.jsonl"
+            if inbox_file.exists() or inbox_file.is_symlink():
+                inbox_file.unlink(missing_ok=True)
+            if inbox_dir.is_dir() and not any(inbox_dir.iterdir()):
+                inbox_dir.rmdir()
+
+    def worker_fence(
+        self,
+        verb: str,
+        dispatch_id: str,
+        reason: str | None = None,
+        retry_request: str | None = None,
+    ) -> dict[str, Any]:
+        payload_sha = _launch_payload_sha256({"verb": verb, "dispatch_id": dispatch_id, "reason": reason})
+        method = f"worker-{verb}"
+        cached = self.state.get_or_record_request(retry_request, method, payload_sha)
+        if cached:
+            return cached
+        try:
+            new_state, term_state = fence_state(verb)
+            with self.state._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                r = conn.execute("SELECT * FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)).fetchone()
+                if not r:
+                    conn.execute("ROLLBACK")
+                    raise ProviderError("dispatch_not_found", f"dispatch {dispatch_id!r} not found")
+                handle = r["terminal_handle"]
+                if verb != "retain" and handle:
+                    conn.execute("UPDATE terminals SET state = ? WHERE handle = ?", (term_state, handle))
+                conn.execute(
+                    "UPDATE dispatches SET state = ?, terminal_state = ?, updated_at = ? WHERE dispatch_id = ?",
+                    (new_state, term_state, time.time(), dispatch_id),
+                )
+                if verb != "retain":
+                    # A fence before any monitor claimed closes the launch gate for good, in the
+                    # same transaction: a later retain rewrites the state for inspection, but a
+                    # late monitor from a dead coordinator's launcher never runs under it (#597).
+                    conn.execute(
+                        "UPDATE dispatches SET gate_closed_at = COALESCE(gate_closed_at, ?) "
+                        "WHERE dispatch_id = ? AND monitor_started_at IS NULL",
+                        (time.time(), dispatch_id),
+                    )
+                gated = conn.execute("SELECT * FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)).fetchone()
+                conn.execute("COMMIT")
+            if verb != "retain":
+                self._purge_private_inbox(r["worktree"])
+            never_ran = self._gate_proves_never_ran(gated)
+            out: dict[str, Any] = {"dispatchId": dispatch_id, "state": new_state, "terminalState": term_state}
+            finished = r["state"] in ("completed", "died", *FENCED_DISPATCH_STATES) or (
+                bool(r["lane_dir"]) and (Path(r["lane_dir"]) / "exit.json").is_file()
             )
-            if never_ran:
-                out["termination"]["gate"] = "closed"
-        return out
+            if verb != "retain" and finished:
+                # Already exited: its pid may belong to an unrelated process group by now, so only
+                # a group proven to be this worker's (a vanished monitor's agent) is still stopped.
+                out["termination"] = {"skipped": "dispatch already finished"}
+                orphans = self._stop_orphaned_group(r)
+                if orphans:
+                    out["termination"]["orphans"] = orphans
+            elif verb != "retain":
+                # Record first (the launch gate and the post-spawn check read it), then tear down.
+                container = ""
+                try:
+                    container = json.loads(r["launch_effective"] or "{}").get("container") or ""
+                except json.JSONDecodeError:
+                    container = ""
+                out["termination"] = self._terminate_backend(
+                    r["backend"] or self.backend,
+                    handle,
+                    # No published pid (its coordinator died first): the gate-recorded one (#597).
+                    int(r["pid"] or 0) or int(_col(r, "monitor_pid") or 0),
+                    backend_ref=r["backend_ref"],
+                    container=container,
+                    # A gate closed before any claim: no monitor ran or can, so no sync is coming (#597).
+                    lane_dir=None if never_ran else r["lane_dir"],
+                )
+                if never_ran:
+                    out["termination"]["gate"] = "closed"
+            self.state.save_request(retry_request, method, "completed", out, payload_sha)
+            return out
+        except BaseException:
+            self.state.release_request(retry_request)
+            raise
 
     def vm_recipe_doctor(self, recipe_id: str) -> dict[str, Any]:
         """Probe the Docker sandbox a `danger` worker would launch into (`--on <image>`)."""
@@ -3526,23 +3626,55 @@ if {repr(self.backend)} == "cmux":
     def terminal_read(
         self,
         terminal: str,
-        cursor: int | None = None,
+        cursor: int | str | None = None,
         limit: int | None = None,
         screen: bool = False,
     ) -> dict[str, Any]:
         r = self._terminal_row(terminal)
-        lines: list[str] = []
+        all_lines: list[str] = []
+        src = "stream"
         if screen:
             text = self._screen(r)
             if text is not None:
-                lines = text.splitlines()
-        if not lines and r["log_path"] and Path(r["log_path"]).is_file():
-            lines = Path(r["log_path"]).read_text(encoding="utf-8", errors="replace").splitlines()
-        if cursor:
-            lines = lines[int(cursor):]
-        if limit:
-            lines = lines[-int(limit):]
-        return {"terminal": {"handle": terminal, "tail": lines, "cursor": (int(cursor or 0) + len(lines))}}
+                all_lines = text.splitlines()
+                src = "screen"
+            else:
+                src = "screen-unavailable"
+        if not all_lines and r["log_path"] and Path(r["log_path"]).is_file():
+            all_lines = Path(r["log_path"]).read_text(encoding="utf-8", errors="replace").splitlines()
+        total = len(all_lines)
+        if cursor is not None and str(cursor) != "":
+            cur_idx = max(0, int(cursor))
+            after = all_lines[cur_idx:]
+            if limit is not None:
+                lim = max(0, int(limit))
+                lines = after[:lim]
+                truncated = len(after) > lim
+            else:
+                lines = after
+                truncated = False
+            next_cursor = cur_idx + len(lines)
+        else:
+            if limit is not None:
+                lim = max(0, int(limit))
+                truncated = total > lim
+                lines = all_lines[-lim:] if lim > 0 else []
+            else:
+                lines = all_lines
+                truncated = False
+            next_cursor = total
+        return {
+            "terminal": {
+                "handle": terminal,
+                "tail": lines,
+                "cursor": next_cursor,
+                "truncated": truncated,
+                "source": src,
+            },
+            "source": src,
+            "cursor": next_cursor,
+            "truncated": truncated,
+        }
 
     def terminal_list(
         self,
@@ -3562,9 +3694,11 @@ if {repr(self.backend)} == "cmux":
             for r in rows
             if not worktree or r["worktree"] == worktree
         ]
-        if limit:
+        truncated = False
+        if limit and len(terms) > int(limit):
             terms = terms[: int(limit)]
-        return {"terminals": terms}
+            truncated = True
+        return {"terminals": terms, "truncated": truncated}
 
     def terminal_show(self, terminal: str) -> dict[str, Any]:
         r = self._terminal_row(terminal)
@@ -3576,6 +3710,21 @@ if {repr(self.backend)} == "cmux":
                 "state": r["state"],
             }
         }
+
+    @staticmethod
+    def _write_private_append(path: Path, data: str) -> None:
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        if path.is_symlink():
+            return
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND | nofollow, 0o600)
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+                return
+            os.fchmod(fd, 0o600)
+            os.write(fd, data.encode("utf-8"))
+        finally:
+            os.close(fd)
 
     def _deliver_terminal_input(self, term_row: Any, text: str, enter: bool = True) -> bool:
         """Deliver `text` to a live terminal. Returns True once the transport ACCEPTED it.
@@ -3626,13 +3775,19 @@ if {repr(self.backend)} == "cmux":
         # Accepted. Everything below is bookkeeping and must not undo the delivery.
         try:
             if term_row["worktree"]:
-                inbox_dir = Path(term_row["worktree"]) / ".open-fleet"
-                inbox_dir.mkdir(parents=True, exist_ok=True)
-                with open(inbox_dir / "inbox.jsonl", "a", encoding="utf-8") as inf:
-                    inf.write(json.dumps({"handle": handle, "text": text, "ts": time.time()}) + "\n")
+                wt = Path(term_row["worktree"])
+                if wt.is_dir() and not wt.is_symlink() and wt.stat().st_uid == os.getuid():
+                    inbox_dir = wt / ".open-fleet"
+                    if not inbox_dir.is_symlink():
+                        inbox_dir.mkdir(mode=0o700, exist_ok=True)
+                        if inbox_dir.is_dir() and not inbox_dir.is_symlink() and inbox_dir.stat().st_uid == os.getuid():
+                            os.chmod(inbox_dir, 0o700)
+                            self._write_private_append(
+                                inbox_dir / "inbox.jsonl",
+                                json.dumps({"handle": handle, "text": text, "ts": time.time()}) + "\n",
+                            )
             if backend == "dry-run" and term_row["log_path"]:
-                with open(term_row["log_path"], "a", encoding="utf-8") as lf:
-                    lf.write(payload)
+                self._write_private_append(Path(term_row["log_path"]), payload)
         except OSError:
             pass
         return True
@@ -3660,10 +3815,27 @@ if {repr(self.backend)} == "cmux":
             if not t_row:
                 conn.execute("ROLLBACK")
                 raise ProviderError("task_not_found", f"task {task_id!r} not found")
+            if run is not None and t_row["run_id"] != run:
+                conn.execute("ROLLBACK")
+                raise ProviderError(
+                    "cross_run_access",
+                    f"task {task_id!r} belongs to run {t_row['run_id']!r}, not {run!r}",
+                )
+            effective_run = t_row["run_id"] or "default"
             term_row = conn.execute("SELECT * FROM terminals WHERE handle = ?", (to_handle,)).fetchone()
             if not term_row:
                 conn.execute("ROLLBACK")
                 raise ProviderError("inject_rejected", f"terminal {to_handle!r} not found")
+            bound_disp = conn.execute(
+                "SELECT run_id FROM dispatches WHERE terminal_handle = ? AND run_id != ? LIMIT 1",
+                (to_handle, effective_run),
+            ).fetchone()
+            if bound_disp:
+                conn.execute("ROLLBACK")
+                raise ProviderError(
+                    "cross_run_access",
+                    f"terminal {to_handle!r} is bound to run {bound_disp['run_id']!r}, not {effective_run!r}",
+                )
             cur = conn.execute(
                 "UPDATE tasks SET status = 'dispatched', updated_at = ? WHERE id = ? AND status = 'ready'",
                 (now, task_id),
@@ -3680,7 +3852,7 @@ if {repr(self.backend)} == "cmux":
                 (
                     dispatch_id,
                     task_id,
-                    run or t_row["run_id"] or "default",
+                    effective_run,
                     term_row["worktree"] or "",
                     self.env.get("OPEN_FLEET_SANDBOX_PROFILE") or "ro",
                     to_handle,
