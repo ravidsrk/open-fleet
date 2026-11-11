@@ -793,6 +793,8 @@ class GateRunsIsolated(QueueCase):
             "bash -c 'x=\"a[\\$(/opt/tools/probe)]\"; let x'",
             "bash -c 'declare -i y; x=\"a[\\$(/opt/tools/probe)]\"; y=$x'",
             "bash -c 'x=\"a[\\$(/opt/tools/probe)]\"; [[ $x -eq 0 ]]'",
+            "/bin/true\r",
+            "gate-check\r",
         ):
             _, _, bad_probs = mq_mod.MergeQueue._analyze_gate_command(unsafe_form)
             self.assertTrue(bad_probs, f"expected fail-closed problem on {unsafe_form!r}")

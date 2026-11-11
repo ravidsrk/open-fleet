@@ -1550,7 +1550,7 @@ class MergeQueue:
                 in_dq = not in_dq
                 at_tok = False
             else:
-                at_tok = (not in_dq) and (ch in " \t\r\n;|&()><")
+                at_tok = (not in_dq) and (ch in " \t\n;|&()><")
             out.append(ch)
             i += 1
         return "".join(out)
@@ -1633,7 +1633,7 @@ class MergeQueue:
                 continue
             if c == ")":
                 return j, []
-            at_tok = c in " \t\r\n;|&()><"
+            at_tok = c in " \t\n;|&()><"
             j += 1
         return -1, ["unterminated $(...) command substitution"]
 
@@ -1776,7 +1776,7 @@ class MergeQueue:
                 i = j + 1
                 at_tok = False
                 continue
-            at_tok = (not in_dq) and (ch in " \t\r\n;|&()><")
+            at_tok = (not in_dq) and (ch in " \t\n;|&()><")
             out.append(ch)
             i += 1
         if in_sq or in_dq:
@@ -1793,7 +1793,7 @@ class MergeQueue:
         ctrl_ops = (";;&", ";&", ";;", "&&", "||", "|&", ";", "&", "|", "(", ")")
         while i < n:
             ch = cmd[i]
-            if ch in (" ", "\t", "\r"):
+            if ch in (" ", "\t"):
                 i += 1
                 continue
             if ch == "#":
@@ -1837,7 +1837,7 @@ class MergeQueue:
             saw_unquoted_bracket = False
             while i < n:
                 c = cmd[i]
-                if c in (" ", "\t", "\r", "\n"):
+                if c in (" ", "\t", "\n"):
                     break
                 if any(cmd.startswith(op, i) for op in (*ctrl_ops, *cls._REDIR_OPS)):
                     break
@@ -1903,6 +1903,8 @@ class MergeQueue:
         """Extract `(executables, sourced_files, problems)` across simple and compound shell syntax."""
         if _depth > 6:
             return [], [], ["gate command recursion depth exceeded"]
+        if any((ord(ch_c) < 32 and ch_c not in ("\t", "\n")) or ord(ch_c) == 127 for ch_c in gate_cmd):
+            return [], [], ["ASCII control character (e.g. CR/NUL) in gate command cannot be statically fingerprinted"]
         sanitized, subs, sub_problems = cls._strip_cmd_substitutions(gate_cmd)
         executables: list[str] = []
         sourced: list[str] = []
