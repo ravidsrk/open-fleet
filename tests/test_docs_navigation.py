@@ -315,8 +315,26 @@ class ReleaseCutWalkthrough(unittest.TestCase):
             # The full suite also runs on the preparing cut itself. Start this
             # independent rehearsal from its last published version in that case.
             if inventory.get("preparing") is not None:
-                run("git", "restore", "--source", historical[-1]["commit"], "--",
-                    "CHANGELOG.md", ".claude-plugin/plugin.json", ".claude-plugin/marketplace.json")
+                prep_ver = inventory["preparing"]["version"]
+                prev_ver = historical[-1]["version"]
+                cl_path = repo / "CHANGELOG.md"
+                cl_text, stripped = re.subn(
+                    rf"(?ms)^## \[{re.escape(prep_ver)}\] - [^\n]+\n.*?(?=^## \[{re.escape(prev_ver)}\])",
+                    "",
+                    cl_path.read_text(encoding="utf-8"),
+                    count=1,
+                )
+                self.assertEqual(stripped, 1, "preparing section missing from CHANGELOG.md")
+                cl_path.write_text(cl_text, encoding="utf-8")
+                for name in ("plugin", "marketplace"):
+                    manifest = repo / f".claude-plugin/{name}.json"
+                    value = json.loads(manifest.read_text(encoding="utf-8"))
+                    if name == "plugin":
+                        value["version"] = prev_ver
+                    else:
+                        value["metadata"]["version"] = prev_ver
+                        value["plugins"][0]["version"] = prev_ver
+                    manifest.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
                 inventory["preparing"] = None
                 (repo / "docs/releases.json").write_text(json.dumps(inventory, indent=2) + "\n")
             run("git", "add", "docs/ops.md", "docs/releases.json", "docs/distribution-kit.md",
