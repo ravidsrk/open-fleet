@@ -715,6 +715,13 @@ class GateRunsIsolated(QueueCase):
             "N='0 /opt/tools/proof'; nice -n $N true",
             "A='name /opt/tools/proof'; exec -a $A true",
             "X='1 /opt/tools/proof'; env FOO=$X true",
+            "bash -c 'env {FOO=1,/opt/gate/proof}'",
+            "bash -c 'env {FOO=1,PATH=/opt/gate/bin} true'",
+            "bash -c 'timeout {1,/opt/gate/proof} /bin/true'",
+            "bash -c '{/bin/true,/opt/gate/proof}'",
+            "sed --file=~/evil.sed input.txt",
+            "F=-exec; find . $F /opt/gate/proof \\;",
+            "ruby -v /tmp/evil.rb",
         ):
             _, _, dyn_probs = mq_mod.MergeQueue._analyze_gate_command(unsafe_gate)
             self.assertTrue(dyn_probs, f"expected fail-closed problem on {unsafe_gate!r}")

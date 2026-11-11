@@ -1949,6 +1949,7 @@ class MergeQueue:
             quoted = False
             dynamic = False
             saw_unquoted_bracket = False
+            saw_unquoted_brace = False
             while i < n:
                 c = cmd[i]
                 if c in (" ", "\t", "\n"):
@@ -1991,16 +1992,18 @@ class MergeQueue:
                         break
                     i += 1
                     continue
-                if c == "~" and not buf and not quoted:
-                    dynamic = True
-                elif c in ("$", "*", "?"):
+                if c in ("~", "$", "*", "?"):
                     dynamic = True
                 elif c == "[":
                     saw_unquoted_bracket = True
+                elif c in ("{", "}"):
+                    saw_unquoted_brace = True
                 buf.append(c)
                 i += 1
             word = "".join(buf)
             if saw_unquoted_bracket and (quoted or word != "["):
+                dynamic = True
+            if saw_unquoted_brace and (quoted or word not in ("{", "}")):
                 dynamic = True
             if "__MQ_CMDSUB__" in word:
                 dynamic = True
@@ -2750,9 +2753,10 @@ class MergeQueue:
                 executables.append(final_word)
             final_base = Path(final_word).name
             if final_base == "find" and any(
-                fa in ("-exec", "-execdir", "-ok", "-okdir") for fa, _ in cmd_words[wi + 1:]
+                fa in ("-exec", "-execdir", "-ok", "-okdir") or is_dynamic(ff)
+                for fa, ff in cmd_words[wi + 1:]
             ):
-                problems.append("find -exec/-ok dispatches inner commands that cannot be statically fingerprinted")
+                problems.append("find -exec/-ok or dynamic predicate dispatches commands that cannot be statically fingerprinted")
             elif final_base in cls._SHELL_NAMES:
                 s_src, s_exe, s_prob = cls._analyze_shell_invocation(final_word, cmd_words[wi + 1:], _depth)
                 executables.extend(s_exe)
@@ -2893,7 +2897,7 @@ class MergeQueue:
                     break
                 if is_dynamic(a_flag):
                     return [], [f"{exe_word}: dynamic option {a!r} cannot be statically fingerprinted"]
-                if a in ("-V", "--version", "-h", "--help"):
+                if a in ("-V", "--version", "-h", "--help") and j + 1 == len(args):
                     return [], []
                 if a in ("-W", "-X", "--check-hash-based-pycs"):
                     if j + 1 >= len(args) or is_dynamic(args[j + 1][1]):
@@ -2927,7 +2931,7 @@ class MergeQueue:
             if not args:
                 return [], [f"{exe_word}: interpreter invoked without script operand cannot be fingerprinted"]
             a0, f0 = args[0]
-            if a0 in ("-v", "-V", "--version", "-h", "--help"):
+            if len(args) == 1 and not is_dynamic(f0) and a0 in ("-v", "-V", "--version", "-h", "--help"):
                 return [], []
             if a0 == "-e":
                 if len(args) < 2 or is_dynamic(args[1][1]):
@@ -2956,7 +2960,7 @@ class MergeQueue:
                     break
                 if is_dynamic(a_flag):
                     return [], [f"{exe_word}: dynamic option {a!r} cannot be statically fingerprinted"]
-                if a in ("-V", "--version", "-h", "--help"):
+                if a in ("-V", "--version", "-h", "--help") and j + 1 == len(args):
                     return [], []
                 if a in ("--quiet", "--silent", "--regexp-extended", "--separate", "--unbuffered", "--null-data", "--posix"):
                     j += 1
@@ -3034,7 +3038,7 @@ class MergeQueue:
                     break
                 if is_dynamic(a_flag):
                     return [], [f"{exe_word}: dynamic option {a!r} cannot be statically fingerprinted"]
-                if a in ("-V", "--version", "-h", "--help"):
+                if a in ("-V", "--version", "-h", "--help") and j + 1 == len(args):
                     return [], []
                 if a in ("--posix", "--traditional", "--characters-as-bytes", "--sandbox", "--optimize"):
                     j += 1
