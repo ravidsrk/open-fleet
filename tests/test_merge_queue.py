@@ -603,6 +603,32 @@ class GateRunsIsolated(QueueCase):
         rc_pm, out_pm = self.w.cli("merge", "--token", tok_py, "--require-gate", py_operand_cmd)
         self.assertNotEqual(rc_pm, 0, out_pm)
         self.assertEqual(out_pm.get("code"), "gate_not_run", out_pm)
+        # Line continuations (`\\\n`) and `sed -e '' -f <script>` extract the real executable/script:
+        self.assertIn("gate-check", mq_mod.MergeQueue._extract_gate_executables("gat\\\ne-check"))
+        ext_sed = self.w.tmp / "bin" / "gate-operand.sed"
+        ext_sed.write_text("q\n", encoding="utf-8")
+        sed_exes, _, sed_probs = mq_mod.MergeQueue._analyze_gate_command(f"sed -e '' -f {ext_sed} /dev/null")
+        self.assertFalse(sed_probs, sed_probs)
+        self.assertIn(str(ext_sed), sed_exes)
+        # Unresolved executable names fail closed in `_gate_fingerprint`:
+        unres_fp, unres_probs = self.w.queue()._gate_fingerprint("nonexistent_gate_binary_xyz")
+        self.assertEqual(unres_fp, "")
+        self.assertTrue(unres_probs)
+        # `bwrap` argv never `--ro-bind`s `/` or conductor `$HOME` even when `/bin` or `$HOME/bin` is on PATH:
+        q_bw = self.w.queue()
+        fake_home = self.w.tmp / "fake-home"
+        (fake_home / "bin").mkdir(parents=True, exist_ok=True)
+        q_bw.env.pop("MQ_GATE_SANDBOX_CMD", None)
+        q_bw.env["HOME"] = str(fake_home)
+        q_bw.env["PATH"] = f"{fake_home / 'bin'}:/usr/bin:/bin"
+        with unittest.mock.patch.object(
+            type(q_bw), "_bwrap_mode", return_value=("/usr/bin/bwrap", ("--unshare-all",))
+        ):
+            bw_argv = q_bw._gate_exec_argv("true", self.w.tmp / "co", self.w.tmp / "gh", self.w.tmp / "gt")
+        ro_srcs = [bw_argv[i + 1] for i, v in enumerate(bw_argv) if v == "--ro-bind"]
+        self.assertNotIn("/", ro_srcs)
+        self.assertNotIn(str(fake_home), ro_srcs)
+        self.assertIn(str(fake_home / "bin"), ro_srcs)
         # Dynamic command words (`eval`) and lookup-mutating forms (`PATH=`, `env PATH=`, `env -C`, `cd`, `command -p`) fail closed:
         for unsafe_gate in (
             "eval /bin/true",
@@ -615,11 +641,14 @@ class GateRunsIsolated(QueueCase):
             "env -u PATH gate-check",
             "cd subdir && ./gate-check",
             "export PATH=/opt/alternate/bin; gate-check",
+            "for PATH in /opt/alternate/bin; do gate-check; done",
+            "declare -n ref=PATH; ref=/opt/alternate/bin",
             "command -p python3 -V",
             "exec -c gate-check",
             "sh bare_script.sh",
             "sh -s",
             ". bare_script.sh",
+            "[g]ate-check",
         ):
             _, _, dyn_probs = mq_mod.MergeQueue._analyze_gate_command(unsafe_gate)
             self.assertTrue(dyn_probs, f"expected fail-closed problem on {unsafe_gate!r}")
