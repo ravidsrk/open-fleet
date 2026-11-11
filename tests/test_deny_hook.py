@@ -1822,19 +1822,19 @@ class TestScriptShape(unittest.TestCase):
         # through `sh -c`. A space-free path stays byte-identical (shlex.quote adds nothing).
         spaced = self.tmp / "a b$dir"
         spaced.mkdir()
-        hook_copy = spaced / "deny-hook.sh"
-        hook_copy.write_bytes(HOOK.read_bytes())
-        hook_copy.chmod(0o755)
+        raw_hook_copy = spaced / "deny-hook.sh"
+        raw_hook_copy.write_bytes(HOOK.read_bytes())
+        raw_hook_copy.chmod(0o755)
         wt = self.tmp / "unit"
         wt.mkdir()
-        r = subprocess.run(["sh", str(hook_copy), "--settings", str(wt)],
+        r = subprocess.run(["sh", str(raw_hook_copy), "--settings", str(wt)],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         command = json.loads(r.stdout)["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
-        canon_hook = os.path.realpath(hook_copy)
-        self.assertEqual([os.path.realpath(p) for p in shlex.split(command)], [canon_hook],
-                         "the command must parse back to exactly the canonical hook path")
-        self.assertNotEqual(command, canon_hook,
+        hook_copy = Path(os.path.realpath(raw_hook_copy))
+        self.assertEqual(shlex.split(command), [str(hook_copy)],
+                         "the command must parse back to exactly the hook path")
+        self.assertNotEqual(command, str(hook_copy),
                             "a path with a space or $ has to be quoted in the command string")
 
     def test_settings_mode_refuses_a_worktree_that_is_not_there(self):

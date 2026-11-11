@@ -62,8 +62,8 @@ python3 runtime/scripts/verify.py --manifest <m.json> \
 ```
 
 `--contract-source`, `--contract-digest` and `--nc-command` come from the COORDINATOR, out of band —
-never from the manifest (#279). `--execute-nc` is REQUIRED in waiver lanes (`--lighting dark-eligible`,
-`--no-gh`, `awaiting-maintainer-merge`); omitted on gh, `verify.py` notes static corroboration.
+never from the manifest (#279). `--execute-nc` is REQUIRED by default on mutation units (#750 C10, and
+always in waiver lanes); only `--allow-static-nc` on gh accepts static corroboration.
 Mutation tools quote the mutant diff in `negative_control.artifact`. Record per `docs/runs/TEMPLATE.md`.
 
 ## Completion

@@ -49,8 +49,10 @@ anti-false-positive gate, and emits a GO / NO-GO verdict bound to the exact SHA 
 
 "Produce a trusted verdict without modifying code" is three things at once: a user-facing outcome,
 a PR gate, and a **permission boundary**. Every worker runs `PROFILE=ro`
-([`sandbox-policy`](../../runtime/sandbox-policy.md)) — read-only sandbox, plan-mode permissions —
-so the mission has no fix authority by construction, not by promise. A finding that wants a fix
+([`sandbox-policy`](../../runtime/sandbox-policy.md)) — read-only sandbox or shell-disabled tier
+where supported (`codex --sandbox read-only`, shell-stripped harnesses, disposable sandboxes), or
+plan-mode tool restrictions plus `deny-hook.sh` read-only write-floor defense-in-depth on
+shell-capable plan-mode tiers — so the mission carries no fix authority. A finding that wants a fix
 routes to [`ship-it`](ship-it.md) or [`clean-sweep`](clean-sweep.md); it never gets patched in
 place. Worker methodology comes from the upstream review packs (Matt's `code-review` two-axis,
 Addy's specialist lenses, gstack's review-army dispatch), composed at the mission level with one

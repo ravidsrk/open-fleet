@@ -561,6 +561,107 @@ class TestCoordinatorTakeoverAndWorkerBindingFence(Base):
         th.join(timeout=2.0)
         self.assertEqual(err_holder, ["consumer_fenced"])
 
+    def test_c28_launched_worker_implicit_and_explicit_run_isolation(self):
+        t_a = self.store.task_create(spec="in a", run="run-a")["task"]["id"]
+        t_b = self.store.task_create(spec="in b", run="run-b")["task"]["id"]
+        msg_b = self.store.send_message(subject="b-msg", msg_type="info", run="run-b")["messageId"]
+        gate_b = self.store.gate_create(task_id=t_b, question="b-q?", run="run-b")["gate"]["id"]
+        with self.store._connect() as conn:
+            conn.execute(
+                "INSERT INTO dispatches(dispatch_id, task_id, run_id, worktree, agent, terminal_handle, state, created_at, updated_at) "
+                "VALUES ('disp-a1', ?, 'run-a', '/w', 'claude', 'worker-a1', 'running', 0, 0)",
+                (t_a,),
+            )
+        w_a = self.mod.LocalStateStore(
+            self.db,
+            env={"OPEN_FLEET_DISPATCH_ID": "disp-a1", "OPEN_FLEET_TERMINAL_HANDLE": "worker-a1"},
+        )
+        # Implicit calls default to run-a, not 'default'
+        sub = w_a.task_create(spec="child")["task"]
+        self.assertEqual(sub["runId"], "run-a")
+        self.assertEqual({t["id"] for t in w_a.task_list()["tasks"]}, {t_a, sub["id"]})
+        sent = w_a.send_message(subject="from-a", msg_type="info")
+        self.assertEqual(self.store.check_messages(run="default")["count"], 0)
+        self.assertEqual(self.store.check_messages(run="run-a")["count"], 1)
+        self.assertEqual(sent["sent"], True)
+        # Explicit or implicit cross-run access to run-b is rejected
+        for fn in (
+            lambda: w_a.task_create(spec="bad", run="run-b"),
+            lambda: w_a.task_list(run="run-b"),
+            lambda: w_a.task_update(task_id=t_b, status="completed"),
+            lambda: w_a.send_message(subject="bad", msg_type="info", run="run-b"),
+            lambda: w_a.check_messages(run="run-b"),
+            lambda: w_a.reply_message(msg_id=msg_b, body="no"),
+            lambda: w_a.ask_human(question="bad?", run="run-b"),
+            lambda: w_a.gate_resolve(gate_id=gate_b, resolution="yes"),
+        ):
+            with self.assertRaises(self.mod.ProviderError) as ctx:
+                fn()
+            self.assertEqual(ctx.exception.code, "cross_run_access")
+
+    def test_c30_died_settles_task_and_superseded_or_forged_sender_cannot_clobber(self):
+        t1 = self.store.task_create(spec="die-parent", run="run-d")["task"]["id"]
+        t2 = self.store.task_create(spec="die-child", deps=[t1], run="run-d")["task"]["id"]
+        self.store.task_update(task_id=t1, status="dispatched", run="run-d")
+        with self.store._connect() as conn:
+            conn.execute(
+                "INSERT INTO dispatches(dispatch_id, task_id, run_id, worktree, agent, terminal_handle, state, created_at, updated_at) "
+                "VALUES ('disp-die', ?, 'run-d', '/w', 'claude', 'w-die', 'running', 1, 1)",
+                (t1,),
+            )
+        # Unauthenticated sender='worker' with forged dispatchId attr or missing outcome must not settle t1
+        self.store.send_message(
+            subject="forged", msg_type="worker_done", outcome="succeeded",
+            sender="worker", run="run-d", attrs={"dispatchId": "disp-die"},
+        )
+        self.assertEqual(
+            next(t["status"] for t in self.store.task_list(run="run-d")["tasks"] if t["id"] == t1),
+            "dispatched",
+        )
+        # ensure_terminal_or_died marks task failed and blocks dependent in run-d
+        died = self.store.ensure_terminal_or_died(dispatch_id="disp-die", worker_handle="w-die", exit_code=137)
+        self.assertTrue(died["syntheticDied"])
+        by_id = {t["id"]: t["status"] for t in self.store.task_list(run="run-d")["tasks"]}
+        self.assertEqual(by_id[t1], "failed")
+        self.assertEqual(by_id[t2], "blocked")
+
+        # Superseded dispatch cannot clobber a newer active retry dispatch's task
+        tr = self.store.task_create(spec="retried", run="run-d")["task"]["id"]
+        self.store.task_update(task_id=tr, status="dispatched", run="run-d")
+        with self.store._connect() as conn:
+            conn.execute(
+                "INSERT INTO dispatches(dispatch_id, task_id, run_id, worktree, agent, terminal_handle, state, created_at, updated_at) "
+                "VALUES ('disp-old', ?, 'run-d', '/w', 'claude', 'w-old', 'running', 1, 1)",
+                (tr,),
+            )
+            conn.execute(
+                "INSERT INTO dispatches(dispatch_id, task_id, run_id, worktree, agent, terminal_handle, state, created_at, updated_at) "
+                "VALUES ('disp-new', ?, 'run-d', '/w', 'claude', 'w-new', 'running', 2, 2)",
+                (tr,),
+            )
+        w_old = self.mod.LocalStateStore(
+            self.db, env={"OPEN_FLEET_DISPATCH_ID": "disp-old", "OPEN_FLEET_TERMINAL_HANDLE": "w-old"}
+        )
+        w_old.send_message(subject="late", msg_type="worker_done", outcome="failed")
+        self.assertEqual(
+            next(t["status"] for t in self.store.task_list(run="run-d")["tasks"] if t["id"] == tr),
+            "dispatched",
+        )
+
+    def test_c35_default_run_fencing_and_human_sender_rejected_on_fenced_gate(self):
+        self.store.run_create(run="default", sender="coord-main")
+        with self.assertRaises(self.mod.ProviderError) as ctx:
+            self.store.check_messages(run="default")
+        self.assertEqual(ctx.exception.code, "consumer_fenced")
+        td = self.store.task_create(spec="gated-default", run="default")["task"]["id"]
+        gd = self.store.gate_create(task_id=td, question="ship?", sender="coord-main", run="default")["gate"]["id"]
+        for spoof in ("human", "coordinator", "rogue"):
+            with self.assertRaises(self.mod.ProviderError) as ctx:
+                self.store.gate_resolve(gate_id=gd, resolution="yes", sender=spoof, run="default")
+            self.assertEqual(ctx.exception.code, "consumer_fenced")
+        ok = self.store.gate_resolve(gate_id=gd, resolution="yes", sender="coord-main", run="default")["gate"]
+        self.assertEqual(ok["status"], "resolved")
+
 
 if __name__ == "__main__":
     unittest.main()

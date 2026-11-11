@@ -711,6 +711,8 @@ def fixture_command(trap, facts, repo, holder, verify=VERIFY):
         # coordinator who named no command, and verify.py refuses the run.
         if trap.get("nc_command"):
             cmd += ["--nc-command", _render(trap["nc_command"], facts)]
+    elif not trap.get("dispatch") and unit_class not in ("report-only", "planning"):
+        cmd.append("--allow-static-nc")
     if trap.get("repo"):
         cmd += ["--repo", trap["repo"]]
     env = dict(os.environ)
@@ -783,6 +785,8 @@ def sound_gate(trap, detail=None, verify=VERIFY):
             cmd.append("--execute-nc")
             if trap.get("nc_command"):  # coordinator-supplied, as in fixture_gate (#279)
                 cmd += ["--nc-command", trap["nc_command"]]
+        elif not trap.get("dispatch") and trap.get("unit_class", "mutation") not in ("report-only", "planning"):
+            cmd.append("--allow-static-nc")
         r = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)
         # verify.py returns 0 (GREEN/allow) or 2 (RED/invariant failed). Any other code (1 = usage /
         # dependency error) is a BROKEN run, not a verdict — fail loud so it cannot inflate soundness

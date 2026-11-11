@@ -1905,6 +1905,8 @@ class MutationFixture(RepoCase):
                 "artifact": self.nc_artifact, "command": self.proof_cmd, "paths": ["app.py"]}
 
     def _run_main(self, path, *extra):
+        if "--execute-nc" not in extra and "--dispatch-record" not in extra:
+            extra = (*extra, "--allow-static-nc")
         buf, errbuf = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(errbuf):
             rc = verify.main(["--manifest", path,
@@ -1929,7 +1931,7 @@ class EndToEndMutationGreen(MutationFixture):
     def test_full_pass_mutation_manifest_is_green_end_to_end(self):
         path = self._manifest()
         out, err = verify.verify(path, self.contract, self.digest, repo="o/r",
-                                 unit_class="mutation", lighting="lit")
+                                 unit_class="mutation", lighting="lit", allow_static_nc=True)
         self.assertIsNone(err)
         fatal, notes = out
         self.assertEqual(fatal, [], fatal)
@@ -1944,7 +1946,8 @@ class EndToEndMutationGreen(MutationFixture):
                               "--contract-digest", self.digest,
                               "--repo", "o/r",
                               "--unit-class", "mutation",
-                              "--lighting", "lit"])
+                              "--lighting", "lit",
+                              "--allow-static-nc"])
         self.assertEqual(rc, 0)
         self.assertIn("verify: OK", buf.getvalue())
         self._assert_mutation_lanes_ran()
@@ -2476,7 +2479,7 @@ class EndToEndMutationGreen(MutationFixture):
         # #169: a mutation manifest with no lighting key verifies clean — omission means lit.
         path = self._manifest(lighting=None)
         out, err = verify.verify(path, self.contract, self.digest, repo="o/r",
-                                 unit_class="mutation", lighting="lit")
+                                 unit_class="mutation", lighting="lit", allow_static_nc=True)
         self.assertIsNone(err)
         fatal, notes = out
         self.assertEqual(fatal, [], fatal)
@@ -2629,12 +2632,24 @@ class EndToEndMutationGreen(MutationFixture):
             execute.assert_not_called()
 
     def test_unexecuted_nc_discloses_static_corroboration_note_c10(self):
-        # #750 C10: when verify() runs on the ordinary GitHub-reviewed lane without --execute-nc,
-        # the verdict must explicitly disclose that the negative control was corroborated from the
-        # artifact only, not executed.
+        # #750 C10: an ordinary GitHub-reviewed mutation unit fails closed without --execute-nc
+        # unless --allow-static-nc is explicitly supplied; when waived, the verdict discloses that
+        # the negative control was corroborated from the artifact only.
         path = self._manifest()
+        (fatal_default, _), err_default = verify.verify(
+            path, self.contract, self.digest, repo='o/r', unit_class='mutation', execute_nc=False)
+        self.assertIsNone(err_default)
+        self.assertTrue(any('negative control was NOT executed' in f for f in fatal_default),
+                        fatal_default)
+        errbuf = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(errbuf):
+            rc_default = verify.main(['--manifest', path, '--contract-source', self.contract,
+                                      '--contract-digest', self.digest, '--repo', 'o/r',
+                                      '--unit-class', 'mutation'])
+        self.assertEqual(rc_default, 2, errbuf.getvalue())
         (fatal, notes), err = verify.verify(path, self.contract, self.digest, repo='o/r',
-                                            unit_class='mutation', execute_nc=False)
+                                            unit_class='mutation', execute_nc=False,
+                                            allow_static_nc=True)
         self.assertIsNone(err)
         self.assertEqual(fatal, [], fatal)
         self.assertTrue(any('corroborated from artifact only (--execute-nc not set)' in n
@@ -2669,15 +2684,30 @@ class EndToEndMutationGreen(MutationFixture):
         rev_bytes = f'Internal review PASS at {self.head_sha}\n'.encode('utf-8')
         (self.repo / rev_rel).parent.mkdir(parents=True, exist_ok=True)
         (self.repo / rev_rel).write_bytes(rev_bytes)
+        oss_contract = self.write('oss-contract.json', json.dumps({
+            'mission': 'oss-contribute', 'criterion_ids': ['AC-1'],
+        }))
+        oss_digest = 'sha256:' + hashlib.sha256(
+            (self.repo / oss_contract).read_bytes()).hexdigest()
         path = self._manifest(nc=self._revert_nc())
         m = json.loads(Path(path).read_text(encoding='utf-8'))
-        m['park'] = 'awaiting-maintainer-merge'
+        m['parked'] = [{'item': 'upstream merge', 'reason': 'awaiting-maintainer-merge'}]
         m['review'] = {'artifact': rev_rel}
         m['artifacts'] = [{'path': rev_rel, 'sha256': hashlib.sha256(rev_bytes).hexdigest()}]
+        m['contract'] = {'source': oss_contract, 'digest': oss_digest, 'criterion_ids': ['AC-1']}
         Path(path).write_text(json.dumps(m), encoding='utf-8')
         with mock.patch.object(verify, 'fetch_reviews', return_value=([], None)):
+            # Non-oss-contribute contract cannot self-waive GitHub review:
+            m_plain = dict(m, contract={'source': self.contract, 'digest': self.digest,
+                                        'criterion_ids': ['AC-1']})
+            plain_path = self.write('plain-manifest.json', json.dumps(m_plain))
+            (fatal_plain, _), _ = verify.verify(
+                plain_path, self.contract, self.digest, repo='o/r',
+                unit_class='mutation', execute_nc=True, nc_command=self.proof_cmd)
+            self.assertTrue(any('no INDEPENDENT APPROVED review' in f for f in fatal_plain),
+                            fatal_plain)
             (fatal, notes), err = verify.verify(
-                path, self.contract, self.digest, repo='o/r',
+                path, oss_contract, oss_digest, repo='o/r',
                 unit_class='mutation', execute_nc=True, nc_command=self.proof_cmd)
             self.assertIsNone(err)
             self.assertEqual(fatal, [], fatal)
@@ -2685,7 +2715,7 @@ class EndToEndMutationGreen(MutationFixture):
                                 for n in notes), notes)
             # Without --execute-nc, quiet oss-contribute PR fails closed:
             (fatal_no_nc, _), _ = verify.verify(
-                path, self.contract, self.digest, repo='o/r',
+                path, oss_contract, oss_digest, repo='o/r',
                 unit_class='mutation', execute_nc=False)
             self.assertTrue(any('no INDEPENDENT APPROVED review' in f for f in fatal_no_nc),
                             fatal_no_nc)
@@ -2694,7 +2724,7 @@ class EndToEndMutationGreen(MutationFixture):
                  'state': 'CHANGES_REQUESTED', 'commit_id': self.head_sha}]
         with mock.patch.object(verify, 'fetch_reviews', return_value=(veto, None)):
             (fatal_veto, _), _ = verify.verify(
-                path, self.contract, self.digest, repo='o/r',
+                path, oss_contract, oss_digest, repo='o/r',
                 unit_class='mutation', execute_nc=True, nc_command=self.proof_cmd)
             self.assertTrue(any('no INDEPENDENT APPROVED review' in f for f in fatal_veto),
                             fatal_veto)
@@ -2709,6 +2739,19 @@ class EndToEndMutationGreen(MutationFixture):
         recs, err = verify._Authority.nc_exec_identity([str(wt_bin)], str(self.repo))
         self.assertIsNone(recs)
         self.assertIn('resolves inside the repository worktree', err)
+        # Shell -c and group/world-writable binaries also fail closed:
+        recs_sh, err_sh = verify._Authority.nc_exec_identity(
+            ['env', 'FOO=1', 'sh', '-c', 'exit 1'], str(self.repo))
+        self.assertIsNone(recs_sh)
+        self.assertIn('shell -c', err_sh)
+        with tempfile.TemporaryDirectory() as ext_dir:
+            os.chmod(ext_dir, 0o755)
+            writable_bin = Path(ext_dir) / 'runner'
+            writable_bin.write_text('#!/bin/sh\nexit 0\n', encoding='utf-8')
+            writable_bin.chmod(0o777)
+            recs_w, err_w = verify._Authority.nc_exec_identity([str(writable_bin)], str(self.repo))
+            self.assertIsNone(recs_w)
+            self.assertIn('writable', err_w)
 
         # Simulate executable digest replacement between clean and control phases:
         path = self._manifest(nc=self._revert_nc())
@@ -4106,6 +4149,8 @@ class CrossRepoRoots(RepoCase):
         buf, errbuf = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(errbuf):
             try:
+                if "--execute-nc" not in extra and "--dispatch-record" not in extra:
+                    extra = (*extra, "--allow-static-nc")
                 rc = verify.main(["--manifest", path,
                                   "--contract-source", self.contract,
                                   "--contract-digest", self.contract_digest,

@@ -41,15 +41,17 @@ instead by the owner's disposition (#595, below).
 
 ## CI runners
 
-Since #735 (2026-10-29), fourteen workflow jobs run on AWS CodeBuild-hosted GitHub Actions runners
-(`runs-on: codebuild-gha-open-fleet-${{ github.run_id }}-${{ github.run_attempt }}`), and since
-#749 (2026-10-31) the remaining nine jobs target `runs-on: instabox-medium` (previously
-`ubuntu-latest`). The CodeBuild label names the CodeBuild project, and the run ID and attempt make
-each job's runner single-use. List both sets with `rg -n 'runs-on:' .github/workflows`.
+Since #735 (2026-10-29), #749 (2026-10-31) and #752 (2026-11-11), ten workflow jobs run on AWS
+CodeBuild-hosted GitHub Actions runners
+(`runs-on: codebuild-gha-open-fleet-${{ github.run_id }}-${{ github.run_attempt }}`), four jobs
+run on `runs-on: ubuntu-latest`, and nine jobs target `runs-on: instabox-medium`. The CodeBuild
+label names the CodeBuild project, and the run ID and attempt make each job's runner single-use.
+List all three sets with `rg -n 'runs-on:' .github/workflows`.
 
 | Runs on | Jobs | Why |
 |---|---|---|
-| CodeBuild (`codebuild-gha-open-fleet-…`) | `guard` (guard.yml), `pinned-demo` (negative-control.yml), `from-scratch` (install.yml), `bind` (bind-check.yml), `pytest`, `ruff` and `migrate` (fixture-target-app.yml), `probe` (upstream-drift.yml), `health` (main-health.yml), `alert` (alert-on-failure.yml), `relay` and `verdict` (verdict-check.yml), `resolve` and `gate` (verdict-gate.yml) | the pilot's default |
+| CodeBuild (`codebuild-gha-open-fleet-…`) | `guard` (guard.yml), `bind` (bind-check.yml), `pytest` (fixture-target-app.yml), `probe` (upstream-drift.yml), `health` (main-health.yml), `alert` (alert-on-failure.yml), `relay` and `verdict` (verdict-check.yml), `resolve` and `gate` (verdict-gate.yml) | the pilot's single-use runner jobs |
+| `ubuntu-latest` | `from-scratch` (install.yml), `pinned-demo` (negative-control.yml), `ruff` and `migrate` (fixture-target-app.yml) | moved off CodeBuild in #752 because `gha-open-fleet` allows 1 concurrent build (sibling CodeBuild jobs queued at once got HTTP 400) |
 | `instabox-medium` | `tests`, `floor`, `checks`, `vfbench` and `vfbench_replay` (validate.yml) | switched from `ubuntu-latest` in #749; the workflow comments note they need a non-root user and system-custody git (CodeBuild runs as root, where the ownership-boundary tests would skip silently) |
 | `instabox-medium` | `gates` (validate.yml) | switched from `ubuntu-latest` in #749; combines coverage recorded on the `tests` shards (path-sensitive) |
 | `instabox-medium` | `smoke` (fixture-target-app.yml) | switched from `ubuntu-latest` in #749; pulls from Docker Hub, and CodeBuild's shared IPs hit the anonymous pull limit |

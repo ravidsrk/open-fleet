@@ -230,6 +230,11 @@ class TestGastownProvider(ProviderTestBase):
         task_id = created["task"]["id"]
         self.assertEqual(created["task"]["beadId"], "bd-1")
 
+        prov.task_update(task_id=task_id, status="completed")
+        self.assertEqual(calls[-1], ["bd", "update", "bd-1", "--status", "closed", "--json"])
+        self.assertEqual(len(prov.task_list()["tasks"]), 1)
+        prov.task_update(task_id=task_id, status="ready")
+
         # PROFILE=ro registers `<agent>-ro` alias and slings the BEAD with `--no-merge`
         ro_res = prov.worker_start(task_id=task_id, agent="claude", profile="ro")
         alias = [c for c in calls if c[:4] == ["gt", "config", "agent", "set"]][-1]
@@ -859,6 +864,64 @@ class TestExternalAdversarialRemediation750(ProviderTestBase):
         self.assertEqual(gt_list["upstream"], [])
         gt_list_remote = gt_prov.worker_list(include_remote=True)
         self.assertEqual(len(gt_list_remote["upstream"]), 2)
+
+    def test_c28_and_c29_t3_inject_preserves_original_dispatch_and_post_contact_failure_retains_claim(self) -> None:
+        wt_t3 = self.tmp_path / "wt-t3-orig"
+        wt_t3.mkdir()
+
+        def t3_runner(call: dict[str, object], **_kw: object) -> dict[str, object]:
+            tool = call["tool"]
+            if tool == "t3_thread_launch":
+                return {"structuredContent": {"threadId": "thr-1", "runId": "r1"}, "isError": False}
+            if tool == "t3_thread_read":
+                return {"structuredContent": {"thread": {"worktreePath": str(wt_t3), "status": "idle"}}, "isError": False}
+            if tool == "t3_thread_send":
+                return {"structuredContent": {"delivery": "queued"}, "isError": False}
+            return {"structuredContent": {}, "isError": False}
+
+        t3 = T3CodeProvider(
+            state=self.state,
+            runner=t3_runner,
+            env={"OPEN_FLEET_T3_PROJECT_ID": "proj-1"},
+            hooks=lambda w, a, p: {},
+        )
+        t_orig = self.state.task_create(spec="first", run="run-t3")["task"]["id"]
+        t_inj = self.state.task_create(spec="followup", run="run-t3")["task"]["id"]
+        t3.worker_start(task_id=t_orig, worktree=str(wt_t3), agent="codex", profile="rw", run="run-t3")
+        t3.dispatch_inject(task_id=t_inj, to_handle="t3:thr-1", run="run-t3")
+        with self.state._connect() as conn:
+            rows = conn.execute(
+                "SELECT dispatch_id, task_id, worktree, agent, profile FROM dispatches WHERE backend = 't3code' ORDER BY created_at ASC"
+            ).fetchall()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["dispatch_id"], "thr-1")
+        self.assertEqual(rows[0]["task_id"], t_orig)
+        self.assertEqual(rows[0]["agent"], "codex")
+        self.assertEqual(rows[0]["profile"], "rw")
+        self.assertTrue(rows[1]["dispatch_id"].startswith("thr-1:inject:"))
+        self.assertEqual(rows[1]["task_id"], t_inj)
+        self.assertEqual(rows[1]["worktree"], str(wt_t3))
+        self.assertEqual(rows[1]["agent"], "codex")
+        self.assertEqual(rows[1]["profile"], "rw")
+
+        # C29: Post-runtime-contact ambiguous failure must NOT release claimed task back to ready
+        t_ambig = self.state.task_create(spec="ambig", run="run-t3")["task"]["id"]
+
+        def ambig_runner(call: dict[str, object], **_kw: object) -> dict[str, object]:
+            if call["tool"] == "t3_thread_launch":
+                return {"structuredContent": {}, "isError": False}  # missing threadId after contact
+            return {"structuredContent": {}, "isError": False}
+
+        t3_ambig = T3CodeProvider(
+            state=self.state,
+            runner=ambig_runner,
+            env={"OPEN_FLEET_T3_PROJECT_ID": "proj-1"},
+            hooks=lambda w, a, p: {},
+        )
+        with self.assertRaises(ProviderError):
+            t3_ambig.worker_start(task_id=t_ambig, worktree=str(wt_t3), agent="claude", profile="rw", run="run-t3")
+        st = {t["id"]: t["status"] for t in self.state.task_list(run="run-t3")["tasks"]}
+        self.assertEqual(st[t_ambig], "dispatched")
 
 
 if __name__ == "__main__":

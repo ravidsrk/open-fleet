@@ -542,6 +542,33 @@ class GateRunsIsolated(QueueCase):
         self.assertNotIn(str(conductor_home), tail)
         self.assertNotIn(str(self.w.conductor), tail)
 
+    def test_gate_ppid_environ_and_require_sandbox_and_shell_wrapper_fingerprint_c19_c21(self):
+        self.w.env["GH_TOKEN"] = "ghp_PPID_SENTINEL_SECRET"
+        tail = self._gate_tail(
+            'if [ -r "/proc/$PPID/environ" ]; then '
+            'tr "\\0" "\\n" < "/proc/$PPID/environ" | grep -q "ghp_PPID_SENTINEL_SECRET" '
+            '&& echo "ppid=LEAKED" || echo "ppid=clean"; '
+            'else echo "ppid=clean"; fi'
+        )
+        self.assertIn("ppid=clean", tail)
+        # Subshell and sh -c wrapper executables are extracted by _extract_gate_executables:
+        exes = mq_mod.MergeQueue._extract_gate_executables(
+            '(sh -c "env FOO=1 ./scripts/gate.sh && nice -n 5 pytest")'
+        )
+        self.assertIn("./scripts/gate.sh", exes)
+        self.assertIn("pytest", exes)
+        # When MQ_REQUIRE_GATE_SANDBOX=1 and no sandbox binary/command is usable, fail closed:
+        if mq_mod.MergeQueue._bwrap_bin() is None:
+            token = self.acquire("c2", "--takeover")
+            self.board(token, self.w.unit("beta"))
+            self.w.env["MQ_REQUIRE_GATE_SANDBOX"] = "1"
+            try:
+                rc, out = self.w.cli("plan", "--token", token, "--gate-cmd", "true")
+            finally:
+                self.w.env.pop("MQ_REQUIRE_GATE_SANDBOX", None)
+            self.assertNotEqual(rc, 0, out)
+            self.assertEqual(out.get("code"), "sandbox_unavailable", out)
+
 
 class GitLaneFreshness(Freshness):
     mode = "git"

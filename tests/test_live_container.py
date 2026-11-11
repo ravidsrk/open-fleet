@@ -2487,6 +2487,17 @@ class TheArmsClaudeTalksToTheBroker(unittest.TestCase):
             for canary in (secret_field, secret_model, secret_tier, secret_geo, secret_speed, secret_tool):
                 self.assertNotIn(canary, raw_ledger)
 
+    def test_ledger_reopen_never_widens_prior_open_cap_usd_c39(self):
+        with tempfile.TemporaryDirectory(prefix="broker-cap-") as tmp:
+            ledger_path = Path(tmp) / "spend.jsonl"
+            first = lb.Ledger(ledger_path, 1.0)
+            first.fh.close()
+            reopened = lb.Ledger(ledger_path, 25.0)
+            self.addCleanup(reopened.fh.close)
+            self.assertEqual(reopened.cap, 1.0)
+            self.assertIsNone(reopened.reserve("claude-haiku-5-5", 1.50))
+            self.assertEqual(reopened.refused.get("cap"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

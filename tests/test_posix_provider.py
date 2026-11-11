@@ -1909,6 +1909,23 @@ class TestPosixAdversarialRemediation750(PosixRealProcessBase):
         self.prov.worker_fence(verb="stop", dispatch_id=ws["dispatchId"])
         self.assertFalse(inbox.exists())
 
+    def test_c28_and_c40_terminal_send_run_isolation_and_strict_read_cursor_validation(self) -> None:
+        t_a = self.prov.task_create(spec="task a", run="run-a")["task"]["id"]
+        ws_a = self.prov.worker_start(task_id=t_a, agent="claude", profile="rw", prompt="work a", run="run-a")
+        term_a = ws_a["agentTerminalHandle"]
+        with self.assertRaises(self.posix.ProviderError) as ctx:
+            self.prov.terminal_send(term_a, "cross-run", run="run-b")
+        self.assertEqual(ctx.exception.code, "cross_run_access")
+
+        for bad in (-1, "-5", "abc", True):
+            with self.assertRaises(self.posix.ProviderError) as ctx:
+                self.prov.worker_read(ws_a["dispatchId"], cursor=bad)
+            self.assertEqual(ctx.exception.code, "invalid_argument")
+            with self.assertRaises(self.posix.ProviderError) as ctx:
+                self.prov.worker_read(ws_a["dispatchId"], limit=bad)
+            self.assertEqual(ctx.exception.code, "invalid_argument")
+        self.prov.worker_fence(verb="stop", dispatch_id=ws_a["dispatchId"])
+
 
 if __name__ == "__main__":
     unittest.main()

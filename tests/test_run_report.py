@@ -1353,7 +1353,7 @@ class SignedKeyFixture(RunReportBinding):
 
     def _verdict(self, **over):
         full_args = {k: None for k in run_report.SIGNED_ARGS}
-        full_args.update({"execute_nc": False, "no_gh": False,
+        full_args.update({"execute_nc": False, "allow_static_nc": False, "no_gh": False,
                           "unit_class": "mutation", "lighting": "lit"})
         if "args" in over:
             full_args.update(over.pop("args"))  # producer-shape: a full tuple with overrides

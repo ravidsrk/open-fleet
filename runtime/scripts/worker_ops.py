@@ -206,8 +206,16 @@ def format_read(result, want="auto"):
                      f"to certify terminal output as transcript evidence")
     cur = result.get("cursor")
     cur_text = "none" if cur is None or cur == "" else str(cur)
+    page_obj = result.get("transcript") if isinstance(result.get("transcript"), dict) else None
+    term_obj = result.get("terminal") if isinstance(result.get("terminal"), dict) else None
+    trunc = bool(
+        result.get("truncated")
+        or (page_obj.get("truncated") or page_obj.get("limited") if page_obj else False)
+        or (term_obj.get("truncated") if term_obj else False)
+    )
     lines = [f"SOURCE={source}",
-             f"CURSOR={_line(cur_text)}"]
+             f"CURSOR={_line(cur_text)}",
+             f"TRUNCATED={'true' if trunc else 'false'}"]
     fallback = result.get("fallbackReason")
     if fallback:
         lines.append(f"FALLBACK={_line(fallback)}")

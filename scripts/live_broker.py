@@ -579,7 +579,7 @@ class Ledger:
         except Exception:
             self.fh.close()
             raise
-        self.write({"event": "open", "cap_usd": cap_usd, "prices_usd_per_mtok": PRICES, "tiered": TIERED, "geo": GEO,
+        self.write({"event": "open", "cap_usd": self.cap, "prices_usd_per_mtok": PRICES, "tiered": TIERED, "geo": GEO,
                     "image_tokens": IMAGE_TOKENS,
                     "framing_tokens": FRAMING_TOKENS, "pid": os.getpid()})
 
@@ -602,7 +602,13 @@ class Ledger:
             if isinstance(call, int) and not isinstance(call, bool) and call > 0:
                 self.n = max(self.n, call)
             ev = doc["event"]
-            if ev == "start":
+            if ev == "open":
+                prior_cap = doc.get("cap_usd")
+                if prior_cap is not None:
+                    if not isinstance(prior_cap, (int, float)) or isinstance(prior_cap, bool) or prior_cap < 0:
+                        raise ValueError("corrupt spend ledger: invalid cap_usd")
+                    self.cap = min(self.cap, float(prior_cap))
+            elif ev == "start":
                 if not isinstance(call, int) or isinstance(call, bool) or call <= 0 or call in starts:
                     raise ValueError("corrupt spend ledger: invalid or duplicate start call id")
                 res = doc.get("reserved_usd")

@@ -1488,7 +1488,12 @@ class TestGrantProblemsUnits(unittest.TestCase):
         self.assertTrue(decisions.grant_problems(self._record(why="no source")))
 
     def test_read_side_human_grant_of_refuses_unknown_and_every_reserved_role(self):
-        for role in ("unknown", "UNKNOWN", *sorted(decisions.RESERVED_HUMAN_NAMES)):
+        reserved_literals = (
+            "agent", "ai", "anonymous", "auto", "automatic", "bot", "coordinator", "fleet",
+            "human", "model", "nobody", "none", "orca", "system", "unknown", "worker",
+        )
+        self.assertEqual(set(reserved_literals), set(decisions.RESERVED_HUMAN_NAMES))
+        for role in ("unknown", "UNKNOWN", *reserved_literals):
             with self.subTest(role=role):
                 rec = self._record(why=f"deploy to production [source=human:{role}]")
                 self.assertEqual(decisions.human_grant_of(rec), (None, None, rec["why"]))

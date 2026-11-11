@@ -75,11 +75,13 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
+import functools
 import hashlib
 import importlib.util
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -1379,7 +1381,7 @@ class MergeQueue:
     # never the conductor's credentials (GH_TOKEN, SSH_AUTH_SOCK, …) — the gate runs the UNIT's own
     # test code — plus whatever the operator lists in MQ_GATE_ENV_KEEP (comma-separated names, e.g.
     # a proxy setting the tests need). The same floor verify.py gives an executed control.
-    GATE_ENV_KEEP = ("PATH", "LANG", "TERM", "SHELL", "USER", "LOGNAME")
+    GATE_ENV_KEEP = ("PATH", "LANG", "TERM", "SHELL")
     GATE_ENV_KEEP_PREFIX = ("LC_",)
     GATE_ENV_FORBID_PREFIX = (
         "GH_", "GITHUB_", "GIT_", "SSH_", "ORCA_", "OPEN_FLEET_", "MQ_", "AWS_",
@@ -1387,6 +1389,7 @@ class MergeQueue:
     )
     GATE_ENV_FORBID_SUFFIX = ("_TOKEN", "_SECRET", "_KEY", "_PASSWORD", "_CREDENTIAL", "_CREDENTIALS")
     GATE_ENV_ISOLATED_KEYS = ("HOME", "TMPDIR", "TMP", "TEMP", "XDG_CONFIG_HOME", "GH_CONFIG_DIR")
+    _SHELL_NAMES = frozenset({"sh", "bash", "dash", "zsh", "ksh", "ash", "csh", "tcsh"})
     _SHELL_BUILTINS = frozenset({
         "true", "false", "test", "[", "echo", "printf", "exit", "cd", "pwd",
         "export", "set", "unset", "shift", "return", "break", "continue", ":",
@@ -1419,6 +1422,8 @@ class MergeQueue:
         }
         keep = set(self.GATE_ENV_KEEP) | extra
         env = {k: v for k, v in self.env.items() if k in keep or k.startswith(self.GATE_ENV_KEEP_PREFIX)}
+        env.setdefault("USER", "gate")
+        env.setdefault("LOGNAME", "gate")
         env["PATH"] = self._clean_gate_path()
         if gate_home is not None:
             xdg = gate_home / ".config"
@@ -1447,28 +1452,97 @@ class MergeQueue:
         return env
 
     @classmethod
-    def _extract_gate_executables(cls, gate_cmd: str) -> list[str]:
+    def _extract_gate_executables(cls, gate_cmd: str, _depth: int = 0) -> list[str]:
+        if _depth > 4:
+            return []
         tokens: list[str] = []
-        for seg in re.split(r"(?:\|\||&&|[;|\n])+", gate_cmd):
-            words = seg.strip().split()
+        try:
+            lex = shlex.shlex(gate_cmd.replace("\n", ";"), posix=True, punctuation_chars=";&|()")
+            lex.whitespace = " \t\r"
+            lex.whitespace_split = True
+            raw_tokens = list(lex)
+        except ValueError:
+            raw_tokens = gate_cmd.split()
+        seps = {";", "&", "&&", "|", "||", "|&", "(", ")", "{", "}"}
+        segments: list[list[str]] = [[]]
+        for tok in raw_tokens:
+            if tok in seps:
+                segments.append([])
+            else:
+                segments[-1].append(tok)
+        for words in segments:
+            if not words:
+                continue
             idx = 0
             while idx < len(words) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[idx]):
                 idx += 1
-            while idx < len(words) and words[idx] in ("env", "/usr/bin/env", "command", "exec", "nohup"):
-                if words[idx] not in ("command", "exec"):
-                    tokens.append(words[idx])
+            while idx < len(words) and words[idx] in (
+                "env", "/usr/bin/env", "command", "exec", "nohup", "nice", "timeout",
+            ):
+                w = words[idx]
+                if w not in ("command", "exec"):
+                    tokens.append(w)
                 idx += 1
-                while idx < len(words) and (
-                    words[idx].startswith("-") or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[idx])
-                ):
-                    idx += 1
+                if w in ("env", "/usr/bin/env"):
+                    while idx < len(words):
+                        a = words[idx]
+                        if a == "--":
+                            idx += 1
+                            break
+                        if a == "-S" and idx + 1 < len(words):
+                            tokens.extend(cls._extract_gate_executables(words[idx + 1], _depth + 1))
+                            idx = len(words)
+                            break
+                        if a.startswith("-S") and len(a) > 2:
+                            tokens.extend(cls._extract_gate_executables(a[2:], _depth + 1))
+                            idx = len(words)
+                            break
+                        if a in ("-u", "--unset", "-C", "--chdir") and idx + 1 < len(words):
+                            idx += 2
+                            continue
+                        if a.startswith("-") or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", a):
+                            idx += 1
+                            continue
+                        break
+                    while idx < len(words) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[idx]):
+                        idx += 1
+                elif w == "nice":
+                    while idx < len(words) and words[idx].startswith("-"):
+                        if words[idx] == "--":
+                            idx += 1
+                            break
+                        idx += 2 if words[idx] in ("-n", "--adjustment") else 1
+                elif w == "timeout":
+                    while idx < len(words) and words[idx].startswith("-"):
+                        if words[idx] == "--":
+                            idx += 1
+                            break
+                        idx += 2 if words[idx] in ("-k", "--kill-after", "-s", "--signal") else 1
+                    if idx < len(words):
+                        idx += 1  # duration
+                else:
+                    while idx < len(words) and words[idx].startswith("-"):
+                        if words[idx] == "--":
+                            idx += 1
+                            break
+                        idx += 1
             if idx < len(words):
                 tok = words[idx].strip("()'\"")
                 if tok and tok not in cls._SHELL_BUILTINS:
                     tokens.append(tok)
+                if Path(tok).name in cls._SHELL_NAMES:
+                    for j in range(idx + 1, len(words)):
+                        a = words[j]
+                        if a == "--":
+                            break
+                        if a == "-c" or (a.startswith("-") and not a.startswith("--") and "c" in a[1:]):
+                            if j + 1 < len(words):
+                                tokens.extend(cls._extract_gate_executables(words[j + 1], _depth + 1))
+                            break
         return tokens
 
-    def _gate_fingerprint(self, gate_cmd: str, cwd: Path | None = None) -> tuple[str, list[str]]:
+    def _gate_fingerprint(self, gate_cmd: str, cwd: Path | None = None,
+                          commit: str | None = None) -> tuple[str, list[str]]:
         clean_path = self._clean_gate_path()
         items: list[dict[str, Any]] = []
         problems: list[str] = []
@@ -1479,20 +1553,44 @@ class MergeQueue:
                 continue
             seen.add(tok)
             resolved: str | None
-            if "/" in tok:
-                if not os.path.isabs(tok):
-                    if cwd is not None:
-                        cand = (cwd / tok).resolve()
-                        resolved = str(cand) if cand.exists() else None
-                    else:
-                        resolved = None
-                    items.append({"tok": tok, "kind": "relative", "resolved": resolved})
-                    if resolved is None:
+            if "/" in tok and not os.path.isabs(tok):
+                norm_tok = Path(os.path.normpath(tok)).as_posix().lstrip("./")
+                if cwd is not None:
+                    cand = (cwd / tok).resolve()
+                    cwd_real = cwd.resolve()
+                    if cand != cwd_real and cwd_real not in cand.parents:
+                        problems.append(f"{tok}: escapes gate checkout")
+                        items.append({"tok": tok, "kind": "relative", "error": "escapes"})
                         continue
+                    if cand.is_file():
+                        try:
+                            st = os.stat(cand)
+                            digest = hashlib.sha256(cand.read_bytes()).hexdigest()
+                            items.append({
+                                "tok": tok, "kind": "relative", "dev": st.st_dev,
+                                "ino": st.st_ino, "sha256": digest,
+                            })
+                        except OSError as exc:
+                            problems.append(f"{tok}: {exc}")
+                            items.append({"tok": tok, "kind": "relative", "error": str(exc)})
+                    else:
+                        items.append({"tok": tok, "kind": "relative", "resolved": None})
                 else:
-                    resolved = tok
-            else:
-                resolved = shutil.which(tok, path=clean_path)
+                    blob_sha: str | None = None
+                    if commit and norm_tok and not norm_tok.startswith(".."):
+                        try:
+                            proc = subprocess.run(
+                                [self.git.bin, *self.git.HARDENED_CONFIG, "-C", self.git.repo_dir,
+                                 "cat-file", "blob", f"{commit}:{norm_tok}"],
+                                capture_output=True, env=self.git.env, timeout=30,
+                            )
+                            if proc.returncode == 0:
+                                blob_sha = hashlib.sha256(proc.stdout).hexdigest()
+                        except (OSError, subprocess.SubprocessError) as exc:
+                            problems.append(f"{tok}@{commit}: {exc}")
+                    items.append({"tok": tok, "kind": "relative", "commit_sha256": blob_sha})
+                continue
+            resolved = tok if os.path.isabs(tok) else shutil.which(tok, path=clean_path)
             if not resolved:
                 items.append({"tok": tok, "resolved": None})
                 continue
@@ -1513,6 +1611,78 @@ class MergeQueue:
         payload = json.dumps({"path": clean_path, "items": items}, sort_keys=True).encode("utf-8")
         return hashlib.sha256(payload).hexdigest(), problems
 
+    @staticmethod
+    @functools.lru_cache(maxsize=1)
+    def _bwrap_bin() -> str | None:
+        bw = shutil.which("bwrap")
+        if not bw:
+            return None
+        try:
+            r = subprocess.run(
+                [bw, "--unshare-all", "--ro-bind", "/", "/", "/bin/true"],
+                capture_output=True, timeout=5, stdin=subprocess.DEVNULL,
+            )
+            return bw if r.returncode == 0 else None
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    def _conductor_state_digest(self) -> str:
+        """Digest conductor SQLite state + git refs so same-UID gate tampering fails closed."""
+        db_rows = {
+            t: self.store.read(f"SELECT * FROM {t}")
+            for t in ("mq_queues", "mq_leases", "mq_tokens", "mq_entries", "mq_receipts")
+        }
+        refs = self.git.out("for-each-ref", "--format=%(refname) %(objectname)")
+        return _digest(db_rows, refs)
+
+    def _gate_exec_argv(self, gate_cmd: str, checkout: Path, gate_home: Path,
+                        gate_tmp: Path) -> list[str]:
+        req_sbx = (
+            self.env.get("MQ_REQUIRE_GATE_SANDBOX")
+            or self.env.get("OPEN_FLEET_REQUIRE_GATE_SANDBOX")
+            or ""
+        ).strip().lower() in ("1", "true", "yes")
+        custom_sbx = (
+            self.env.get("MQ_GATE_SANDBOX_CMD")
+            or self.env.get("OPEN_FLEET_GATE_SANDBOX_CMD")
+            or ""
+        ).strip()
+        if custom_sbx:
+            return [*shlex.split(custom_sbx), "/bin/sh", "-c", gate_cmd]
+        bw = self._bwrap_bin()
+        if bw is not None:
+            cmd = [bw, "--unshare-all", "--die-with-parent", "--proc", "/proc", "--dev", "/dev"]
+            for sys_dir in ("/usr", "/bin", "/lib", "/lib64", "/sbin", "/etc", "/opt"):
+                if os.path.exists(sys_dir):
+                    cmd += ["--ro-bind", sys_dir, sys_dir]
+            for extra_dir in self._clean_gate_path().split(os.pathsep):
+                p = os.path.dirname(extra_dir) if extra_dir.endswith("/bin") else extra_dir
+                if p and os.path.exists(p) and not any(
+                    p == d or p.startswith(d + "/") for d in ("/usr", "/bin", "/lib", "/lib64", "/sbin", "/etc", "/opt")
+                ):
+                    cmd += ["--ro-bind", p, p]
+            cmd += [
+                "--bind", str(checkout), str(checkout),
+                "--bind", str(gate_home), str(gate_home),
+                "--bind", str(gate_tmp), str(gate_tmp),
+                "--chdir", str(checkout),
+                "/bin/sh", "-c", gate_cmd,
+            ]
+            return cmd
+        if req_sbx:
+            raise QueueError(
+                "sandbox_unavailable",
+                "MQ_REQUIRE_GATE_SANDBOX requires bubblewrap (bwrap) or MQ_GATE_SANDBOX_CMD, "
+                "neither is usable in this environment",
+            )
+        # Unprivileged container fallback: isolate $PPID via a scrubbed `python -I` supervisor so
+        # `/proc/$PPID/environ` and `/proc/$PPID/cmdline` hold zero conductor secrets or DB paths.
+        return [
+            sys.executable, "-I", "-c",
+            "import subprocess,sys; raise SystemExit(subprocess.call(['/bin/sh','-c',sys.argv[1]]))",
+            gate_cmd,
+        ]
+
     def _run_gate(self, gate_cmd: str, commit: str, e: dict[str, Any], timeout: float) -> dict[str, Any]:
         tmp = tempfile.mkdtemp(prefix="mq-gate-")
         os.chmod(tmp, 0o700)
@@ -1532,11 +1702,14 @@ class MergeQueue:
             (checkout / ".git" / "FETCH_HEAD").unlink(missing_ok=True)
             env = self._gate_env(e, commit, gate_home=gate_home, gate_tmp=gate_tmp)
             pre_fp, pre_problems = self._gate_fingerprint(gate_cmd, cwd=checkout)
-            plan_fp, _ = self._gate_fingerprint(gate_cmd)
+            plan_fp, plan_problems = self._gate_fingerprint(gate_cmd, commit=commit)
+            pre_state = self._conductor_state_digest()
+            exec_argv = self._gate_exec_argv(gate_cmd, checkout, gate_home, gate_tmp)
             # Its own session, so a timeout kills everything the gate started: a grandchild left
             # holding the output pipe would otherwise stretch the timeout to its own lifetime.
-            proc = subprocess.Popen(["/bin/sh", "-c", gate_cmd], cwd=checkout, env=env, stdout=subprocess.PIPE,
-                                    stderr=subprocess.STDOUT, text=True, start_new_session=True)
+            proc = subprocess.Popen(exec_argv, cwd=checkout, env=env, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                    close_fds=True, start_new_session=True)
             try:
                 out, _ = proc.communicate(timeout=timeout)
                 code, tail = proc.returncode, (out or "")[-500:]
@@ -1546,10 +1719,15 @@ class MergeQueue:
                 proc.communicate()
                 code, tail = 124, f"gate timed out after {timeout}s"
             post_fp, post_problems = self._gate_fingerprint(gate_cmd, cwd=checkout)
-            post_plan_fp, _ = self._gate_fingerprint(gate_cmd)
-            if pre_problems or post_problems or pre_fp != post_fp or plan_fp != post_plan_fp:
+            post_plan_fp, post_plan_problems = self._gate_fingerprint(gate_cmd, commit=commit)
+            post_state = self._conductor_state_digest()
+            if (pre_problems or post_problems or plan_problems or post_plan_problems
+                    or pre_fp != post_fp or plan_fp != post_plan_fp):
                 code = 1 if code == 0 else code
                 tail = (tail + "\n[C19: gate executable changed during gate execution]")[-500:]
+            if pre_state != post_state:
+                code = 1 if code == 0 else code
+                tail = (tail + "\n[C21: conductor state modified during gate execution]")[-500:]
             return {"cmd": gate_cmd, "exit": code, "tail": tail, "commit": commit, "fingerprint": post_plan_fp}
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -1571,7 +1749,7 @@ class MergeQueue:
             return False
         saved_fp = gate.get("fingerprint")
         if saved_fp is not None:
-            current_fp, problems = self._gate_fingerprint(gate_cmd)
+            current_fp, problems = self._gate_fingerprint(gate_cmd, commit=e.get("prefix_commit"))
             if problems or saved_fp != current_fp:
                 return False
         return True

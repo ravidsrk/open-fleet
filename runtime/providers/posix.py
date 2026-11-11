@@ -1947,15 +1947,16 @@ if {repr(self.backend)} == "cmux":
                 return replay
 
         # A dead coordinator's unfinished launch of THIS task is settled before a new claim (#597).
+        eff_run = self.state._resolve_caller_run(run, default_run=None)
         self._reconcile_dead_intents(task_id=task_id)
         with self.state._connect() as conn:
             t_row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         if not t_row:
             raise ProviderError("task_not_found", f"task {task_id!r} not found")
-        if run is not None and t_row["run_id"] != run:
+        if eff_run is not None and t_row["run_id"] != eff_run:
             raise ProviderError(
                 "cross_run_access",
-                f"task {task_id!r} belongs to run {t_row['run_id']!r}, not {run!r}",
+                f"task {task_id!r} belongs to run {t_row['run_id']!r}, not {eff_run!r}",
             )
         run_id = t_row["run_id"] or "default"
         if t_row["status"] != "ready":
@@ -3323,6 +3324,20 @@ if {repr(self.backend)} == "cmux":
             worktree=r["worktree"],
         )
 
+    @staticmethod
+    def _parse_nonneg_int(val: Any, name: str) -> int:
+        if isinstance(val, bool):
+            raise ProviderError("invalid_argument", f"{name} must be a non-negative integer, got {val!r}")
+        if isinstance(val, int):
+            if val < 0:
+                raise ProviderError("invalid_argument", f"{name} must be a non-negative integer, got {val!r}")
+            return val
+        if isinstance(val, str):
+            s = val.strip()
+            if s.isdigit():
+                return int(s)
+        raise ProviderError("invalid_argument", f"{name} must be a non-negative integer, got {val!r}")
+
     def worker_read(
         self,
         dispatch_id: str,
@@ -3340,10 +3355,10 @@ if {repr(self.backend)} == "cmux":
             all_lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()
         total = len(all_lines)
         if cursor is not None and str(cursor) != "":
-            cur_idx = max(0, int(cursor))
+            cur_idx = self._parse_nonneg_int(cursor, "cursor")
             after = all_lines[cur_idx:]
             if limit is not None:
-                lim = max(0, int(limit))
+                lim = self._parse_nonneg_int(limit, "limit")
                 lines = after[:lim]
                 truncated = len(after) > lim
             else:
@@ -3352,7 +3367,7 @@ if {repr(self.backend)} == "cmux":
             next_cursor = cur_idx + len(lines)
         else:
             if limit is not None:
-                lim = max(0, int(limit))
+                lim = self._parse_nonneg_int(limit, "limit")
                 truncated = total > lim
                 lines = all_lines[-lim:] if lim > 0 else []
             else:
@@ -3644,10 +3659,10 @@ if {repr(self.backend)} == "cmux":
             all_lines = Path(r["log_path"]).read_text(encoding="utf-8", errors="replace").splitlines()
         total = len(all_lines)
         if cursor is not None and str(cursor) != "":
-            cur_idx = max(0, int(cursor))
+            cur_idx = self._parse_nonneg_int(cursor, "cursor")
             after = all_lines[cur_idx:]
             if limit is not None:
-                lim = max(0, int(limit))
+                lim = self._parse_nonneg_int(limit, "limit")
                 lines = after[:lim]
                 truncated = len(after) > lim
             else:
@@ -3656,7 +3671,7 @@ if {repr(self.backend)} == "cmux":
             next_cursor = cur_idx + len(lines)
         else:
             if limit is not None:
-                lim = max(0, int(limit))
+                lim = self._parse_nonneg_int(limit, "limit")
                 truncated = total > lim
                 lines = all_lines[-lim:] if lim > 0 else []
             else:
@@ -3792,7 +3807,25 @@ if {repr(self.backend)} == "cmux":
             pass
         return True
 
-    def terminal_send(self, terminal: str, text: str, enter: bool = True) -> dict[str, Any]:
+    def terminal_send(
+        self,
+        terminal: str,
+        text: str,
+        enter: bool = True,
+        run: str | None = None,
+    ) -> dict[str, Any]:
+        eff_run = self.state._resolve_caller_run(run, default_run=None)
+        if eff_run is not None:
+            with self.state._connect() as conn:
+                disp = conn.execute(
+                    "SELECT run_id FROM dispatches WHERE terminal_handle = ? ORDER BY created_at DESC LIMIT 1",
+                    (terminal,),
+                ).fetchone()
+            if disp and disp["run_id"] != eff_run:
+                raise ProviderError(
+                    "cross_run_access",
+                    f"terminal {terminal!r} is bound to run {disp['run_id']!r}, not {eff_run!r}",
+                )
         r = self._terminal_row(terminal)
         self._deliver_terminal_input(r, text, enter=enter)
         req_id = f"req_{uuid.uuid4().hex[:10]}"
@@ -3806,6 +3839,7 @@ if {repr(self.backend)} == "cmux":
         run: str | None = None,
         sender: str | None = None,
     ) -> dict[str, Any]:
+        eff_run = self.state._resolve_caller_run(run, default_run=None)
         req_id = f"req_{uuid.uuid4().hex[:10]}"
         dispatch_id = f"disp_{uuid.uuid4().hex[:10]}"
         now = time.time()
@@ -3815,11 +3849,11 @@ if {repr(self.backend)} == "cmux":
             if not t_row:
                 conn.execute("ROLLBACK")
                 raise ProviderError("task_not_found", f"task {task_id!r} not found")
-            if run is not None and t_row["run_id"] != run:
+            if eff_run is not None and t_row["run_id"] != eff_run:
                 conn.execute("ROLLBACK")
                 raise ProviderError(
                     "cross_run_access",
-                    f"task {task_id!r} belongs to run {t_row['run_id']!r}, not {run!r}",
+                    f"task {task_id!r} belongs to run {t_row['run_id']!r}, not {eff_run!r}",
                 )
             effective_run = t_row["run_id"] or "default"
             term_row = conn.execute("SELECT * FROM terminals WHERE handle = ?", (to_handle,)).fetchone()

@@ -850,6 +850,7 @@ class TestDocsNavigation(unittest.TestCase):
         table = "\n".join(ln for ln in section.splitlines() if ln.startswith("|"))
         self.assertIn("codebuild-gha-open-fleet", table)
         self.assertIn("instabox-medium", table)
+        self.assertIn("ubuntu-latest", table)
         self.assertNotRegex(
             table, r"^\|\s*GitHub-hosted(?:\s+`ubuntu-latest`)?\s*\|",
             "docs/ops.md CI runners table still claims jobs run on GitHub-hosted ubuntu-latest",

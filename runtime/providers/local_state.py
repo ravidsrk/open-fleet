@@ -614,7 +614,7 @@ class LocalStateStore:
         retry_request: str | None = None,
         initial_status: str | None = None,
     ) -> dict[str, Any]:
-        run_id = run or "default"
+        run_id = self._resolve_caller_run(run, default_run="default") or "default"
         deps_list = list(deps or [])
         payload_sha = request_payload_sha256(
             {
@@ -777,8 +777,9 @@ class LocalStateStore:
         sender: str | None = None,
         retry_request: str | None = None,
     ) -> dict[str, Any]:
+        eff_run = self._resolve_caller_run(run, default_run=None)
         payload_sha = request_payload_sha256(
-            {"task_id": task_id, "status": status, "result": result, "run": run}
+            {"task_id": task_id, "status": status, "result": result, "run": eff_run}
         )
         cached = self.get_or_record_request(retry_request, "task-update", payload_sha)
         if cached:
@@ -793,11 +794,11 @@ class LocalStateStore:
                 if not row:
                     conn.execute("ROLLBACK")
                     raise ProviderError("task_not_found", f"task {task_id!r} not found")
-                if run is not None and row["run_id"] != run:
+                if eff_run is not None and row["run_id"] != eff_run:
                     conn.execute("ROLLBACK")
                     raise ProviderError(
                         "cross_run_access",
-                        f"task {task_id!r} belongs to run {row['run_id']!r}, not {run!r}",
+                        f"task {task_id!r} belongs to run {row['run_id']!r}, not {eff_run!r}",
                     )
                 conn.execute(
                     "UPDATE tasks SET status = ?, result_json = COALESCE(?, result_json), updated_at = ? WHERE id = ?",
@@ -819,11 +820,12 @@ class LocalStateStore:
         sender: str | None = None,
         brief: bool = False,
     ) -> dict[str, Any]:
+        eff_run = self._resolve_caller_run(run, default_run=None)
         with self._connect() as conn:
-            if run:
+            if eff_run:
                 rows = conn.execute(
                     "SELECT * FROM tasks WHERE run_id = ? ORDER BY created_at ASC",
-                    (run,),
+                    (eff_run,),
                 ).fetchall()
             else:
                 rows = conn.execute("SELECT * FROM tasks ORDER BY created_at ASC").fetchall()
@@ -902,6 +904,39 @@ class LocalStateStore:
         handle = env_get("OPEN_FLEET_TERMINAL_HANDLE", "ORCA_TERMINAL_HANDLE", self.env, "")
         return [h for h in (handle, dispatch) if h]
 
+    def _worker_bound_run(self, conn: sqlite3.Connection | None = None) -> str | None:
+        dispatch = env_get("OPEN_FLEET_DISPATCH_ID", "ORCA_DISPATCH_ID", self.env, "")
+        if not dispatch:
+            return None
+        if conn is not None:
+            row = conn.execute(
+                "SELECT run_id FROM dispatches WHERE dispatch_id = ? LIMIT 1",
+                (dispatch,),
+            ).fetchone()
+            return row["run_id"] if row else None
+        with self._connect() as c:
+            row = c.execute(
+                "SELECT run_id FROM dispatches WHERE dispatch_id = ? LIMIT 1",
+                (dispatch,),
+            ).fetchone()
+            return row["run_id"] if row else None
+
+    def _resolve_caller_run(
+        self,
+        explicit_run: str | None,
+        *,
+        default_run: str | None = "default",
+    ) -> str | None:
+        bound = self._worker_bound_run()
+        if bound:
+            if explicit_run is not None and explicit_run != bound:
+                raise ProviderError(
+                    "cross_run_access",
+                    f"launched worker is bound to run {bound!r}, cannot access {explicit_run!r}",
+                )
+            return bound
+        return explicit_run if explicit_run is not None else default_run
+
     def _mailbox_scope(self, conn: sqlite3.Connection, run_id: str, terminal: str | None) -> list[str]:
         """Recipients a caller may read/ack. Workers get ONLY their own mail; the `coordinator`
         alias resolves for the run's fenced coordinator (or an anonymous operator shell) only."""
@@ -927,7 +962,7 @@ class LocalStateStore:
         # No handle at all (operator shell) or the literal alias: the coordinator mailbox. A
         # fenced run refuses this anonymous reader, so a fenced coordinator cannot be bypassed.
         row = conn.execute("SELECT coordinator_handle FROM runs WHERE id = ?", (run_id,)).fetchone()
-        if row and row["coordinator_handle"] and run_id != "default":
+        if row and row["coordinator_handle"]:
             raise ProviderError(
                 "consumer_fenced",
                 f"run {run_id!r} inbox is fenced to coordinator {row['coordinator_handle']!r}; pass --terminal",
@@ -1017,12 +1052,19 @@ class LocalStateStore:
     ) -> list[str]:
         """Settle the task owned by `dispatch_id` and recompute its dependents (#750 C30)."""
         row = conn.execute(
-            "SELECT task_id, run_id FROM dispatches WHERE dispatch_id = ?",
+            "SELECT rowid AS rid, task_id, run_id, created_at FROM dispatches WHERE dispatch_id = ?",
             (dispatch_id,),
         ).fetchone()
         if not row or not row["task_id"]:
             return []
         task_id = row["task_id"]
+        newer = conn.execute(
+            "SELECT 1 FROM dispatches WHERE task_id = ? AND dispatch_id != ? "
+            "AND rowid > ? AND state NOT IN ('stopped','abandoned','released','died') LIMIT 1",
+            (task_id, dispatch_id, row["rid"]),
+        ).fetchone()
+        if newer:
+            return []
         t_row = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
         if not t_row or t_row["status"] in ("completed", "failed"):
             return []
@@ -1050,7 +1092,7 @@ class LocalStateStore:
         reply_to: str | None = None,
         retry_request: str | None = None,
     ) -> dict[str, Any]:
-        run_id = run or "default"
+        run_id = self._resolve_caller_run(run, default_run="default") or "default"
         recipient = to or COORDINATOR_ALIAS
         sender_id = sender or self._resolve_terminal(None) or "worker"
         clean_attrs = dict(attrs or {})
@@ -1090,21 +1132,23 @@ class LocalStateStore:
                     attrs=clean_attrs,
                     reply_to=reply_to,
                 )
-                if msg_type == "worker_done":
-                    own_disp = (
-                        env_get("OPEN_FLEET_DISPATCH_ID", "ORCA_DISPATCH_ID", self.env, "")
-                        or clean_attrs.get("dispatchId")
-                        or clean_attrs.get("dispatch-id")
-                        or sender_id
-                    )
-                    disp_row = conn.execute(
-                        "SELECT dispatch_id, state FROM dispatches WHERE run_id = ? AND (dispatch_id = ? OR terminal_handle = ?) "
-                        "ORDER BY created_at DESC LIMIT 1",
-                        (run_id, own_disp, sender_id),
-                    ).fetchone()
+                if msg_type == "worker_done" and outcome in ("succeeded", "failed"):
+                    env_disp = env_get("OPEN_FLEET_DISPATCH_ID", "ORCA_DISPATCH_ID", self.env, "")
+                    if env_disp:
+                        disp_row = conn.execute(
+                            "SELECT dispatch_id, state FROM dispatches WHERE run_id = ? AND dispatch_id = ? LIMIT 1",
+                            (run_id, env_disp),
+                        ).fetchone()
+                    elif sender_id not in ("worker", COORDINATOR_ALIAS):
+                        disp_row = conn.execute(
+                            "SELECT dispatch_id, state FROM dispatches WHERE run_id = ? AND (dispatch_id = ? OR terminal_handle = ?) "
+                            "ORDER BY created_at DESC LIMIT 1",
+                            (run_id, sender_id, sender_id),
+                        ).fetchone()
+                    else:
+                        disp_row = None
                     if disp_row and disp_row["state"] not in FENCED_DISPATCH_STATES:
-                        ok = outcome != "failed"
-                        self._settle_dispatch_task(conn, disp_row["dispatch_id"], succeeded=ok, now=now)
+                        self._settle_dispatch_task(conn, disp_row["dispatch_id"], succeeded=(outcome == "succeeded"), now=now)
                 message = {
                     "id": msg_id,
                     "deliveryId": deliv_id,
@@ -1144,7 +1188,7 @@ class LocalStateStore:
         timeout_ms: int | None = None,
         retry_request: str | None = None,
     ) -> dict[str, Any]:
-        run_id = run or "default"
+        run_id = self._resolve_caller_run(run, default_run="default") or "default"
         terminal = self._resolve_terminal(terminal)
         ack_ids: list[str] = []
         if isinstance(ack, str) and ack:
@@ -1251,8 +1295,9 @@ class LocalStateStore:
         sender: str | None = None,
         retry_request: str | None = None,
     ) -> dict[str, Any]:
+        eff_run = self._resolve_caller_run(run, default_run=None)
         payload_sha = request_payload_sha256(
-            {"msg_id": msg_id, "body": body, "run": run, "sender": sender}
+            {"msg_id": msg_id, "body": body, "run": eff_run, "sender": sender}
         )
         cached = self.get_or_record_request(retry_request, "reply", payload_sha)
         if cached:
@@ -1270,11 +1315,11 @@ class LocalStateStore:
                 if not orig:
                     conn.execute("ROLLBACK")
                     raise ProviderError("message_not_found", f"message {msg_id!r} not found")
-                if run is not None and orig["run_id"] != run:
+                if eff_run is not None and orig["run_id"] != eff_run:
                     conn.execute("ROLLBACK")
                     raise ProviderError(
                         "cross_run_access",
-                        f"message {msg_id!r} belongs to run {orig['run_id']!r}, not {run!r}",
+                        f"message {msg_id!r} belongs to run {orig['run_id']!r}, not {eff_run!r}",
                     )
                 attrs = json.loads(orig["attrs_json"] or "{}")
                 gate_id = gate["gate_id"] if gate else attrs.get("gateId")
@@ -1385,16 +1430,17 @@ class LocalStateStore:
         The answer comes ONLY from a real reply (`reply --id <messageId>`) or `gate-resolve`;
         nothing in the fleet fabricates one (AGENTS.md: a fleet never fakes a human answer).
         """
-        run_id = run or "default"
+        eff_run = self._resolve_caller_run(run, default_run=None)
+        run_id = eff_run or "default"
         if resume:
             with self._connect() as conn:
                 row = self._find_gate(conn, resume)
             if not row:
                 raise ProviderError("gate_not_found", f"gate/message {resume!r} not found")
-            if run is not None and row["run_id"] != run:
+            if eff_run is not None and row["run_id"] != eff_run:
                 raise ProviderError(
                     "cross_run_access",
-                    f"gate {row['gate_id']!r} belongs to run {row['run_id']!r}, not {run!r}",
+                    f"gate {row['gate_id']!r} belongs to run {row['run_id']!r}, not {eff_run!r}",
                 )
             self._wait_gate(row["gate_id"], timeout_ms)
             with self._connect() as conn:
@@ -1464,8 +1510,9 @@ class LocalStateStore:
         """DAG gate (gate-classification.md): the task is `blocked` until `gate-resolve`."""
         if not task_id or not question:
             raise ProviderError("invalid_argument", "gate-create needs both --task and --question")
+        eff_run = self._resolve_caller_run(run, default_run=None)
         payload_sha = request_payload_sha256(
-            {"task_id": task_id, "question": question, "options": options, "run": run, "sender": sender}
+            {"task_id": task_id, "question": question, "options": options, "run": eff_run, "sender": sender}
         )
         cached = self.get_or_record_request(retry_request, "gate-create", payload_sha)
         if cached:
@@ -1486,11 +1533,11 @@ class LocalStateStore:
                 if not t:
                     conn.execute("ROLLBACK")
                     raise ProviderError("task_not_found", f"task {task_id!r} not found")
-                if run is not None and t["run_id"] != run:
+                if eff_run is not None and t["run_id"] != eff_run:
                     conn.execute("ROLLBACK")
                     raise ProviderError(
                         "cross_run_access",
-                        f"task {task_id!r} belongs to run {t['run_id']!r}, not {run!r}",
+                        f"task {task_id!r} belongs to run {t['run_id']!r}, not {eff_run!r}",
                     )
                 active = conn.execute(
                     "SELECT dispatch_id FROM dispatches WHERE task_id = ? AND state NOT IN "
@@ -1531,8 +1578,9 @@ class LocalStateStore:
     ) -> dict[str, Any]:
         if not gate_id or resolution is None:
             raise ProviderError("invalid_argument", "gate-resolve needs --id and --resolution")
+        eff_run = self._resolve_caller_run(run, default_run=None)
         payload_sha = request_payload_sha256(
-            {"gate_id": gate_id, "resolution": resolution, "run": run, "sender": sender}
+            {"gate_id": gate_id, "resolution": resolution, "run": eff_run, "sender": sender}
         )
         cached = self.get_or_record_request(retry_request, "gate-resolve", payload_sha)
         if cached:
@@ -1545,11 +1593,11 @@ class LocalStateStore:
                 if not row:
                     conn.execute("ROLLBACK")
                     raise ProviderError("gate_not_found", f"gate {gate_id!r} not found")
-                if run is not None and row["run_id"] != run:
+                if eff_run is not None and row["run_id"] != eff_run:
                     conn.execute("ROLLBACK")
                     raise ProviderError(
                         "cross_run_access",
-                        f"gate {row['gate_id']!r} belongs to run {row['run_id']!r}, not {run!r}",
+                        f"gate {row['gate_id']!r} belongs to run {row['run_id']!r}, not {eff_run!r}",
                     )
                 try:
                     res = self._resolve_gate_in_tx(conn, row, resolution, status="resolved", who=who)
@@ -1565,9 +1613,10 @@ class LocalStateStore:
         return out
 
     def gate_list(self, *, run: str | None = None, task_id: str | None = None, status: str | None = None) -> dict[str, Any]:
+        eff_run = self._resolve_caller_run(run, default_run=None)
         q = "SELECT * FROM gates WHERE 1=1"
         params: list[Any] = []
-        for col, val in (("run_id", run), ("task_id", task_id), ("status", status)):
+        for col, val in (("run_id", eff_run), ("task_id", task_id), ("status", status)):
             if val:
                 q += f" AND {col} = ?"
                 params.append(val)
@@ -1604,17 +1653,11 @@ class LocalStateStore:
             (gate_row["run_id"],),
         ).fetchone()
         bound = run_row["coordinator_handle"] if run_row else None
-        if bound:
-            if resolver == COORDINATOR_ALIAS and gate_row["run_id"] != "default":
-                raise ProviderError(
-                    "consumer_fenced",
-                    f"run {gate_row['run_id']!r} is fenced to coordinator {bound!r}; pass --from {bound!r}",
-                )
-            if resolver not in (COORDINATOR_ALIAS, "human") and resolver != bound:
-                raise ProviderError(
-                    "consumer_fenced",
-                    f"{resolver!r} cannot answer gate {gate_row['gate_id']!r}: run {gate_row['run_id']!r} is fenced to coordinator {bound!r}",
-                )
+        if bound and resolver != bound:
+            raise ProviderError(
+                "consumer_fenced",
+                f"{resolver!r} cannot answer gate {gate_row['gate_id']!r}: run {gate_row['run_id']!r} is fenced to coordinator {bound!r}; pass --from {bound!r}",
+            )
 
     def _resolve_gate_in_tx(
         self,
@@ -1863,9 +1906,12 @@ class LocalStateStore:
                 conn.execute("COMMIT")
                 return {"syntheticDied": False, "alreadyDied": True}
             now = time.time()
-            row = self._terminal_report(conn, run_id, senders)
+            eff_run = disp["run_id"] or run_id
+            row = self._terminal_report(conn, eff_run, senders)
             if row:
-                succeeded = row["msg_type"] != "escalation" and row["outcome"] != "failed"
+                succeeded = (row["msg_type"] == "merge_ready" and row["outcome"] != "failed") or (
+                    row["msg_type"] == "worker_done" and row["outcome"] == "succeeded"
+                )
                 conn.execute(
                     "UPDATE dispatches SET state = 'completed', terminal_state = 'exited', head_sha = COALESCE(NULLIF(?, ''), head_sha), "
                     "updated_at = ? WHERE dispatch_id = ? AND state NOT IN ('stopped','abandoned','released')",
@@ -1879,6 +1925,7 @@ class LocalStateStore:
                 "updated_at = ? WHERE dispatch_id = ?",
                 (worktree_head_sha, now, dispatch_id),
             )
+            self._settle_dispatch_task(conn, dispatch_id, succeeded=False, now=now)
             payload = json.dumps(
                 {
                     "event": "worker_died",
@@ -1891,7 +1938,7 @@ class LocalStateStore:
             )
             msg_id, deliv_id = self._insert_message(
                 conn,
-                run_id=run_id,
+                run_id=eff_run,
                 sender=worker_handle or dispatch_id,
                 recipient=COORDINATOR_ALIAS,
                 msg_type="escalation",
@@ -1927,11 +1974,12 @@ class LocalStateStore:
         senders = [s for s in {dispatch_id, worker_handle} if s]
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            disp = conn.execute("SELECT state FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)).fetchone()
+            disp = conn.execute("SELECT state, run_id FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)).fetchone()
             if disp is None or disp["state"] in (*FENCED_DISPATCH_STATES, "died", "completed"):
                 conn.execute("COMMIT")
                 return {"relayed": False, "state": disp["state"] if disp else None}
-            row = self._terminal_report(conn, run_id, senders)
+            eff_run = disp["run_id"] or run_id
+            row = self._terminal_report(conn, eff_run, senders)
             if row:
                 conn.execute("COMMIT")
                 return {"relayed": False, "existingMessageId": row["id"]}
@@ -1945,7 +1993,7 @@ class LocalStateStore:
             self._settle_dispatch_task(conn, dispatch_id, succeeded=succeeded, now=now)
             msg_id, deliv_id = self._insert_message(
                 conn,
-                run_id=run_id,
+                run_id=eff_run,
                 sender=worker_handle,
                 recipient=COORDINATOR_ALIAS,
                 msg_type="worker_done",

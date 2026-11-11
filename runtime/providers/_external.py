@@ -282,7 +282,7 @@ def release_claim_on_failure(worker_start):
         try:
             return worker_start(self, *args, **kwargs)
         except BaseException:
-            if claim_ctx.get("claimed") and not claim_ctx.get("recorded"):
+            if claim_ctx.get("claimed") and not claim_ctx.get("recorded") and not _REACHED_RUNTIME.get():
                 release_local_task(claim_ctx.get("state"), claim_ctx.get("task_id"))
             if retry_request and not _REACHED_RUNTIME.get():
                 row = self.state.request_row(retry_request)

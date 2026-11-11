@@ -38,7 +38,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from ._external import release_claim_on_failure
+from ._external import _ensure_ctx_task_claimed, release_claim_on_failure
 from ._external import ExternalDispatchMixin, env_lookup, foreign_dirty_paths, preserve_worker_head, real_worktree, run_cli_text
 from .base import (
     ProviderError,
@@ -274,6 +274,7 @@ class EmdashProvider(ExternalDispatchMixin, RuntimeProvider):
         if profile == "ro" and agent != "claude":
             raise ProviderError("unsupported_profile", f"emdash: no verified read-only extraArgs for provider {agent!r} (only claude)")
         task_prompt = self.resolve_task_prompt(task_id, prompt)
+        _ensure_ctx_task_claimed()
 
         upstream_wt = None
         if worktree in ("", "new-child", "new-top-level"):

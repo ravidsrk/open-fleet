@@ -42,7 +42,7 @@ from .base import (
 )
 from .local_state import LocalStateStore
 from .posix import checkout_worktree
-from ._external import release_claim_on_failure
+from ._external import _ensure_ctx_task_claimed, release_claim_on_failure
 from ._external import (
     claim_local_task,
     insert_dispatch,
@@ -210,6 +210,7 @@ class T3CodeProvider(RuntimeProvider):
         if not self.project_id:
             raise ProviderError("missing_project", "t3_thread_launch from outside T3 needs OPEN_FLEET_T3_PROJECT_ID")
         task_prompt = self.resolve_task_prompt(task_id, prompt)
+        _ensure_ctx_task_claimed()
         runtime_mode, interaction_mode = PROFILE_MODES[profile]
         title = name or (f"t3-{task_id}" if task_id else f"t3-worker-{uuid.uuid4().hex[:6]}")
 
@@ -309,6 +310,10 @@ class T3CodeProvider(RuntimeProvider):
         claimed, eff_run = claim_local_task(self.state, task_id, run)
         target_run = eff_run or run or "default"
         with self.state._connect() as conn:
+            orig = conn.execute(
+                "SELECT worktree, agent, profile, run_id FROM dispatches WHERE backend = ? AND (dispatch_id = ? OR terminal_handle = ?) ORDER BY created_at ASC LIMIT 1",
+                (self.name, thread_id, f"t3:{thread_id}"),
+            ).fetchone()
             bound = conn.execute(
                 "SELECT run_id FROM dispatches WHERE backend = ? AND (dispatch_id = ? OR terminal_handle = ?) AND run_id != ? LIMIT 1",
                 (self.name, thread_id, f"t3:{thread_id}", target_run),
@@ -330,14 +335,15 @@ class T3CodeProvider(RuntimeProvider):
                 release_local_task(self.state, task_id)
             raise
         if claimed:
+            inject_dispatch_id = f"{thread_id}:inject:{uuid.uuid4().hex[:8]}"
             insert_dispatch(
                 self.state,
-                dispatch_id=thread_id,
+                dispatch_id=inject_dispatch_id,
                 task_id=task_id,
                 run=target_run,
-                worktree="",
-                agent="claude",
-                profile="ro",
+                worktree=str(orig["worktree"] or "") if orig else "",
+                agent=str(orig["agent"] or "claude") if orig else "claude",
+                profile=str(orig["profile"] or "ro") if orig else "ro",
                 handle=f"t3:{thread_id}",
                 backend=self.name,
                 effective={"threadId": thread_id, "mechanism": "mcp.t3_thread_send", "inject": True},

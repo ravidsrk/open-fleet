@@ -60,6 +60,9 @@ class TestA2AExport(unittest.TestCase):
         self.assertIn("deploy", contracts["governance"]["one_way_door_ids"])
 
     def test_report_only_mission_card_uses_report_only_verifier(self):
+        card = self.mod.build_catalog_cards(mission="review-it")
+        self.assertFalse(card["proof"]["mutating"])
+        self.assertEqual(card["contracts"]["output"]["verifier"], "report-only")
         for name in ("review-it", "attest-it"):
             with self.subTest(mission=name):
                 card = self.mod.build_catalog_cards(mission=name)

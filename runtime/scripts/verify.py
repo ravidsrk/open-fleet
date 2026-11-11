@@ -1063,21 +1063,91 @@ class _Authority:
             return True
         return not bool(_extract_diff(raw.decode("utf-8", "replace")))
 
+    _SHELL_NAMES = frozenset({"sh", "bash", "dash", "zsh", "ksh", "ash", "csh", "tcsh"})
+
+    @classmethod
+    def _unwrap_nc_tokens(cls, argv):
+        """Extract all wrapper and target executable tokens from `argv`, refusing shell `-c`."""
+        tokens = []
+        idx = 0
+        while idx < len(argv):
+            tok = argv[idx]
+            tokens.append(tok)
+            name = Path(tok).name
+            rest = argv[idx + 1:]
+            if name == "busybox" and rest and Path(rest[0]).name in cls._SHELL_NAMES:
+                name, rest = Path(rest[0]).name, rest[1:]
+            if name in cls._SHELL_NAMES:
+                for arg in rest:
+                    if arg == "--":
+                        break
+                    if arg == "-c" or (arg.startswith("-") and not arg.startswith("--") and "c" in arg[1:]):
+                        return None, (f"proof executable {tok!r} invokes a shell -c command string, "
+                                      "whose inner commands are unverified (#750 C19)")
+                break
+            idx += 1
+            if name == "env":
+                while idx < len(argv):
+                    a = argv[idx]
+                    if a == "--":
+                        idx += 1
+                        break
+                    if a in ("-u", "--unset", "-C", "--chdir", "-S"):
+                        idx += 2
+                        continue
+                    if a.startswith("-") or "=" in a:
+                        idx += 1
+                        continue
+                    break
+                while idx < len(argv) and "=" in argv[idx]:
+                    idx += 1
+            elif name == "command":
+                if any(a in ("-v", "-V") for a in argv[idx:] if a.startswith("-") and a != "--"):
+                    break
+                while idx < len(argv) and argv[idx].startswith("-"):
+                    if argv[idx] == "--":
+                        idx += 1
+                        break
+                    idx += 1
+            elif name == "nohup":
+                if idx < len(argv) and argv[idx] == "--":
+                    idx += 1
+            elif name == "nice":
+                while idx < len(argv) and argv[idx].startswith("-"):
+                    if argv[idx] == "--":
+                        idx += 1
+                        break
+                    if argv[idx] in ("-n", "--adjustment"):
+                        idx += 2
+                    else:
+                        idx += 1
+            elif name == "timeout":
+                while idx < len(argv) and argv[idx].startswith("-"):
+                    if argv[idx] == "--":
+                        idx += 1
+                        break
+                    if argv[idx] in ("-k", "--kill-after", "-s", "--signal"):
+                        idx += 2
+                    else:
+                        idx += 1
+                if idx < len(argv):
+                    idx += 1  # duration operand
+            else:
+                break
+        return tokens, None
+
     @classmethod
     def nc_exec_identity(cls, argv, top=None, path_env=None, expected=None, when=None):
         """Resolve and fingerprint the proof executable(s) in `argv` (#750 C19).
-        Refuses executables that cannot be resolved on the scrubbed PATH, are not regular files, or
-        have any path/symlink hop inside the target or evidence worktree. Returns (records, err)."""
+        Refuses executables that cannot be resolved on the scrubbed PATH, invoke shell `-c`, are
+        group/world-writable, or have any path/symlink hop inside the target or evidence worktree
+        or a group/world-writable non-sticky directory. Returns (records, err)."""
         if not argv:
             return None, "negative_control.command is empty after parsing"
+        tokens, wrap_err = cls._unwrap_nc_tokens(argv)
+        if wrap_err:
+            return None, wrap_err
         search_path = cls.nc_env().get("PATH", "") if path_env is None else path_env
-        tokens = [argv[0]]
-        if Path(argv[0]).name == "env":
-            for arg in argv[1:]:
-                if arg == "--" or arg.startswith("-") or "=" in arg:
-                    continue
-                tokens.append(arg)
-                break
         roots = []
         for root in (top, _toplevel(), _evidence_toplevel()):
             if root:
@@ -1099,6 +1169,16 @@ class _Authority:
                 st = os.stat(real)
                 if not stat.S_ISREG(st.st_mode) or not os.access(real, os.X_OK):
                     return None, f"proof executable {tok!r} is not an executable regular file ({real})"
+                if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                    return None, (f"proof executable {tok!r} ({real}) is group- or world-writable; "
+                                  "fail-closed (#750 C19)")
+                for n, nst in nodes:
+                    if stat.S_ISLNK(nst.st_mode):
+                        continue
+                    if (nst.st_mode & (stat.S_IWGRP | stat.S_IWOTH)) and not (
+                            stat.S_ISDIR(nst.st_mode) and (nst.st_mode & stat.S_ISVTX)):
+                        return None, (f"proof executable {tok!r} resolves through writable node {n}; "
+                                      "fail-closed (#750 C19)")
                 digest = hashlib.sha256(real.read_bytes()).hexdigest()
             except (OSError, RuntimeError) as exc:
                 return None, f"proof executable {tok!r} cannot be verified ({exc})"
@@ -1106,21 +1186,44 @@ class _Authority:
                 if real == r or r in real.parents or any(n == r or r in n.parents for n, _ in nodes):
                     return None, (f"proof executable {tok!r} resolves inside the repository "
                                   f"worktree ({real}); fail-closed")
-            records.append((tok, abs_path, str(real), st.st_dev, st.st_ino, digest))
+            hop_sig = tuple((str(n), stat.S_IFMT(nst.st_mode), nst.st_dev, nst.st_ino)
+                            for n, nst in nodes)
+            records.append((tok, abs_path, str(real), st.st_dev, st.st_ino,
+                            st.st_size, st.st_mtime_ns, digest, hop_sig))
         out = tuple(records)
         if expected is not None and out != expected:
             return None, f"proof executable changed {when} phase; fail-closed"
         return out, None
 
+    @staticmethod
+    def quiet_oss_authorized(source, digest):
+        """True only when the digest-verified coordinator JSON contract explicitly authorizes
+        the oss-contribute quiet-PR lane (`mission == 'oss-contribute'` or `allow_quiet_oss: true`)."""
+        if not (source and digest):
+            return False
+        raw, err = read_source(source)
+        if err or raw is None or sha256_of(raw) != _norm_digest(digest):
+            return False
+        try:
+            doc = json_contract(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return False
+        if not isinstance(doc, dict):
+            return False
+        return doc.get("mission") == "oss-contribute" or doc.get("allow_quiet_oss") is True
+
     @classmethod
     def quiet_oss_review(cls, m, reviews, head, author, equivalent, review_shas,
-                         corroborated, nc_executed):
+                         corroborated, nc_executed, oss_authorized=False):
         """#750 C15: an oss-contribute unit parked `awaiting-maintainer-merge` targets an upstream
         repository the fleet does not control, so upstream OWNER/MEMBER/COLLABORATOR approval may be
-        absent while feedback is quiet. Accept it on the gh lane ONLY when the manifest declares
+        absent while feedback is quiet. Accept it on the gh lane ONLY when the coordinator's
+        digest-bound contract authorizes `oss-contribute`, the manifest declares
         `awaiting-maintainer-merge`, no upstream reviewer has a standing CHANGES_REQUESTED veto on
-        this content, `review.artifact` is readable and binds `head_sha`, the coordinator supplied
-        the out-of-band contract, and the negative control was EXECUTED."""
+        this content, `review.artifact` is readable and binds `head_sha`, and the negative control
+        was EXECUTED."""
+        if not oss_authorized:
+            return False, []
         parked = m.get("parked") if isinstance(m.get("parked"), list) else []
         is_quiet_oss = any(isinstance(p, dict) and p.get("reason") == "awaiting-maintainer-merge"
                            for p in parked)
@@ -1144,9 +1247,9 @@ class _Authority:
         if not corroborated or not nc_executed:
             return False, []
         return True, [
-            "NOTE: oss-contribute quiet PR (awaiting-maintainer-merge) — no upstream "
-            "CHANGES_REQUESTED veto, internal review.artifact bound to head_sha, coordinator "
-            "contract corroborated, and negative control EXECUTED"
+            "NOTE: oss-contribute quiet PR (awaiting-maintainer-merge) — coordinator contract "
+            "authorizes oss-contribute, no upstream CHANGES_REQUESTED veto, internal "
+            "review.artifact bound to head_sha, and negative control EXECUTED"
         ]
 
     @staticmethod
@@ -1380,7 +1483,7 @@ class _Authority:
 
 
 def check_review(m, repo, is_mutation, no_gh=False, corroborated=False, dispatch_lighting=None,
-                 nc_executed=False):
+                 nc_executed=False, allow_static_nc=True, oss_authorized=False):
     """3. A mutation unit needs an INDEPENDENT review at head_sha. Default: an APPROVED GitHub review
     looked up on GitHub (a worker-set reviewed_sha is not evidence). Fail-closed.
 
@@ -1456,7 +1559,8 @@ def check_review(m, repo, is_mutation, no_gh=False, corroborated=False, dispatch
         return [f"mutation unit: cannot establish INDEPENDENT APPROVED review: {err}"]
     if not review_ok(reviews, head, author, also_sha=equivalent, equivalent_shas=review_shas):
         oss_ok, oss_notes = _Authority.quiet_oss_review(
-            m, reviews, head, author, equivalent, review_shas, corroborated, nc_executed)
+            m, reviews, head, author, equivalent, review_shas, corroborated, nc_executed,
+            oss_authorized=oss_authorized)
         if oss_ok:
             return authority + oss_notes
         return [f"mutation unit: no INDEPENDENT APPROVED review at head_sha on {repo}#{number} "
@@ -1464,6 +1568,10 @@ def check_review(m, repo, is_mutation, no_gh=False, corroborated=False, dispatch
                 f"whose author_association is not one of "
                 f"{sorted(_Authority.INDEPENDENT_REVIEWER_ASSOCIATIONS)} do not count; a review at "
                 f"reviewed_sha only counts when reviewed_wtree binds its tree to the head's)"]
+    if not nc_executed and not allow_static_nc:
+        return authority + ["mutation unit: negative control was NOT executed — pass --execute-nc "
+                            "(and --nc-command) so the control is re-run, or pass --allow-static-nc "
+                            "to accept artifact-only corroboration explicitly (#750 C10)"]
     return authority  # [] or the advisory NOTEs (h409 F-1/F-2)
 
 
@@ -2732,12 +2840,15 @@ def execute_negative_control(m, nc_command=None):
             err = _stage_phase_repo(top, head, commit, repo, phase)
             if err:
                 return None, None, err
+            exec_argv = list(argv)
             if pinned_exec is not None:
                 _, exec_err = _Authority.nc_exec_identity(
                     argv, top, env.get("PATH", ""), pinned_exec, f"before {phase}")
                 if exec_err:
                     return None, None, exec_err
-            rc, out, errout = _run_at(repo, argv, timeout=NC_TIMEOUT_S, env=env)
+                if pinned_exec and not os.path.isabs(exec_argv[0]):
+                    exec_argv[0] = pinned_exec[0][1]
+            rc, out, errout = _run_at(repo, exec_argv, timeout=NC_TIMEOUT_S, env=env)
             if pinned_exec is not None:
                 _, post_err = _Authority.nc_exec_identity(
                     argv, top, env.get("PATH", ""), pinned_exec, f"during {phase}")
@@ -3399,7 +3510,7 @@ def check_retention_receipt(m, pubkey_ref=None):
 # a record carrying the signer's _PROFILE_FIELDS (#590) verifies too (2026-10-23 review, P2-2).
 _DISPATCH_FIELDS = ("manifest_id", "contract_digest", "unit_class", "lighting",
                     "nc_paths", "nc_command", "nc_artifact_sha256",
-                    "no_gh", "lane", "execute_nc", "base_sha")
+                    "no_gh", "lane", "execute_nc", "allow_static_nc", "base_sha")
 # The LANE flags (review P2): --no-gh waives the GitHub review, --lane decides Lane-0 refusal and
 # dark-eligibility's Lane-A requirement, and --execute-nc is what turns the control from text into
 # a fact. All three reach verify.py through argv / the worker-settable ORCA_* env, so on a
@@ -3443,8 +3554,9 @@ class _Transcript:
     TOOLCHAIN = ("verify.py", "_verify_sig.py", "diff_scope.py", "ed25519.py", "dispatch-sign.py",
                  "inventory.py", "gitexec.py")
     ARGS = ("contract_source", "contract_digest", "repo", "base", "symbol", "execute_nc",
-            "unit_class", "no_gh", "lighting", "lane", "dispatch_record", "dispatch_pubkey",
-            "nc_command", "git_dir", "evidence_root", "provenance", "retention_pubkey")
+            "allow_static_nc", "unit_class", "no_gh", "lighting", "lane", "dispatch_record",
+            "dispatch_pubkey", "nc_command", "git_dir", "evidence_root", "provenance",
+            "retention_pubkey")
 
     @staticmethod
     @functools.lru_cache(maxsize=1)
@@ -3578,7 +3690,7 @@ def _manifest_nc_values(m):
 
 
 def check_dispatch_provenance(m, contract_digest, unit_class, lighting, record_ref, pubkey_ref,
-                              no_gh=False, lane=None, execute_nc=False):
+                              no_gh=False, lane=None, execute_nc=False, allow_static_nc=False):
     """13. #135: verify a coordinator-signed dispatch record so a run's contract_digest / unit_class /
     lighting / lane flags (--lane, --no-gh, --execute-nc) can be checked against what the
     coordinator actually authorized. This is a SOUNDNESS
@@ -3649,7 +3761,9 @@ def check_dispatch_provenance(m, contract_digest, unit_class, lighting, record_r
     # unbound waiver; --execute-nc only makes a run stricter, so its absence is what must be bound:
     # a record that signs it requires it. A signed value of either that the run contradicts is a
     # substitution, in whichever direction.
-    for field, used, waiver in (("no_gh", bool(no_gh), True), ("execute_nc", bool(execute_nc), False)):
+    for field, used, waiver in (("no_gh", bool(no_gh), True),
+                                ("execute_nc", bool(execute_nc), False),
+                                ("allow_static_nc", bool(allow_static_nc), True)):
         signed = record.get(field)
         if signed is None:
             if used and waiver:
@@ -3765,7 +3879,7 @@ def check_replay_request(m, is_mutation, execute_nc, nc_command):
 def verify(manifest_path, contract_source=None, contract_digest=None, repo=None,
            base=None, symbol=None, execute_nc=False, unit_class=None, no_gh=False, lighting=None,
            dispatch_record=None, dispatch_pubkey=None, nc_command=None, lane=None, judged=None,
-           retention_pubkey=None):
+           retention_pubkey=None, allow_static_nc=False):
     """Return (fatal_errors, notes). fatal_errors non-empty => exit 2. A `judged` dict receives
     the manifest bytes this run loaded (`judged["raw"]`), for the transcript to bind to.
     `retention_pubkey` is the coordinator's trust key for the retention receipt (#608)."""
@@ -3800,7 +3914,8 @@ def verify(manifest_path, contract_source=None, contract_digest=None, repo=None,
     if dispatch_record and dispatch_pubkey and (lane is None or lighting is None):
         verdict = check_dispatch_provenance(m, contract_digest, unit_class, lighting,
                                             dispatch_record, dispatch_pubkey, no_gh=no_gh,
-                                            lane=lane, execute_nc=execute_nc)
+                                            lane=lane, execute_nc=execute_nc,
+                                            allow_static_nc=allow_static_nc)
         rec_text, rec_err = read_source(dispatch_record)
         if all(line.startswith("NOTE:") for line in verdict) and not rec_err:
             try:
@@ -3823,7 +3938,8 @@ def verify(manifest_path, contract_source=None, contract_digest=None, repo=None,
         lambda: check_base_binding(m, base, execute_nc),
         lambda: check_dispatch_provenance(m, contract_digest, unit_class, lighting,
                                           dispatch_record, dispatch_pubkey,
-                                          no_gh=no_gh, lane=lane, execute_nc=execute_nc),
+                                          no_gh=no_gh, lane=lane, execute_nc=execute_nc,
+                                          allow_static_nc=allow_static_nc),
         lambda: check_class_downgrade(m, unit_class, dispatch_record, dispatch_pubkey),
         lambda: check_freshness(m),
         lambda: check_commands(m, is_mut, nc_command),
@@ -3841,8 +3957,11 @@ def verify(manifest_path, contract_source=None, contract_digest=None, repo=None,
         collect((lambda: nc_errs,))
     except Exception as exc:
         fatal.append(f"malformed manifest: {type(exc).__name__} in the negative-control check ({exc})")
+    oss_authorized = _Authority.quiet_oss_authorized(contract_source, contract_digest)
     collect((
-        lambda: check_review(m, repo, is_mut, no_gh, corroborated, lighting, nc_executed),
+        lambda: check_review(m, repo, is_mut, no_gh, corroborated, lighting, nc_executed,
+                             allow_static_nc=allow_static_nc or (execute_nc and bool(fatal)),
+                             oss_authorized=oss_authorized),
         lambda: check_symbol_on_base(symbol, base),
     ))
     notes.extend(_Authority.unexecuted_nc_note(is_mut, nc_executed, fatal))
@@ -3895,9 +4014,13 @@ def main(argv=None):
     ap.add_argument("--execute-nc", action="store_true",
                     help="EXECUTE the negative control (#255): apply it in a throwaway worktree at "
                          "head_sha, require the bound command to exit non-zero there and 0 at "
-                         "clean head_sha. Requires --nc-command (#279). REQUIRED by the "
-                         "review-waiver lanes (--lighting dark-eligible / --no-gh), which have no "
-                         "other oracle (#256)")
+                         "clean head_sha. Requires --nc-command (#279). REQUIRED by default on "
+                         "mutation units (#750 C10) and unconditionally in review-waiver lanes "
+                         "(--lighting dark-eligible / --no-gh / awaiting-maintainer-merge) (#256)")
+    ap.add_argument("--allow-static-nc", action="store_true",
+                    help="explicitly waive --execute-nc on an independently GitHub-reviewed "
+                         "mutation unit and accept artifact-only negative-control corroboration "
+                         "(disclosed as a NOTE; never honored in review-waiver lanes; #750 C10)")
     ap.add_argument("--base", default=None, help="integration base branch (for ancestry)")
     ap.add_argument("--symbol", default=None, help="a unit symbol to grep on the base")
     ap.add_argument("--unit-class", default=None,
@@ -4015,7 +4138,8 @@ def main(argv=None):
                            repo, args.base, args.symbol, args.execute_nc,
                            args.unit_class, args.no_gh, args.lighting,
                            args.dispatch_record, args.dispatch_pubkey, args.nc_command,
-                           lane=args.lane, judged=judged, retention_pubkey=args.retention_pubkey)
+                           lane=args.lane, judged=judged, retention_pubkey=args.retention_pubkey,
+                           allow_static_nc=args.allow_static_nc)
     drift = sorted(name for name, sha in _Transcript.hash_files().items() if sha != toolchain[name])
     drifted = ([f"toolchain changed during this run: {drift} no longer hash as they did when the "
                 "verifier started — worker code (the executed control) ran in between, so the "

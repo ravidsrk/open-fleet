@@ -44,7 +44,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from ._external import release_claim_on_failure
+from ._external import _ensure_ctx_task_claimed, release_claim_on_failure
 from ._external import ExternalDispatchMixin, coerce_output, env_flag, env_lookup, http_json, real_worktree, run_cli
 from .base import (
     ProviderError,
@@ -353,6 +353,7 @@ class VibeKanbanProvider(ExternalDispatchMixin, RuntimeProvider):
                 "vibe-kanban: set OPEN_FLEET_VIBE_KANBAN_REPO_ID (a POST /api/repos id) and OPEN_FLEET_VIBE_KANBAN_TARGET_BRANCH",
             )
         task_prompt = self.resolve_task_prompt(task_id, prompt)
+        _ensure_ctx_task_claimed()
         executor_config: dict[str, Any] = {"executor": executor, "permission_policy": "PLAN" if profile == "ro" else "AUTO"}
         ro_cfg = None
         if profile == "ro":
