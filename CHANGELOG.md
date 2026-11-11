@@ -8,6 +8,609 @@ truth is `.claude-plugin/plugin.json`. A change not yet released is one file in
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-11
+
+- **Remediation of all 42 adversarial-review findings across verifier, runtime scripts, providers,
+  and CI** (#750). `scripts/bundle.py` refuses symlinked files and directories across mission,
+  runtime, protocol, plugin, and support-document sources (`C2`). `runtime/scripts/deny-hook.sh`
+  validates Python interpreter ownership and non-writability by group/others at both check and
+  execution time and leaves `busybox --install [-s] [DIR]` unpeeled (`C18`, `D2`).
+  `runtime/scripts/verify.py` and `runtime/scripts/merge_queue.py` pin resolved executable paths,
+  hops, and `SHA-256` digests across negative-control and merge-gate phases, isolate merge-gate
+  clones via `git init` + direct `fetch` with detached Git config/hooks, scrubbed intermediate
+  supervisor environment (`$PPID`), and `bwrap`/`MQ_REQUIRE_GATE_SANDBOX` support, require
+  `--execute-nc` by default on reviewed mutation units (with explicit `--allow-static-nc` override),
+  replay all eight accepted mutation tools, and verify quiet `oss-contribute` PRs only under a
+  digest-bound `"mission": "oss-contribute"` contract (`C10`, `C11`, `C15`, `C19`, `C21`).
+  `runtime/scripts/decisions.py` and `runtime/scripts/gate-batch.py` walk past submodules to the
+  outermost superproject (`C20`). `runtime/providers/local_state.py`,
+  `runtime/providers/posix.py`, and the 12 external orchestrator adapters enforce Run boundaries
+  (including launched-worker implicit Run defaults), coordinator-takeover and `"default"`-run
+  fencing, pre-side-effect local task claiming (`ready -> dispatched`) and settlement on
+  `worker_done`/`merge_ready`, atomic payload-bound request idempotency, ambient-Git-immune state DB
+  resolution, strict non-negative terminal/worker cursor pagination with `source`/`truncated`
+  metadata, `0600` inbox/message permissions with fence cleanup, and preserved refs on Multiclaude
+  release (`C1`, `C24`, `C28`–`C35`, `C37`, `C38`, `C40`). `scripts/live_broker.py` and
+  `runtime/scripts/events.py` recover existing spend ledgers on restart (clamping `cap_usd` to prior
+  `open` caps) without leaking request fragments and preserve cross-Run conflict state and
+  blank-line tamper evidence (`C39`, `C41`, `C42`, `C43`). Mission contracts, docs, fixture
+  lockfiles, and regression tests are aligned across `C4`–`C9`, `C12`–`C14`, `C16`, `C17`, `C25`,
+  `C26`, `D1`, `D3`, and `T1`.
+- **A paste-ready listing kit for the remaining marketplace submissions** (#235).
+  [distribution-kit](docs/distribution-kit.md) has a blurb for each aggregator that leads with the
+  `proof:` framing (and a test holds its counts to the live rollup), every submission URL, and the
+  proof-first replacement blurb for buildwithclaude's stale "10 outcome-named" record. Nothing was
+  submitted: each listing still needs the maintainer's own account.
+- **The deny hook leaves `busybox --install [-s] [DIR]` unpeeled instead of treating `DIR` as an
+  applet** (#740, #750). In BusyBox, `--install [-s] [DIR]` takes an optional target directory
+  operand rather than an applet name; `_peel_busybox` peels only leading applet invocations (`busybox
+  sh -c '…'`), avoiding false denials when `DIR` matches an applet name.
+- **Most CI jobs now run on AWS CodeBuild-hosted runners** (#735). `guard`, `pinned-demo`, the
+  install, bind, drift, health, alert and verdict jobs use the `gha-open-fleet` CodeBuild project
+  in us-east-1. `tests`, `floor`, `checks`, `gates` and the vf-bench jobs stay GitHub-hosted
+  (they need a non-root runner), as do Docker Hub pulls and the release publishers.
+  [ops](docs/ops.md#ci-runners) lists the AWS prerequisites, how a fork switches back to
+  `ubuntu-latest`, and what a job stuck in "Queued" means.
+- **The deny hook closes all eight findings from the 2026-10-29 audit.** A write inside a nested
+  body (`sh -c`, `find -exec sh -c`, `xargs sh -c`, sed `e`, awk/perl `system()`) is now held to
+  the worktree write boundary (F1). `busybox`/`toybox` shell applets, `hush` included, are judged
+  as the shell they run (F2). `git bisect run`, `git rebase --exec/-x` and `git submodule foreach`
+  bodies are judged as commands of their own (F3). A `--force-with-lease=<ref>` that does not name
+  every pushed ref no longer exempts a forced push (F4). Attached sed `-e'…'` scripts and awk
+  `-F`/`-v` operands are parsed as clusters (F5, F6), and `{ receipt; } && send` arms like
+  `( receipt ) && send` (F8). Malformed hook events now fail closed: no tool name, a shell event
+  with no input, or a command that is neither a string nor a list is refused, and an argv-list
+  command is judged as the line it spells (F7).
+- **`wtree.sh` fingerprints the repository it is given, and its custody copies can no longer hang
+  or be redirected** ([2026-10-27 security audit](docs/runs/2026-10-27-security-audit.md),
+  W4-02 follow-up, Codex round 5). `$(...)` stripped the trailing newline of a repository path
+  that ends in one, so `wtree.sh` fingerprinted the repository at the stripped path, a different
+  one, and printed its tree. Every path git hands the script (toplevel, git dir, common dir,
+  index) and every carried `core.*` value is now read byte-exact; a linked worktree whose path
+  ends in a newline fingerprints itself, and a common git dir an alternates file cannot name is
+  exit 1. The custody copies (`info/exclude`, `info/attributes`, `shallow`,
+  `info/sparse-checkout`, `sharedindex.*`, the index seed and the `core.attributesFile` content)
+  were type-checked by path and then opened by `cp` by path again, so a worker that swapped in a
+  FIFO in between hung the coordinator and a symlink was followed. Each is now opened once by
+  `python3 -I` without blocking or following a final symlink, checked with `fstat` on that
+  descriptor, size-capped (16 MiB, 1 GiB for the index and shared index, 1 MiB for
+  `core.attributesFile`) and copied from it; anything else is exit 1. `wtree.sh` now needs a
+  `python3` on PATH.
+- **`spawn_identity.py` decides whose a process is from its credentials, not its `/proc` owner**
+  ([2026-10-27 security audit](docs/runs/2026-10-27-security-audit.md), W4-04, Codex round 10).
+  The registration scan skipped every process whose `/proc/PID` was not owned by this uid before
+  it tried to read the environment. That owner is the effective uid alone, and root for every file
+  of a non-dumpable process, so a same-uid pane running a setuid program read as another user's:
+  skipped, the scan "complete", `record-root` answered "no process" (3) and `spawn_worker.sh`
+  released the reservation, leaving the pane's scrubbed descendants uncapped. A process now counts
+  as this uid's when any of the real, effective, saved and filesystem uids on the `Uid:` line of
+  `/proc/PID/status` is this uid; one whose `status` cannot be read or holds no single
+  well-formed `Uid:` line leaves the scan incomplete (1, the reservation kept); one none of whose
+  uids is this uid is still skipped. New tests isolate the process listing to the process under
+  test, so an unrelated unreadable process on the host can no longer supply the expected answer.
+- **`search_sessions.py` no longer parses `--current-evidence` in its own process, and the live
+  broker's bodies no longer wait on one another for their parses**
+  ([2026-10-27 security audit](docs/runs/2026-10-27-security-audit.md), W5-21, W5-16; Codex
+  round 13 on 594f7265). The episodic hint read the frozen task's evidence file under the byte cap
+  and then `json.loads`-ed it in the parent before its shape was checked, so a ~60 MiB array of
+  empty objects built some 20 million dicts outside the scan's memory limit. The file is now read,
+  parsed and shape-checked in a contained child of its own (`SCAN_MEMORY_BYTES`,
+  `SOURCE_SECONDS`), as the manifests are, and only the checked observations cross back: at most
+  `MAX_OBSERVATIONS` (4,096), each path at most 1,024 characters, within `RESULT_BYTES`. Anything
+  else -- unreadable, not UTF-8 JSON, nested past the parser's depth, the wrong shape, past a bound,
+  or a parse past a limit -- refuses the hint whole (exit 2), and the library entry holds evidence
+  handed to it to the same bounds. No other file `search_sessions.py` reads is parsed in the parent.
+  In `live_broker.py`, a body read in full whose JSON values need more budget than it took before it
+  was read (13 times its bytes) waited for the rest holding that share, and bodies completed
+  together (32 of ~1 MB, ~416 MB of first shares) waited on one another until every one was answered
+  503. Now at most one request waits for budget while holding any: of the bodies read in full, one
+  may wait for its larger charge, and while it waits every other take leaves what it needs free;
+  any other whose charge does not fit at once is answered 503 at once and gives back all of its
+  share but its bytes'. A parsed body also gives back its parse's share before it is relayed,
+  keeping only its bytes', and on every way out of a request -- an exception included -- the
+  bytes' share goes back only once the body's buffer has been freed.
+- **The deny hook's write boundary, interpreter table and self-guard close a batch of 2026-10-27
+  security-audit findings, and the `ro` tier gains a real write floor** (W1-01..03, W1-05..08,
+  W4-03, W4-05, W4-06, W4-09). A leading `~`/`$HOME` is expanded on every write-boundary path, so `echo > ~/.bashrc`
+  and a `Write` of `~/.bashrc` are judged where the shell writes, not silently allowed (W1-01); an
+  unquoted `$IFS`/`${IFS}` separator is field-split so each candidate head is judged with its
+  arguments (W1-02); the inline-interpreter class is closed beyond python/node — the awk family,
+  lua/luajit/julia/Rscript `-e`, deno `eval`, a busybox applet, and sqlite3 `.shell`/`.system` and
+  sed `e` are read for the shell they launch, awk collects EVERY program source so a benign `-f`
+  file never hides a refused `-e` and an unreadable `-f`/`-E` program file fails closed, and an
+  arg-taking option (`python -W error`) no longer hides the `-c` after it (W1-03); `tar`/`unzip`/
+  `patch`/`cpio`/`pax`/`bsdtar`/busybox reach the self-guard — a guard file named as `tar -cf`/
+  `patch -o` output is denied, and an extraction or patch whose destination equals, sits inside or
+  contains a guard directory (`tar -C .claude …`, any `-C`/`-d`/`--directory` spelling) is asked,
+  with every guard directory and guard file's directory compared wherever its symlinks resolve, so a
+  `.claude` linked outside the worktree is still the guard (W1-05); the root/home delete class is normalised rather than spelled out, so `/*/`,
+  `~/.`, `${HOME}/*` and `/dev/../` deny (W1-06); `--settings` shell-quotes the hook path and pins
+  both boundary names so a space in the install path or a stale inherited variable cannot disarm
+  it (W1-07, W1-08); `lexical_abs` no longer pathname-expands a path segment and a glob in a shell
+  write target is judged by every path it expands to (W4-09). The spawn arming gate now receives
+  the worktree for every selector that names an existing tree, not just `path:` (W4-03), and runs
+  for every profile including `ro`, which used to skip it entirely (W4-03). W4-06 now enforces the
+  guard where it is installed: the posix provider verifies the registration inside `worker-start`
+  — the file exists, names the hook that loads, pins the boundary, answers a deny probe — AFTER
+  installing it and BEFORE the agent process starts, and aborts the launch (`deny_hook_unverified`)
+  if any check fails, so a `new-child` spawn that the coordinator's pre-launch gate cannot verify
+  is still enforced; the openhands provider runs the same check on the `hook_config` its
+  agent-server executes, before the conversation exists (named worktree) or before the `/run`
+  that starts the agent (server-cut worktree). `spawn_worker.sh` defers to those two and ordinary
+  dispatch needs no opt-out; another non-Orca provider, which installs without verifying,
+  proceeds with an `UNVERIFIED` warning naming the runtime; on Orca (whose `worker-start` wires no
+  open-fleet guard) an unset settings var still refuses, every profile, unless
+  `OPEN_FLEET_ALLOW_UNVERIFIED_DENY_HOOK=1` opts out. `OPEN_FLEET_REQUIRE_DENY_HOOK=1` is checked
+  before any deferral or opt-out and refuses an unset var on every runtime. A new `OPEN_FLEET_HOOK_READONLY` write
+  floor (wired with `deny-hook.sh --settings <wt> --readonly`; no provider sets it on its own)
+  lets the hook deny every write it can see on the `ro` tier — in a `-c` body, a substitution or a
+  program piped to a shell too, and `echo x > -` writes a file named `-` — and refuse a shell fed
+  a program it cannot read (`cat f | sh`, `sh < f`): defense-in-depth over the channels plan-mode
+  `Bash` left open, not a filesystem sandbox, which stays the disposable environment's job (W4-05).
+- **`wtree.sh` no longer trusts global or system git config**
+  ([2026-10-27 security audit](docs/runs/2026-10-27-security-audit.md), W4-02, W4-07). On a
+  one-uid host `~/.gitconfig` is the worker's to write, and a global clean filter both ran in the
+  coordinator and chose the fingerprint: it mapped a tampered file back to its committed blob, so
+  verify graded a tree no test saw as FRESH. Every staging git call now runs with global and system
+  config off; a changed path any declared driver filters (Git LFS included) is exit 3
+  (unverifiable), and a global `core.excludesFile` is not read. Inherited
+  `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE`/`GIT_CONFIG`/`GIT_CONFIG_PARAMETERS` no longer steer
+  the fingerprint or blind the driver listing, and git is resolved once to an absolute path.
+  Staging (`read-tree`, `add -A`, `write-tree`) now runs in git custody: a git dir wtree.sh builds
+  over the repository's objects and work tree, whose config defines no driver, so a filter a
+  still-running worker adds after the driver listing neither runs nor chooses the fingerprint;
+  a partial clone or a non-regular `info/exclude` is exit 1, and the staged objects no longer
+  land in the repository's store. The custody carries the repository's `info/attributes`, the
+  content of its own `core.attributesFile` (read only as a regular file of at most 1 MiB, never
+  opened blocking; anything else is exit 1) and its line-ending settings as data, so a clean CRLF
+  checkout still fingerprints as its tree; no user or system attributes file is opened (a FIFO
+  there no longer hangs it); a
+  checked-out submodule is never entered by a child git (gitlinks are refreshed with
+  `update-index`, so a moved submodule still counts); and a failed exit-3 check is exit 1, not a
+  printed tree.
+- **The 2026-10-27 security audit's network and egress findings (wave 5) and the bundle half of
+  W6-04 are fixed, except the arm's direct network egress (W5-15).** `egress.py` receipts are
+  format v2: `id` hashes the record's canonical serialisation and a line must be exactly that
+  serialisation, so an extra key, a re-spacing, a type swap or a blank line is TAMPER on the last
+  line as on any other, and every line's text, a pre-v2 line's included, is printable ASCII;
+  `write` verifies the ledger through the descriptor it holds locked, refuses (exit 3, before the
+  send) one the verifier would refuse, streams `--payload-file`, fsyncs, and prints an id that
+  `verify --expect-ancestor` (now repeatable) accepts as an anchor, which binds a receipt written
+  since the last close; `merge_queue.py` keeps the id of every receipt it writes in its own
+  receipts and writes them to the ledger `egress.py`'s default picks. That default is the
+  repository root's `.orca/egress.jsonl`; a routed ledger is reported; a `.git` nested below the
+  root refuses unless it is a linked worktree whose `.git/worktrees/<name>/gitdir` back-link
+  agrees; `grants` verifies first and takes `verify`'s anchors, saying UNANCHORED without one; a
+  ledger that is not a regular file (a FIFO) is refused at once by every command, never waited on;
+  everything printed is inert; and `verify` finding no receipts exits 4, never 0, unless the run
+  declares it sent nothing (`--allow-empty`). Pre-v2
+  ledgers keep verifying in the exact v1 form, as a prefix, and the docs say how to recover a
+  broken ledger ([runtime-scripts](docs/runtime-scripts.md#egresspy)). `bundle.py`'s ownership
+  marker only names candidates: a listed file is deleted once stale only when a build record kept
+  outside `--out` (in the clone's git directory) holds its exact bytes, and overwritten only when
+  that record holds them, when they are the bytes the build writes anyway, or when they are a blob
+  committed in the checked-out commit's history (never another ref) at exactly the source path this
+  build copies that file from, so a forged marker with true digests deletes or overwrites nothing,
+  inside a mission directory or a user's own skill holding copies of catalog files too; otherwise
+  an overwrite refuses and a stale file is left in place and reported. Every check, delete and write walks `--out` from one directory handle
+  without following a link, and each overwrite or delete is one atomic exchange or quarantine
+  rename whose displaced file must be the exact file checked (inode and sha256) before it is
+  destroyed, else it is put back and the build refuses; a marker naming anything a build does not write, carrying a malformed
+  name, or that is a symlink or FIFO refuses; a mission that ships `.gitignore`, `.gitattributes`,
+  `.gitmodules` or `.git` fails the build; and a `--out` built before digests or without a build
+  record refuses once if the build changes anything there ([install](docs/install.md)).
+  `external-ci-monitor.py` never re-sends `GITHUB_TOKEN` on a redirect, refuses a foreign origin
+  and an oversized body, and shape-checks `--repo`; the paperclip and OpenHands adapters' keys never
+  follow a redirect either. The live harness's broker cuts off idle and trickling connections and
+  evicts a stalled request when its slots are full -- every wait before a request is read in full,
+  for its body budget included, ends at once when evicted -- and a request waiting for body budget
+  takes back what a stalled body holds, which goes only to bodies that are arriving, so trickling
+  or stalled connections never keep the arm's calls out; it takes no body over the API's own 32 MB, holds each once, and bounds what parsing it
+  can allocate before parsing it -- the decoded input and its strings at their characters' width,
+  and every JSON value, by a pre-scan that holds no memory of its own and stops after two million
+  steps -- and parses it in a child process held to that bound, so the bodies held at once and
+  their parses stay within 400 MiB of its 512m container (a body over its share waits, then is
+  refused and counted; one whose bound alone could pass that, such as millions of empty objects,
+  or whose parse passes its bound, is refused); it bounds `count_tokens`, settles every call, and counts refusals, drops and faults
+  per kind with bounded text, so the arm cannot grow the host's ledger. The launcher runs only an
+  image whose id its own `build` recorded (from `--iidfile`) from the committed Dockerfile unless
+  `--allow-foreign-image` is passed, the committed Dockerfile's digest always the git object's
+  (`build` refuses a working copy that differs from HEAD's, before docker reads it and after), and refuses any `--mount` path docker would split; the image
+  pins the Claude Code installer and binary by sha256 ([live harness](docs/guides/live-harness.md)).
+  `search_sessions.py` reads only regular files (a link, FIFO or device is said, never opened, a FIFO
+  or a link to `/dev/zero` named like a transcript included) and
+  only a SQLite store's plain tables' stored columns (never a view, virtual table or generated
+  column), capped per file and per scan as the bytes arrive, a row's stored size charged as
+  SQLite reads it so no value past either cap ever reaches Python, a store over 1 GiB never
+  opened (and, on a SQLite without `octet_length`, one over the 64 MiB value cap, so sizing can never
+  load a larger value: a bound decided before the open), and SQLite told, before a store's first
+  statement, never to load a value or a schema statement past the cap; a `.zst` transcript is walked frame
+  by frame in linear work, a damaged tail kept up to its last whole frame and said; a record nested
+  past the parser's depth is skipped, never fatal; and a store swapped for a FIFO during SQLite's own
+  open fails closed and is said, never hangs recall. Parsing no longer multiplies those byte caps
+  past a bound: every scan of the stores and of the run manifests runs in a forked child, which on
+  Linux `RLIMIT_DATA` holds to 1 GiB past the process (a source whose parse passes it is skipped
+  and said), each source gets 60 s of wall clock on every platform, a child stopped by either is
+  restarted past that source, a prior-run hint is assessed and labelled there on its whole record,
+  what it returns is a bounded flat JSON projection of what the parent shows and the label, never
+  what it parsed, and a store's schema statement is held to 1 MiB everywhere; macOS
+  does not enforce `RLIMIT_DATA`, so there only the byte caps and the schema cap bound it. The
+  hint's own reads afterwards (`hint_provenance.py`: the re-read of a matched manifest, evidence
+  hashing, live files) never follow a final link or block, read only a regular file, and are
+  bounded (64 MiB held, 1 GiB hashed as it streams), a refusal being the entry's UNKNOWN reason.
+- **The spawn path's identity inputs are bounded: the parent-profile cap reaches Orca workers,
+  CLI commands and installer operands are validated, and printed receipt fields are inert**
+  ([2026-10-27 security audit](docs/runs/2026-10-27-security-audit.md): W4-04, W4-10, W4-11,
+  W4-12, W4-13, W4-15/W2-03, W2-05/W5-22, W5-19, W5-20). The CLI resolver that `spawn_worker.sh`
+  runs first now runs under `python3 -I`, so a caller's PYTHONPATH cannot shadow it.
+  `spawn_worker.sh` records every launch's profile under the pane handle the runtime returns
+  (`~/.open-fleet/spawn-profiles/`), so a spawn from that pane is capped at it on Orca as well as
+  posix. Each launch reserves its profile there before any launch call (an unwritable registry or
+  an unset `HOME` refuses the spawn), and registration records the worker's pane root process by
+  pid and start time (`spawn_identity.py`), so a spawn inside the worker's pane process tree is
+  capped by its ancestry even when its harness drops `ORCA_*`; a session nothing identifies waits on open reservations
+  and is capped at any still open, and inside a provider's process tree at the live workers,
+  unless it is an anchored coordinator. Every response that names a pane handle (`worker-start`,
+  `terminal create`, the `request-show` triage) is read by one extraction before anything judges
+  it, wherever the handle sits (an error envelope beside a ready result included, and a response
+  that does not parse whole or reads two ways: every occurrence of a duplicated key), and each
+  handle is registered whatever the exit code, error code or state; a refused or failed verdict
+  prints the pane it names. Registering a pane other than the worker's own (a coordinator-role,
+  unknown-role or role-less one) never releases the reservation: only the worker's agent-role
+  pane, named and completely recorded, does. Every other reader of a runtime response refuses one that reads two
+  ways (a duplicate key, `NaN`, a number that overflows) as unparseable. A session whose
+  identity cannot be read is capped at `ro` even when the failing read is one made while it
+  waits on a reservation. A launch that may have left a
+  worker live without a complete record keeps its reservation; with no handle named, it is
+  released only on a response that is exactly one refusal proven to precede any launch effect (a
+  strict schema at every level, an allowlist of pre-launch codes, on both launch paths), never for
+  a second or nested error, an extra field, `runtime_error`, an unknown or untyped code, or a
+  policy refusal that can follow a pane's creation. A process environment the scan
+  cannot read (`EACCES`, `EIO`; re-read for a moment first, since a process caught exiting
+  answers `EACCES` briefly) leaves the scan incomplete, so finding nothing is unknown, never "no
+  process", and the same holds without `/proc` (`ps -E`); a pane that is found is recorded. Any other identity read that fails, a `/proc` of another pid
+  namespace included, is unknown rather than absent: the reservation stays, or the caller is
+  capped at `ro`. Not covered: a
+  worker process outside its pane's process tree whose environment drops the handle (daemonized
+  out, run from a process outside the pane, or in another pid namespace), a worker whose `HOME`
+  differs, and a pane process that carries no handle; whether a harness does these as ordinary
+  behaviour is unwitnessed. A session carrying fleet worker identity with no profile is
+  capped at `ro` and a `--parent-profile` flag cannot raise that; a capped session cannot use a
+  command override. These are the worker's own environment and files: a guard on the spawn path,
+  not a sandbox.
+  The title label is bounded and never option-shaped. `OPEN_FLEET_CLI_COMMAND` /
+  `ORCA_CLI_COMMAND` must name one executable with no invisible character, and one resolution in
+  `orca_cli.py` now serves the Orca provider, `auto`, `preflight.py`, `install.sh` and
+  `upstream_probe.py`. `sandbox_doctor.py` reads the recipe from recipe fields only, refuses a
+  malformed recipe field, a repeated JSON key and an envelope that contradicts the report at any
+  wrapping level or depth (its `metadata` included), reads a report out of every wrapper (up to
+  16; more, nesting too deep to parse, and output that opens as JSON by the grammar's first
+  token but does not parse are refused, never read as a report or as text), refuses every output shape but one report object (an array, a scalar, a
+  list as `result`, a nested or misspelt `backend`), and reads placement claims in every
+  spelling. `worker_ops.py`, `terminal_ops.py`, `send_msg.py`, `check_reply.py`,
+  `orca_cli.run_json`, `pm.py` and `spawn_worker.sh` print every receipt field, and every error
+  and exception message (the provider-dispatch path included), escaped and on one line; no body line, tail item or list row stands at column 0 in the shape of a line those
+  printers write (`KEY=`, `---`, `===`, a `(…)` marker, a printer's own `SUBJ:`/`ID:` headers),
+  the first body line included;
+  a failed sandbox doctor's output and `sandbox_doctor.py`'s reason print escaped; and a lone
+  surrogate no longer crashes the printer.
+  `send_msg.py` and `check_reply.py` say their sender check catches accidental mismatches only.
+  `first_run.py` hands its on-host sandbox an allowlisted environment (locale names by name), so
+  no operator credential reaches the worker. `scripts/install.sh` refuses an empty or
+  option-shaped `--skills-dir`, ends `mkdir`/`ln` options with `--`, validates mission names from
+  the directory entry before any mutation, and names an unset `HOME`.
+- **floor_guard, diff_scope, hint_provenance and verify's executed negative control no longer run
+  a git driver a worker adds while they read** ([2026-10-27 security
+  audit](docs/runs/2026-10-27-security-audit.md), W4-01/W4-02 class). These tools listed the
+  filter, textconv and merge drivers the repository's config declared, blanked them, and then ran
+  a git that read that config again, so a driver a still-running worker added between the two
+  (selected through `.gitattributes` or the shared `info/attributes`) ran on the coordinator.
+  The git custody PR #720 built for the providers now lives in `runtime/scripts/gitexec.py`
+  (`custody`, `custody_git_dir`, `custody_env`) and the posix provider uses it from there. Every
+  content-reading git at these sites runs against a git dir the coordinator builds over the
+  repository's objects (and index), whose config defines no driver at all: floor_guard's tracked
+  and untracked diffs, diff_scope's working-tree diff and `--predict-merge`, hint_provenance's
+  `diff` and `log`, and the control's checkout, revert, apply and seal, whose scratch worktree is
+  no longer a linked worktree of the graded repository. The driver listing stays as a belt and
+  keeps its fail-closed refusal. Every other git these tools run drops inherited repository
+  selectors (`GIT_DIR`, `GIT_INDEX_FILE`, `GIT_EXEC_PATH`, ...) and carries the custody floor
+  (`GIT_NO_LAZY_FETCH=1`, `GIT_ALLOW_PROTOCOL=file`, no signature-verifying child),
+  so a planted promisor remote cannot run a payload through a lazy fetch. A repository the custody
+  cannot honour (a partial clone) or read safely (a symlinked `info/exclude`) is refused: exit 2
+  from floor_guard, `diff_failed` from diff_scope, a `ProvenanceError`, a blocked control. A
+  work-tree diff no longer starts a child git inside a checked-out submodule to ask whether it is
+  dirty (`--ignore-submodules=dirty`): that child ran under the submodule's own config, so a filter
+  planted there ran too. A moved submodule commit is still reported; uncommitted changes inside a
+  submodule no longer are. The custody also carries the repository's `info/attributes`, the
+  content of its own `core.attributesFile` (read only as a regular file of at most 1 MiB, never
+  opened blocking; a FIFO, symlink or larger file refuses; no user attributes or ignore file is
+  opened, and no system attributes file except by verify.py's negative control, whose pinned git
+  environment does not set `GIT_ATTR_NOSYSTEM`), the content of its own `core.excludesFile` (read
+  the same way) and its
+  `core.safecrlf`/`core.checkRoundtripEncoding` as data, so a CRLF (`eol=crlf`) checkout no longer
+  reads as modified. No repository-named command runs at these sites; a file git would BLOCK on
+  is handled best-effort. Before any git runs, floor_guard, diff_scope and hint_provenance refuse a
+  repository in which they positively find a config, config include, `commondir` or `shallow`
+  that is a FIFO or other non-regular file, checking every spelling of each name a git might
+  read (inner whitespace as spaces, verbatim or collapsed; ends trimmed or not; with or without
+  `\v`/`\f` as whitespace), without running git and without ever refusing on doubt. Any promisor remote is refused as a partial clone (git 2.43
+  never writes `extensions.partialClone`). A blocking file that check misses (one it cannot
+  parse, a FIFO swapped in after it, one at a work tree `.gitignore` or `.gitattributes`) blocks
+  the git call until its timeout (60 s; up to 120 s in the verifier), and the call is then
+  refused. predict-merge reports a custody
+  refusal or a timeout as such, hint_provenance any git timeout (custody setup included) as a
+  `ProvenanceError`, and verify.py's control a timed-out custody query as its could-not-create
+  refusal. Also:
+  the `_external.py` runner docstring no longer claims `reset --hard` runs in custody (it is
+  refused).
+- **`decisions.py --pin-ref` anchors the human grant key only at a ref the checked change cannot
+  move** (2026-10-27 security audit, W3-07). `--pin-ref` now takes only a remote-tracking ref
+  (`refs/remotes/origin/main`) or a commit id, resolves it once and reads that commit — a local
+  branch, tag or `HEAD` is refused, and the ref can no longer move between the check and the read.
+  Without `--pin-ref` the working-tree pin is used with a stderr NOTE whether it is present,
+  swapped or absent (an absent pin checks one-way grants unsigned), and a caller that sets
+  `ORCA_PROVENANCE`/`OPEN_FLEET_PROVENANCE` cannot run at all. The trajectory harness anchors on
+  the base commit it recorded instead of its own `main`. Two existing test assertions now name
+  `refs/remotes/origin/main` instead of `main` (landed under a one-way floor-guard waiver).
+- **Every trust anchor named as a remote-tracking ref resolves by its exact name** (W3-07 class,
+  review of the fix above). The anchor sites followed `symbolic-ref`, checked that the target was
+  SPELLED `refs/remotes/…`, then let `rev-parse` or `cat-file` resolve it — and git expands a ref
+  name (`refs/<name>`, `refs/tags/<name>`, `refs/heads/<name>`, …): with `refs/remotes/worker/key`
+  absent, a local branch `refs/heads/refs/remotes/worker/key` answered for it, a revision suffix
+  (`refs/remotes/origin/main~1`, `^`, `@{1}`) read an older commit's retired key, and 64 hex digits
+  in a SHA-1 clone expanded to a branch of that spelling. `gitexec.remote_tracking_commit` is now
+  the one rule: a commit id must name that commit object; a ref must be a full `refs/remotes/…`
+  name that `check-ref-format` accepts and that exists under exactly that name, looked up in one
+  `for-each-ref` listing and peeled to a commit once. Every symbolic hop must be remote-tracking
+  too, and each is read on its own (`git symbolic-ref --no-recurse`, git 2.39+; without it a
+  symbolic name is refused): the listing's `%(symref)` is the chain's resolved END, so
+  `refs/remotes/worker/key -> refs/heads/bridge -> refs/remotes/origin/<old key>` used to pass
+  with the local bridge — the checked change's to re-point — unseen (review round 2).
+  `decisions.py --pin-ref`, `gate-batch.py --pin-ref`, `run_report.py`'s trusted base, `verify.py`'s
+  trust keys and `release_check.py`'s gate-1 anchor call it; `verify-gate.sh` mirrors it in sh.
+  Each planted exploit — the absent-remote local branch, the suffixes, the hex-named branch — had
+  verified a worker's key, bound a report the PR's own policy judged, or passed gate 1.
+- **The base verify.py, floor_guard.py and diff_scope.py read against is resolved by exact name,
+  once** (W3-07 class, second review). `verify.py`'s ancestry, base-binding and `--symbol` checks
+  probed `refs/remotes/origin/<base>` and then handed the NAME to `merge-base` and `git grep`: with
+  the ref absent, a local `refs/heads/refs/remotes/origin/main` holding a worker's poison commit
+  passed both the ancestry proof and the base binding on a sound lane, and a symbol the worker
+  committed read as on base. `floor_guard.py` and `diff_scope.py` resolved `--base` (and
+  origin/HEAD's target, cut to the short `origin/<x>`) with `rev-parse`, which tries tags and
+  local branches first: a tag or local branch spelled `origin/main`, an origin/HEAD pointed at a
+  local branch, a suffix such as `origin/main~1`, or the absent-remote local spelling made
+  `floor_guard` read a planted waiver (`clean (1 waived)`) and `diff_scope` diff against the
+  change's own tip (the AUTH lens off). All three now resolve once through
+  `gitexec.remote_tracking_commit` (`gitexec.base_commit` for the two diff tools, where a bare
+  local branch name such as `main` is refused on a lane claiming soundness — `ORCA_PROVENANCE` /
+  `OPEN_FLEET_PROVENANCE` set — and elsewhere stays usable by its exact name with an advisory
+  NOTE), and every later diff, waiver, pin, merge-base and grep read names the resolved commit.
+  `run_report.py`'s grading base, used only on the advisory lane, now says so.
+- **The anchor listing cannot be split by a line break in a branch name, and every anchor read
+  ignores replacement objects and grafts** (W3-07 class, independent re-attack). The
+  `for-each-ref` listing was parsed with `str.splitlines()`, which breaks on U+2028, U+2029 and
+  U+0085 — all legal in a refname — so a fetched branch `x<U+2028>refs/remotes/origin/main` at the
+  worker's commit replaced the real origin/main at every Python site (a swapped pin accepted, an
+  unmerged head on base, gate 1 passing). Records now end in NUL+LF and split on that alone; a
+  malformed record or a refname seen twice refuses the listing. `run_report.py` ran git under the
+  ambient environment, so `git replace`, `git replace --graft` or `.git/info/grafts` made the
+  trusted base read the PR's own policy; it, `release_check.py`'s gate 1 and `verify-gate.sh`'s
+  key discovery now run git with replacement objects and grafts off. Off a sound lane
+  `floor_guard.py` and `diff_scope.py` accept `--base HEAD` and an abbreviated commit id (read as
+  an object id, never a branch of that spelling) with the advisory NOTE.
+- **The control plane no longer imports a graded tree's stdlib-named siblings, and on a sound
+  lane it reads trust keys only at a commit id or the coordinator's own remote-tracking refs**
+  (2026-10-27 security audit, W3-01 to W3-11 but W3-07, which has its own entry). A committed
+  `runtime/scripts/json.py`
+  used to be the verifier's `json` and turned a stale-review RED into GREEN (W3-01, P0): every
+  control-plane entry point now drops its own directory from `sys.path` before any other import,
+  `verify-gate.sh` runs the verifier with `-I`, `preflight.py` and `orca_cli.py` no longer put the
+  repository root on `sys.path`, and `tests/test_entrypoint_guard.py` plants every stdlib module
+  name beside all 26 of them and at the root. The gate reads `.orca/dispatch-pubkey` only where a
+  ref's final target is remote-tracking — `origin/HEAD`'s (W3-02, P1) or `origin/<base>`'s — and,
+  in a fresh CI checkout, at the pull request's base commit (W3-08); on any lane claiming soundness
+  `verify.py` refuses a bare-path, local-ref or symbolic-to-local trust key (a record with such a
+  key opens no enforcement lane, only the advisory one), reads it at the one
+  commit its ref resolves to, and every NOTE says where the key came from (W3-03). A
+  remote-tracking or commit key pin is trustworthy only where the worker cannot write refs — the
+  coordinator's own fetch or a CI checkout — and every NOTE now says so; in a worker's own clone
+  `git update-ref` moves `refs/remotes/*` too, so that lane stays advisory. A retention receipt
+  binds the manifest's path as well as its digest (W3-04); `run_report.py` reads the mutation-unit
+  list where it reads the key, not at the graded commit (W3-05), and on a lane claiming soundness
+  reads both only against a commit id or a remote-tracking base — never a local `main` or an
+  `origin/HEAD` pointed at a local branch — and exits 2 when there is none; once `.orca/human-grant-pubkey`
+  is pinned a gate-batch answer needs the human's signature or it stays owed, a sound lane must
+  name `--pin-ref`, and the release gate reads the key at `refs/remotes/origin/main` and runs
+  `render --check` (W3-06). `gate-batch.py --pin-ref` takes only a commit id or a remote-tracking
+  ref and reads the set of gates at the same commit as the key: a gate the anchor carries that the
+  batch dropped, renamed or re-worded is listed owed — shown from the anchor's record — so
+  `"gates": []` no longer passes the release gate, which also fails when main carries no store or
+  carries a view the release deleted.
+  A worker-writable `gitleaks` is not run on any lane claiming soundness
+  (W3-10), and a toolchain file that changes while the verifier runs fails the run (W3-11).
+  Committing the dispatch pubkey that switches enforcement on stays a human's step (W3-09, see
+  [the verify gate](docs/verify-gate.md#signed-dispatch--what-it-binds-and-where-the-key-comes-from-135)).
+- **The posix provider and the external adapters no longer run a command a worker plants in git
+  config** ([2026-10-27 security audit](docs/runs/2026-10-27-security-audit.md), W4-01). The
+  posix provider ran a bare `git` with the coordinator's whole environment on `worktree add`,
+  `worktree remove` and the `danger` sandbox sync, and the adapters did the same for their dirty
+  check, HEAD pin, t3code's worktree cut and worktrunk's merge prediction, so a
+  `core.hooksPath`/`post-checkout`, a `core.fsmonitor`, a `filter` smudge command or a merge driver
+  written into the shared `.git/config` (or the same-uid `~/.gitconfig`) ran as the coordinator.
+  Every such git now runs through one custody (`run_git` in `runtime/providers/posix.py`):
+  `runtime/scripts/gitexec.py`'s floor plus fixed keys for `fetch`'s alternate-refs command,
+  submodule recursion and signature verification, and `GIT_ALLOW_PROTOCOL=file` +
+  `GIT_NO_LAZY_FETCH=1` in the environment so a per-protocol `protocol.ssh.allow=always` or an
+  `extensions.partialClone` + a promisor remote's `uploadpack` cannot run a payload the config names. A git
+  that could apply a filter, diff or merge driver (the clean check, the merge prediction, a new
+  worktree's checkout) runs against a git dir the coordinator builds, whose config declares no
+  driver, so a worker cannot add one between a check and its use; it carries the repository's
+  index (with any split-index shared file), sparse-checkout and data-only `core.*` settings so a
+  clean worktree still reads clean, and refuses an `extensions.*` it cannot honour. Any other
+  driver-applying git is refused. A worktree
+  the coordinator creates therefore holds the committed bytes (LFS pointer files, git-crypt
+  ciphertext) and runs no `post-checkout` hook, and the adapters' dirty check counts a checked-out
+  submodule as uncommitted work. Also: git output is decoded byte-for-byte, so a `\r` or non-UTF-8
+  byte in a worktree path no longer hides a registered worktree from `worktree rm` (W4-08),
+  `gitexec.py` and `diff_scope.py` drop an inherited `GIT_CONFIG`/`GIT_CONFIG_PARAMETERS`, which
+  blinded the driver listing or outranked the floor (W4-07), `worktree rm` decides from the
+  repository's own worktree list and refuses when that list cannot be read (W4-08),
+  `diff_scope.py` fails closed when git is absent at import (W4-14), `wtree.sh predict-merge` runs
+  `python3 -I`, a `-`-leading `terminal send` text reaches tmux/cmux, `--key=value` and `--` are
+  understood and only the dispatcher's own `--json` option is consumed, a non-identifier launch
+  env key is refused (W2-01, W2-02), and nine git call sites refuse an option-shaped revision
+  (W2-04).
+- **CI and the release pipeline no longer let a pull request grade itself** (2026-10-27
+  security audit, W6-01 to W6-17). `verdict-gate`, which runs `main`'s copy of
+  `scripts/verdict_check.py`, now fails a PR that changes the CI grader (`.github/workflows/`,
+  `.github/actions/`, `.github/ci-tools.lock`) unless the repository owner opened it, and a GO
+  counts only from an OWNER, MEMBER or COLLABORATOR review, so neither an outsider's APPROVED
+  review nor a fork author's GO on their own PR does; [ops](docs/ops.md#merge-gate) says what
+  a green gate proves and records the fork-token read-back. The coverage floor no longer reads a
+  `.coverage.*` file planted in the PR's tree (coverage remains the PR's own measurement of
+  itself, an accepted residual); `.gitleaks.toml` is on the floor guard's frozen surface, the
+  secret scan ignores the tree's `.gitattributes` and reads every file as text (a binary one
+  included), and its canary proves no waiver covers a
+  top-level directory wholesale (a narrower allowlist is the floor guard's to stop); no checkout keeps its token; every
+  `uses:` and every demo-stack image is pinned by test, and every workflow must stay in the
+  block YAML subset those tests and release gate 3 read line by line. The publishers check the tag before
+  fetching it, `release.yml` marks only the newest tag Latest, and `publish-dist` stages the
+  bundle exactly. `gen-badges.py` checks a claimed cut's badge and the release commit's shape,
+  release gate 3 counts only an unconditional step (no `needs:`, matrix, reusable workflow or
+  container) of a pull-request workflow whose whole
+  `run:` is the script under python3, bash or sh and nothing else, gates 0 and 4 read CI on the branch
+  being cut, and both bookkeeping writers refuse raw HTML and a link scheme that runs or reads
+  something (javascript, vbscript, data, file), however it is escaped.
+- **The trajectory replay's git calls now ignore a filter selected from `.git/info/attributes`.**
+  `scripts/_trajectories.py` read attributes from the empty tree (`GIT_ATTR_SOURCE`), but a
+  `$GIT_DIR/info/attributes` line outranks that, so a filter declared in the replay repo's
+  `.git/config` and selected there ran on the replay's `add -A`. A recording cannot write the git
+  dir today (the replay refuses it), so this closes the second layer: every replay git call after
+  `init` now blanks the drivers the repo's config declares, as the verifier gates do. A test plants
+  both files behind the write guard and carries a mutation control.
+- **Reading a worker's checkout for episodic hints no longer runs a command the checkout names.**
+  `runtime/scripts/hint_provenance.py` diffed the live working tree under the hardened git
+  environment but without `gitexec.driver_blanks`, so a clean filter the worker declared in its
+  own `.git/config` and selected from `.git/info/attributes` ran on the coordinator whenever a
+  hint's currency was checked (the #629 channel). Every `diff` and `log` it runs now blanks the
+  repo's declared filter, diff and merge drivers, every git call closes stdin, and a config it
+  cannot read is a `ProvenanceError` rather than a diff with nothing blanked.
+  `tests/test_gitexec_config_commands.py` pins it with a planted filter and a mutation control.
+- **Images and the demo moved out of the repository root.** `assets/` is now
+  [`docs/assets/`](docs/assets/) (diagrams, badges, brand images and the diagram generator),
+  and `demo/` is now [`evals/demo/`](evals/demo/) (the negative-control demo and the target
+  app). Run the demo with `sh evals/demo/negative-control/run.sh` and the generator from
+  `docs/assets/diagrams/generator/`. The README badges read `docs/assets/badges/`; the
+  last-release badge check still reads a pre-move release at `assets/badges/`.
+- **The repository root carries fewer files.** `CONTRIBUTING.md`, `SECURITY.md` and
+  `CODE_OF_CONDUCT.md` moved into `.github/` (GitHub still finds all three there), and the
+  `REVIEW.md` redirect stub is gone (the review it pointed to is
+  [`docs/reviews/2026-09-11-review.md`](docs/reviews/2026-09-11-review.md)).
+  Links to the old paths from outside the repository no longer resolve.
+- **Greptile is no longer part of the merge gate.** `main` now requires `gates`, `guard`,
+  `pinned-demo` (GitHub Actions) and `verdict-gate`; `Greptile Review` was dropped on 2026-10-27,
+  after Greptile's reviews had stopped posting anything but a neutral "Review paused" check.
+  [ops](docs/ops.md#merge-gate) records the new read-back, and the account inventory marks
+  Greptile removed.
+- **The living docs were audited claim by claim against the code and brought back in line.**
+  Each fix rests on the code line it cites; historical records are untouched. The entry points no
+  longer name an `OPEN_FLEET_HARNESS` variable (a worker's harness is the `[agent]` argument of
+  `spawn_worker.sh`, its profile `PROFILE=ro|rw|danger`), the README's sample transcript prints
+  what `preflight.py` and `verify.py` really print, and the FAQ says which missions still use Orca
+  off it. Nine mission contract cards were re-rendered to their SKILL.md gates and phases, and the
+  `offload-it`, `field-test-it`, `pin-it` and `map-it` compatibility fields corrected. One real
+  bug: `reshape-it` ranked churn with `git log --since=90d`, which git silently ignores, so it
+  counted all history; it now uses `--since=90.days.ago`. The runtime policies, the runtime
+  scripts reference, the verify gate, runtimes, certification, concepts, evals, bench and
+  governance docs had their flags, exit codes, env aliases, source ranges, counts and pins
+  corrected. Comments and help text in ten runtime scripts now say what the code does, as do two
+  printed messages (`floor_guard.py`'s base-ref error names all five refs it tries, and
+  `verify.py`'s class-downgrade NOTE no longer says tests are exempt); no behavior changed.
+- **A repository-wide adversarial review closed the bypasses it reproduced and fixed the drift
+  it found.** `deny-hook.sh` now expands brace expressions and reads `git -c alias.*`,
+  `--config-env` and `GIT_CONFIG_*` inline aliases before matching, so `git push --force{,}` and
+  `git -c alias.p=push p --force` are the pushes they are; its `--verify-settings` arming gate runs
+  only this hook (byte-identical, under a scrubbed environment) instead of whatever command the
+  settings registered, and is told the harness and boundary it arms. `verify.py` binds the
+  negative control's `base_sha` to the integration branch (`--base-sha` is now a signed dispatch
+  input), names refs in full (`refs/remotes/origin/<base>`), and reads `ORCA_NO_GH` /
+  `ORCA_EXECUTE_NC` as switches (`1|true|yes|on`), blocking on any other spelling;
+  `verify-gate.sh` stops its verifier at `ORCA_GATE_TIMEOUT_S` (default 2100 s, under the hook
+  timeout the shipped hooks now set to 2400 s) because a timed-out Claude Code hook fails OPEN, and
+  never reads a worker-writable dispatch key on a sound lane. `spawn_worker.sh` keeps stderr out of
+  the receipts it parses and fails closed on an unreadable wait. The posix provider stops the agent
+  a `kill -9`'d monitor leaves running (sweep and `stop`, proven by the group's working directory,
+  read from /proc or with `ps` and `lsof`), treats a reused monitor pid as a vanished monitor,
+  merges guard configs into the settings already at a guard path instead of replacing them
+  (their plain settings survive; their hooks, any setting that names a command, and env that
+  steers the hook or its shell do not), creates the state directory, lanes and transcripts
+  user-private, strips the coordinator's custody tokens plus anything in
+  `OPEN_FLEET_WORKER_ENV_DENY` from a worker's environment, claims retry requests inside one
+  transaction (and reclaims a dead claimer's at once), and stamps the store's schema version.
+  `merge_queue.py` bounces `reviewed_sha_unavailable` instead of accepting a payload tree as proof
+  of review, and runs `--gate-cmd` in its own `--shared` clone under a scrubbed environment
+  (`MQ_GATE_ENV_KEEP` passes names through). `floor_guard.py` guards ruff's ignore/exclude keys and
+  `.coveragerc`'s scope, compares constraints rows cell by cell (a reworded criterion, an appended
+  lower floor, a full-width digit and a duplicate row are all read), and the guard and bind-check
+  workflows run the base branch's own checker against a PR. `run_report.py` refuses a ref name as
+  `inventory_at`; `gate-batch.py answer` and `waive` record `--source human:<name>`; `decisions.py
+  check --since` lets CI validate the ledger from 2026-09-24 on; `one-way-doors.json` gains the
+  `close-without-landing` and `review-verdict` doors the missions already declared; the VF-Bench gate
+  names each skip's own cause; and the catalog validator refuses YAML sequence and mapping values
+  where strings are required, duplicate frontmatter keys and unreadable top-level lines. Doctrine
+  and docs were corrected where they overstated (ruflo, the Orca-free claim, the dark-eligible lane,
+  the first-merge authorship check, stale pins, hook paths and flag lists), and every mission's
+  activation budget was re-banked under the raised cap and declared headroom.
+- **#606's ablation registration is frozen at its run commit** (#606). The registration's
+  `bound_run` block names the commit (`c220067e9c`) and the run's own results, and
+  `ablation.py prereg` checks the pins there, with that commit's own check on that commit's own
+  tree. An edit to `ARCHITECTURE.md`, a runtime policy or the #602 suite no longer makes the
+  registration stale (five `--refresh` commits followed the run in one day), `--refresh` and the
+  live tier refuse a bound registration, and any other edit to it fails. The pins are back to the
+  ones that ran, and the run's results must be the bytes its report's inventory pins.
+  #604's registration needed no change: it pins only its own task set and seed commit.
+- **Every mission's activation-load budget carries 2.5% declared headroom, and the cap moves to
+  35,000** ([budgets](scripts/mission-load-budgets.json)). Budgets were the measured load
+  rounded up to 500 under a 34,000 cap, so `ship-it` sat 7 tokens under its budget and
+  `oss-contribute` 8: one sentence added to any doc either loads failed `validate.py` in an
+  unrelated PR. A budget is now the load plus `headroom` (0.025), rounded up to a step of 100,
+  which gives every mission 2.5 to 2.9%; growth past it still fails, and a shrink of more than
+  `max_slack` (now 500) beyond that line must be banked. The cap is the heaviest load plus the
+  same headroom; ARCHITECTURE.md's "never raised" sentence is replaced with the reason it was.
+- **The certification tests' "moved pin" no longer hard-codes the next Orca release** (found by
+  the #705 survey of tests that pin literal current state). `TestPinRefreshInvalidatesCells` moved
+  the pin to the literal `v1.4.240`, the next upstream release, so the re-pin to v1.4.240 would
+  have turned those mutations into no-ops and failed the stale-pin test in that PR. Each moved
+  `version`, `live_receipts.version` and `certified_against` value is now derived from
+  `runtime/pins.json` (its last number bumped), so it always differs from the current pin. No
+  assertion line changed.
+- **Diagram generator reproducibility and concurrency safety** — [`docs/assets/diagrams/generator/package.json`](docs/assets/diagrams/generator/package.json), [`docs/assets/diagrams/generator/package-lock.json`](docs/assets/diagrams/generator/package-lock.json), and [`docs/assets/diagrams/generator/README.md`](docs/assets/diagrams/generator/README.md) now declare and document a reproducible `sharp` installation (`npm --prefix assets/diagrams/generator install`), and [`docs/assets/diagrams/generator/render_svg.py`](docs/assets/diagrams/generator/render_svg.py) resolves `sharp` from `docs/assets/diagrams/generator/node_modules` and writes per-invocation job payloads via `tempfile.NamedTemporaryFile` instead of sharing `/tmp/mission_svg_jobs.json`.
+- **Full visual QA and deterministic rendering across all 100 repository images (`docs/assets/`, `.claude-plugin/icon.png`, `docs/assets/diagrams/`, `docs/assets/diagrams/missions/`):** Re-rendered [`docs/assets/hero-dark.jpg`](docs/assets/hero-dark.jpg), [`docs/assets/hero-light.jpg`](docs/assets/hero-light.jpg), [`docs/assets/social-preview.jpg`](docs/assets/social-preview.jpg), and [`.claude-plugin/icon.png`](.claude-plugin/icon.png) from shared precision SVG geometry so dark and light hero banners have 100% identical node positions and line breaks, [`social-preview.jpg`](docs/assets/social-preview.jpg) shows all four converging autonomous-agent vessels, and [`icon.png`](.claude-plugin/icon.png) is a seamless full-bleed `1024×1024` icon without crop seams. Re-rendered [`verify-gate`](docs/assets/diagrams/verify-gate.jpg), [`install-stack`](docs/assets/diagrams/install-stack.jpg), [`runtime-providers`](docs/assets/diagrams/runtime-providers.jpg), and [`tracker-enumeration`](docs/assets/diagrams/tracker-enumeration.jpg) (dark and light pairs) to eliminate text-border collisions, center all stack headers, align `orca (default)` with [`README.md`](README.md), and unify source-box outlines. Deterministically rendered all 44 mission contract cards (`22` dark/light pairs under `docs/assets/diagrams/missions/`) from [`docs/assets/diagrams/generator/specs_missions.py`](docs/assets/diagrams/generator/specs_missions.py) and replaced the legacy bottom-right Orca killer-whale mark across all 44 existing concept diagram files with the 3-node geometric constellation signature mark.
+- **Brand & multi-runtime visuals and documentation:** replace legacy Orca-only whale branding across `docs/assets/hero-dark.jpg`, `docs/assets/hero-light.jpg`, `docs/assets/social-preview.jpg`, and `.claude-plugin/icon.png` with runtime-agnostic autonomous-fleet node-graph visuals; refresh `install-stack`, `verify-gate`, `tracker-enumeration`, and `map-it` diagrams and add `runtime-providers` (`docs/assets/diagrams/runtime-providers.jpg` and `-light.jpg`) illustrating the 14-runtime, 11-harness Runtime Provider Interface; update `README.md`, `docs/concepts.md`, `docs/getting-started.md`, `docs/runtimes.md`, `docs/verify-gate.md`, `docs/distribution.md`, `docs/about.md`, and `.claude-plugin/*` manifests to lead with multi-runtime and standalone `posix` + `orca` execution.
+- **The Orca pin moves to v1.4.239, and the certification record takes #680's witness** (#680).
+  The [pin-it run](docs/runs/2026-10-26-pin-it-239.md) re-witnessed v1.4.238..v1.4.239 by
+  source delta, with live 1.4.239 receipts: the installed binary's CLI capture and the
+  [ro/claude worker witness](docs/runs/2026-10-26-review-it-orca-ro-680.md). One stale claim
+  is patched: from v1.4.239 a host's permission is a stored choice per agent (`own`, `ask`,
+  `accept-edits`, `auto`, `full-access`), and `sandbox-policy.md` now says so; `spawn_worker.sh`
+  still refuses anything but the rw flag. Five citations are re-anchored, and the additive
+  surfaces (helper workers under SUB-DISPATCH, the `ask --timeout-ms` cap, `connector`) are
+  noted. `runtime/providers/certification.json` is re-recorded at version 6 against the new pin:
+  the Orca `ro`/`claude` cell is witnessed on its current row, on macOS, and is no longer owed.
+- **The Orca ro lane starts a native Claude Code install, and the ro/claude cell is witnessed**
+  (#680). Orca proves an agent present by its pane title or its foreground process name, but a
+  native install runs as `versions/<version>` and an idle Claude sets no title, so
+  `dispatch --inject` answered `no_agent_detected` for a live claude pane (Orca 1.4.229 to
+  1.4.240): the ro lane could not start a worker at all on such a host. For the ro claude row only,
+  `spawn_worker.sh` now confirms the pane first: Orca's spawn record names it `claude`, and its
+  screen shows Claude's prompt in plan mode. It then delivers the preamble of a dispatch without
+  `--inject` by `terminal send`, Orca's own nextStep, and proves the turn start from that receipt.
+  Any other screen still refuses with exit 2 and nothing is sent. The
+  [2026-10-26 witness](docs/runs/2026-10-26-review-it-orca-ro-680.md) ran the current row this
+  way on Orca 1.4.239 with Claude Code 2.1.304: the plan was approved in the pane, and Write and
+  Edit stayed out of the toolset.
+- **Docs:** Add Greenfield vs. Brownfield rollout guide ([`docs/adoption-guide.md`](docs/adoption-guide.md)), upstream skill-pack comparison & composition guide ([`docs/comparison.md`](docs/comparison.md)), paste-into-agent install prompt, 60-second mission transcript, verified-runs showcase, operator FAQ, anti-stacking install rules, non-Claude host invocation table, `_Avoid_:` glossary disambiguations, observable behavioral tells, cross-harness loader quirks, and auto-compaction / safeguard troubleshooting.
+
 ## [1.0.0] - 2026-10-25
 
 - **The release check's suite gate fits the 1.0 suite.** `release_check.py` gave
