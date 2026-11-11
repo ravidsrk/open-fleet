@@ -1741,23 +1741,15 @@ class MergeQueue:
                 continue
             if ch == "$" and j + 1 < n and cmd[j + 1] == "(":
                 if j + 2 < n and cmd[j + 2] == "(":
-                    ic, ip = cls._find_matching_paren(cmd, j + 3)
+                    ic, ip = cls._find_matching_paren(cmd, j + 3, in_arith=True)
                     if ic < 0:
                         return -1, subs, problems + ip
                     if ic + 1 < n and cmd[ic + 1] == ")":
-                        arith_body = cmd[j + 3:ic]
-                        arith_san, arith_subs, arith_probs = cls._strip_cmd_substitutions(arith_body)
+                        arith_subs, arith_probs = cls._analyze_arith_body(cmd[j + 3:ic])
                         subs.extend(arith_subs)
                         problems.extend(arith_probs)
-                        arith_check = arith_san.replace("__MQ_CMDSUB__", " 0 ")
-                        if (
-                            any(ch_a in arith_check for ch_a in ("$", "'", '"', "[", "]"))
-                            or re.search(r"(?<![=!<>])=(?!=)", arith_check)
-                            or re.search(r"(?<![0-9A-Za-z_#@])[A-Za-z_][A-Za-z0-9_]*", arith_check)
-                        ):
-                            return -1, subs, problems + [
-                                "variable, indirect, or mutating expression inside arithmetic expansion cannot be statically fingerprinted"
-                            ]
+                        if arith_probs:
+                            return -1, subs, problems
                         j = ic + 2
                         continue
                 ec, ep = cls._find_matching_paren(cmd, j + 2)
@@ -1784,8 +1776,74 @@ class MergeQueue:
             j += 1
         return -1, subs, problems + ["unterminated ${...} parameter expansion"]
 
+    _ARITH_SAFE_CHARS = frozenset("0123456789 \t\n+-*/%()<>!~&^|?:,=")
+
     @classmethod
-    def _find_matching_paren(cls, cmd: str, start: int) -> tuple[int, list[str]]:
+    def _analyze_arith_body(cls, arith_body: str) -> tuple[list[str], list[str]]:
+        """Validate a `$(( ... ))` arithmetic body, extracting inner `$(...)`, `$((...))`, and `` `...` ``
+        substitutions while rejecting variable, parameter (`${x}` / `$x`), indirect, quoted, or mutating forms."""
+        arith_body = cls._fold_line_continuations(arith_body)
+        subs: list[str] = []
+        problems: list[str] = []
+        const_buf: list[str] = []
+        i, n = 0, len(arith_body)
+        while i < n:
+            ch = arith_body[i]
+            if ch == "$" and i + 1 < n and arith_body[i + 1] == "(":
+                if i + 2 < n and arith_body[i + 2] == "(":
+                    ic, ip = cls._find_matching_paren(arith_body, i + 3, in_arith=True)
+                    if ic < 0:
+                        return subs, problems + ip
+                    if ic + 1 < n and arith_body[ic + 1] == ")":
+                        ns, np = cls._analyze_arith_body(arith_body[i + 3:ic])
+                        subs.extend(ns)
+                        problems.extend(np)
+                        const_buf.append(" 0 ")
+                        i = ic + 2
+                        continue
+                ec, ep = cls._find_matching_paren(arith_body, i + 2)
+                if ec < 0:
+                    return subs, problems + ep
+                subs.append(arith_body[i + 2:ec])
+                const_buf.append(" 0 ")
+                i = ec + 1
+                continue
+            if ch == "`":
+                bt = i + 1
+                buf: list[str] = []
+                while bt < n and arith_body[bt] != "`":
+                    if arith_body[bt] == "\\" and bt + 1 < n and arith_body[bt + 1] in ("\\", "`", "$", '"'):
+                        buf.append(arith_body[bt + 1])
+                        bt += 2
+                        continue
+                    buf.append(arith_body[bt])
+                    bt += 1
+                if bt >= n:
+                    return subs, problems + ["unterminated backtick command substitution"]
+                subs.append("".join(buf))
+                const_buf.append(" 0 ")
+                i = bt + 1
+                continue
+            if ch not in cls._ARITH_SAFE_CHARS:
+                problems.append(
+                    "variable, indirect, or mutating expression inside arithmetic expansion cannot be statically fingerprinted"
+                )
+                return subs, problems
+            const_buf.append(ch)
+            i += 1
+        arith_check = "".join(const_buf)
+        if (
+            "++" in arith_check
+            or "--" in arith_check
+            or re.search(r"(?<![=!<>])=(?!=)", arith_check)
+        ):
+            problems.append(
+                "variable, indirect, or mutating expression inside arithmetic expansion cannot be statically fingerprinted"
+            )
+        return subs, problems
+
+    @classmethod
+    def _find_matching_paren(cls, cmd: str, start: int, *, in_arith: bool = False) -> tuple[int, list[str]]:
         """Find the index of `)` matching the `(` at `start - 1`, respecting shell quotes, comments, and nesting."""
         n = len(cmd)
         j = start
@@ -1796,7 +1854,7 @@ class MergeQueue:
                 j += 2
                 at_tok = False
                 continue
-            if at_tok and c == "#":
+            if not in_arith and at_tok and c == "#":
                 while j < n and cmd[j] != "\n":
                     j += 1
                 continue
@@ -1828,6 +1886,13 @@ class MergeQueue:
                         j = nj
                         continue
                     if cmd[j] == "$" and j + 1 < n and cmd[j + 1] == "(":
+                        if j + 2 < n and cmd[j + 2] == "(":
+                            ic_d, ip_d = cls._find_matching_paren(cmd, j + 3, in_arith=True)
+                            if ic_d < 0:
+                                return -1, ip_d
+                            if ic_d + 1 < n and cmd[ic_d + 1] == ")":
+                                j = ic_d + 2
+                                continue
                         ec, ep = cls._find_matching_paren(cmd, j + 2)
                         if ec < 0:
                             return -1, ep
@@ -1864,6 +1929,14 @@ class MergeQueue:
                 at_tok = False
                 continue
             if c == "$" and j + 1 < n and cmd[j + 1] == "(":
+                if j + 2 < n and cmd[j + 2] == "(":
+                    ic_s, ip_s = cls._find_matching_paren(cmd, j + 3, in_arith=True)
+                    if ic_s < 0:
+                        return -1, ip_s
+                    if ic_s + 1 < n and cmd[ic_s + 1] == ")":
+                        j = ic_s + 2
+                        at_tok = False
+                        continue
                 ec, ep = cls._find_matching_paren(cmd, j + 2)
                 if ec < 0:
                     return -1, ep
@@ -1871,7 +1944,7 @@ class MergeQueue:
                 at_tok = False
                 continue
             if c == "(":
-                ec, ep = cls._find_matching_paren(cmd, j + 1)
+                ec, ep = cls._find_matching_paren(cmd, j + 1, in_arith=in_arith)
                 if ec < 0:
                     return -1, ep
                 j = ec + 1
@@ -1968,24 +2041,14 @@ class MergeQueue:
             if ch == "$" and i + 1 < n and cmd[i + 1] == "(":
                 if i + 2 < n and cmd[i + 2] == "(":
                     # Distinguish `$(( arith ))` from `$( (subshell); cmd )` by matching the second `(`.
-                    ic, ip = cls._find_matching_paren(cmd, i + 3)
+                    ic, ip = cls._find_matching_paren(cmd, i + 3, in_arith=True)
                     if ic < 0:
                         problems.extend(ip)
                         break
                     if ic + 1 < n and cmd[ic + 1] == ")":
-                        arith_body = cmd[i + 3:ic]
-                        arith_san, arith_subs, arith_probs = cls._strip_cmd_substitutions(arith_body)
+                        arith_subs, arith_probs = cls._analyze_arith_body(cmd[i + 3:ic])
                         subs.extend(arith_subs)
                         problems.extend(arith_probs)
-                        arith_check = arith_san.replace("__MQ_CMDSUB__", " 0 ")
-                        if (
-                            any(ch_a in arith_check for ch_a in ("$", "'", '"', "[", "]"))
-                            or re.search(r"(?<![=!<>])=(?!=)", arith_check)
-                            or re.search(r"(?<![0-9A-Za-z_#@])[A-Za-z_][A-Za-z0-9_]*", arith_check)
-                        ):
-                            problems.append(
-                                "variable, indirect, or mutating expression inside arithmetic expansion cannot be statically fingerprinted"
-                            )
                         out.append("__MQ_CMDSUB__")
                         i = ic + 2
                         at_tok = False

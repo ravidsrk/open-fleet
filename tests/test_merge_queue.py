@@ -1312,6 +1312,10 @@ class GateRunsIsolated(QueueCase):
                 "bash -c \"HISTCMD='a[\\$(/opt/gates/probe)]'; true\"",
                 "export RANDOM='a[$(/opt/gates/probe)]'",
                 "env RANDOM='a[$(/opt/gates/probe)]' bash -c true",
+                "bash -c 'a=1; x=\"a[\\$(/opt/gates/probe)]\"; test \"$(( ${x} ))\" -eq 1'",
+                "bash -c 'a=1; x=\"a[\\$(/opt/gates/probe)]\"; echo \"${y:-$(( ${x} ))}\"'",
+                "bash -c 'a=1; x=\"a[\\$(/opt/gates/probe)]\"; test \"$(( $x ))\" -eq 1'",
+                "bash -c 'echo $(( 0 # )) ; /opt/gates/probe'",
             ):
                 fp_u, probs_u = q._gate_fingerprint(unsafe_gate, cwd=fake_checkout)
                 self.assertEqual(fp_u, "", unsafe_gate)
