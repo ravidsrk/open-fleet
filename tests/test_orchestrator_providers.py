@@ -868,15 +868,42 @@ class TestExternalAdversarialRemediation750(ProviderTestBase):
     def test_c28_and_c29_t3_inject_preserves_original_dispatch_and_post_contact_failure_retains_claim(self) -> None:
         wt_t3 = self.tmp_path / "wt-t3-orig"
         wt_t3.mkdir()
+        seen_t3_calls: list[dict[str, object]] = []
 
         def t3_runner(call: dict[str, object], **_kw: object) -> dict[str, object]:
+            seen_t3_calls.append(dict(call))
             tool = call["tool"]
+            args = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
             if tool == "t3_thread_launch":
                 return {"structuredContent": {"threadId": "thr-1", "runId": "r1"}, "isError": False}
+            if tool == "t3_thread_list":
+                return {
+                    "structuredContent": {
+                        "threads": [
+                            {"threadId": "thr-1", "status": "running"},
+                            {"threadId": "thr-foreign", "status": "running"},
+                        ]
+                    },
+                    "isError": False,
+                }
             if tool == "t3_thread_read":
+                if args.get("threadId") != "thr-1":
+                    return {"content": [{"type": "text", "text": "unknown thread"}], "isError": True}
+                if args.get("view") == "messages":
+                    return {
+                        "structuredContent": {
+                            "items": [{"itemId": "m1", "createdBy": "assistant", "text": "injected reply"}],
+                            "nextPosition": 2,
+                        },
+                        "isError": False,
+                    }
                 return {"structuredContent": {"thread": {"worktreePath": str(wt_t3), "status": "idle"}}, "isError": False}
             if tool == "t3_thread_send":
                 return {"structuredContent": {"delivery": "queued"}, "isError": False}
+            if tool == "t3_thread_interrupt":
+                if args.get("threadId") != "thr-1":
+                    return {"content": [{"type": "text", "text": "unknown thread"}], "isError": True}
+                return {"structuredContent": {"interrupted": True}, "isError": False}
             return {"structuredContent": {}, "isError": False}
 
         t3 = T3CodeProvider(
@@ -888,7 +915,7 @@ class TestExternalAdversarialRemediation750(ProviderTestBase):
         t_orig = self.state.task_create(spec="first", run="run-t3")["task"]["id"]
         t_inj = self.state.task_create(spec="followup", run="run-t3")["task"]["id"]
         t3.worker_start(task_id=t_orig, worktree=str(wt_t3), agent="codex", profile="rw", run="run-t3")
-        t3.dispatch_inject(task_id=t_inj, to_handle="t3:thr-1", run="run-t3")
+        inj_res = t3.dispatch_inject(task_id=t_inj, to_handle="t3:thr-1", run="run-t3")
         with self.state._connect() as conn:
             rows = conn.execute(
                 "SELECT dispatch_id, task_id, worktree, agent, profile FROM dispatches WHERE backend = 't3code' ORDER BY created_at ASC"
@@ -898,11 +925,35 @@ class TestExternalAdversarialRemediation750(ProviderTestBase):
         self.assertEqual(rows[0]["task_id"], t_orig)
         self.assertEqual(rows[0]["agent"], "codex")
         self.assertEqual(rows[0]["profile"], "rw")
-        self.assertTrue(rows[1]["dispatch_id"].startswith("thr-1:inject:"))
+        inj_did = str(rows[1]["dispatch_id"])
+        self.assertTrue(inj_did.startswith("thr-1:inject:"))
+        self.assertEqual(inj_res["dispatchId"], inj_did)
         self.assertEqual(rows[1]["task_id"], t_inj)
         self.assertEqual(rows[1]["worktree"], str(wt_t3))
         self.assertEqual(rows[1]["agent"], "codex")
         self.assertEqual(rows[1]["profile"], "rw")
+
+        # Injected T3 dispatch IDs resolve upstream threadId (`thr-1`) across list, show, read, and fence:
+        listed = t3.worker_list(run="run-t3")
+        self.assertEqual([w["dispatchId"] for w in listed["workers"]], ["thr-1", inj_did])
+        self.assertEqual([w["stage"] for w in listed["workers"]], ["running", "running"])
+        listed_inj = t3.worker_list(run="run-t3", task=t_inj)
+        self.assertEqual([w["dispatchId"] for w in listed_inj["workers"]], [inj_did])
+        self.assertEqual([t["threadId"] for t in listed_inj["upstream"]["threads"]], ["thr-1"])
+
+        shown = t3.worker_show(dispatch_id=inj_did)
+        self.assertEqual(shown["worker"]["dispatchId"], inj_did)
+        self.assertEqual(shown["worker"]["taskId"], t_inj)
+        self.assertEqual(shown["worker"]["stage"], "idle")
+
+        read_out = t3.worker_read(dispatch_id=inj_did)
+        self.assertEqual(read_out["transcript"]["messages"][0]["blocks"][0]["text"], "injected reply")
+
+        stopped = t3.worker_fence(verb="stop", dispatch_id=inj_did, reason="cancel-inject")
+        self.assertEqual(stopped["dispatchId"], inj_did)
+        self.assertEqual(stopped["state"], "stopped")
+        interrupt_calls = [c for c in seen_t3_calls if c.get("tool") == "t3_thread_interrupt"]
+        self.assertEqual(interrupt_calls[-1]["arguments"], {"threadId": "thr-1", "reason": "cancel-inject"})
 
         # C29: Post-runtime-contact ambiguous failure must NOT release claimed task back to ready
         t_ambig = self.state.task_create(spec="ambig", run="run-t3")["task"]["id"]

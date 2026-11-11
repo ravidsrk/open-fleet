@@ -702,6 +702,7 @@ def _filter_upstream_records(upstream: Any, page_rows: list[dict[str, Any]]) -> 
     session_ids = {str(r.get("session_id") or "") for r in page_rows if r.get("session_id")}
     addresses: set[tuple[str, str]] = set()
     workspace_ids: set[str] = set()
+    thread_ids: set[str] = set()
     for r in page_rows:
         try:
             eff = json.loads(r.get("launch_effective") or "{}")
@@ -712,6 +713,8 @@ def _filter_upstream_records(upstream: Any, page_rows: list[dict[str, Any]]) -> 
                 addresses.add((str(eff.get("address")), str(eff.get("beadId") or "")))
             if eff.get("workspaceId"):
                 workspace_ids.add(str(eff.get("workspaceId")))
+            if eff.get("threadId"):
+                thread_ids.add(str(eff.get("threadId")))
     if isinstance(upstream, list):
         return [
             p
@@ -734,8 +737,9 @@ def _filter_upstream_records(upstream: Any, page_rows: list[dict[str, Any]]) -> 
                 a for a in out["agents"] if isinstance(a, dict) and str(a.get("agentName") or "") in page_ids
             ]
         if isinstance(out.get("threads"), list):
+            valid_threads = page_ids | session_ids | thread_ids
             out["threads"] = [
-                t for t in out["threads"] if isinstance(t, dict) and str(t.get("threadId") or "") in page_ids
+                t for t in out["threads"] if isinstance(t, dict) and str(t.get("threadId") or "") in valid_threads
             ]
         if isinstance(out.get("workspaces"), list):
             filtered_ws = []

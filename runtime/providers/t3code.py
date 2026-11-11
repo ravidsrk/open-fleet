@@ -297,6 +297,23 @@ class T3CodeProvider(RuntimeProvider):
         self.state.save_request(retry_request, "worker-start", "ready", res)
         return res
 
+    @staticmethod
+    def _thread_id_of_row(row: dict[str, Any]) -> str:
+        eff = row.get("effective")
+        if not isinstance(eff, dict):
+            try:
+                eff = json.loads(row.get("launch_effective") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                eff = {}
+        if isinstance(eff, dict) and eff.get("threadId"):
+            return str(eff["threadId"])
+        if row.get("session_id"):
+            return str(row["session_id"])
+        handle = str(row.get("terminal_handle") or "")
+        if handle.startswith("t3:") and handle[3:]:
+            return handle[3:]
+        return str(row.get("dispatch_id") or "").split(":inject:", 1)[0]
+
     def dispatch_inject(
         self,
         *,
@@ -310,18 +327,25 @@ class T3CodeProvider(RuntimeProvider):
         thread_id = to_handle.split(":", 1)[1] if to_handle.startswith("t3:") else to_handle
         if not thread_id:
             raise ProviderError("invalid_handle", "dispatch --to needs a t3:<threadId> handle")
+        with self.state._connect() as conn:
+            inj_row = conn.execute(
+                "SELECT dispatch_id, session_id, terminal_handle, launch_effective FROM dispatches WHERE backend = ? AND dispatch_id = ? LIMIT 1",
+                (self.name, thread_id),
+            ).fetchone()
+        if inj_row:
+            thread_id = self._thread_id_of_row(dict(inj_row))
         resolved_run = self.state._resolve_caller_run(run, default_run=None)
         message = self.resolve_task_prompt(task_id, prompt)
         claimed, eff_run = claim_local_task(self.state, task_id, resolved_run)
         target_run = eff_run or resolved_run or "default"
         with self.state._connect() as conn:
             orig = conn.execute(
-                "SELECT worktree, agent, profile, run_id FROM dispatches WHERE backend = ? AND (dispatch_id = ? OR terminal_handle = ?) ORDER BY created_at ASC LIMIT 1",
-                (self.name, thread_id, f"t3:{thread_id}"),
+                "SELECT worktree, agent, profile, run_id FROM dispatches WHERE backend = ? AND (dispatch_id = ? OR session_id = ? OR terminal_handle = ?) ORDER BY created_at ASC LIMIT 1",
+                (self.name, thread_id, thread_id, f"t3:{thread_id}"),
             ).fetchone()
             bound = conn.execute(
-                "SELECT run_id FROM dispatches WHERE backend = ? AND (dispatch_id = ? OR terminal_handle = ?) AND run_id != ? LIMIT 1",
-                (self.name, thread_id, f"t3:{thread_id}", target_run),
+                "SELECT run_id FROM dispatches WHERE backend = ? AND (dispatch_id = ? OR session_id = ? OR terminal_handle = ?) AND run_id != ? LIMIT 1",
+                (self.name, thread_id, thread_id, f"t3:{thread_id}", target_run),
             ).fetchone()
         if bound:
             if claimed:
@@ -342,6 +366,13 @@ class T3CodeProvider(RuntimeProvider):
             raise
         finally:
             _REACHED_RUNTIME.reset(token)
+        res: dict[str, Any] = {
+            "injected": True,
+            "threadId": thread_id,
+            "taskId": task_id,
+            "delivery": raw.get("delivery"),
+            "upstream": raw,
+        }
         if claimed:
             inject_dispatch_id = f"{thread_id}:inject:{uuid.uuid4().hex[:8]}"
             insert_dispatch(
@@ -357,7 +388,8 @@ class T3CodeProvider(RuntimeProvider):
                 effective={"threadId": thread_id, "mechanism": "mcp.t3_thread_send", "inject": True},
                 session_id=thread_id,
             )
-        return {"injected": True, "threadId": thread_id, "taskId": task_id, "delivery": raw.get("delivery"), "upstream": raw}
+            res["dispatchId"] = inject_dispatch_id
+        return res
 
     def worker_list(
         self, *, run: str | None = None, task: str | None = None, limit: int | None = None, **kwargs: Any
@@ -368,16 +400,26 @@ class T3CodeProvider(RuntimeProvider):
         threads = raw.get("threads")
         if not isinstance(threads, list):
             raise ProviderError("t3code_bad_json", "t3_thread_list returned no threads array", {"response": raw})
-        stages = {
+        thread_stages = {
             str(t["threadId"]): str(t.get("status") or "unknown")
             for t in threads
             if isinstance(t, dict) and t.get("threadId")
         }
+        stages = dict(thread_stages)
+        with self.state._connect() as conn:
+            for r in conn.execute(
+                "SELECT dispatch_id, session_id, terminal_handle, launch_effective FROM dispatches WHERE backend = ?",
+                (self.name,),
+            ).fetchall():
+                tid = self._thread_id_of_row(dict(r))
+                if tid in thread_stages:
+                    stages[str(r["dispatch_id"])] = thread_stages[tid]
         return local_worker_list(self.state, self.name, run=run, task=task, limit=limit, stages=stages, upstream=raw, **kwargs)
 
     def worker_show(self, *, dispatch_id: str = "", **kwargs: Any) -> dict[str, Any]:
         row = load_dispatch(self.state, dispatch_id, self.name)
-        raw = self._tool("t3_thread_read", {"threadId": dispatch_id, "limit": 1})
+        thread_id = self._thread_id_of_row(row)
+        raw = self._tool("t3_thread_read", {"threadId": thread_id, "limit": 1})
         thread = raw.get("thread") if isinstance(raw.get("thread"), dict) else {}
         return show_from_row(row, stage=str(thread.get("status") or "unknown"), raw=thread, worktree=thread.get("worktreePath"))
 
@@ -390,8 +432,9 @@ class T3CodeProvider(RuntimeProvider):
         cursor: Any = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        load_dispatch(self.state, dispatch_id, self.name)
-        args: dict[str, Any] = {"threadId": dispatch_id, "view": "messages", "limit": max(1, min(int(limit), 100))}
+        row = load_dispatch(self.state, dispatch_id, self.name)
+        thread_id = self._thread_id_of_row(row)
+        args: dict[str, Any] = {"threadId": thread_id, "view": "messages", "limit": max(1, min(int(limit), 100))}
         if cursor not in (None, ""):
             args["afterPosition"] = int(cursor)
         raw = self._tool("t3_thread_read", args)
@@ -414,12 +457,13 @@ class T3CodeProvider(RuntimeProvider):
 
     def worker_fence(self, *, verb: str, dispatch_id: str = "", reason: str | None = None, **kwargs: Any) -> dict[str, Any]:
         fence_state(verb)
-        load_dispatch(self.state, dispatch_id, self.name)
+        row = load_dispatch(self.state, dispatch_id, self.name)
+        thread_id = self._thread_id_of_row(row)
         out: dict[str, Any] = {"dispatchId": dispatch_id, "verb": verb, "reason": reason}
         if verb == "retain":
             out["upstreamCalls"] = []
         else:
-            args: dict[str, Any] = {"threadId": dispatch_id}
+            args: dict[str, Any] = {"threadId": thread_id}
             if reason:
                 args["reason"] = str(reason)[:2000]
             out["upstream"] = self._tool("t3_thread_interrupt", args)
