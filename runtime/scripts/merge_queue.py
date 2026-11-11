@@ -3209,11 +3209,17 @@ class MergeQueue:
 
     def _read_rel_gate_bytes(self, rel_tok: str, cwd: Path | None, commit: str | None) -> tuple[bytes | None, str | None]:
         """Return `(raw_bytes, err)` for a repo-relative file in `cwd` (plan) or `commit` (plan_passed)."""
-        norm_tok = Path(os.path.normpath(rel_tok)).as_posix()
-        if os.path.isabs(rel_tok) or norm_tok in ("", ".") or ".." in Path(norm_tok).parts:
-            return None, f"{rel_tok}: escapes gate checkout"
+        raw_parts = [seg for seg in rel_tok.split("/") if seg and seg != "."]
+        if os.path.isabs(rel_tok) or not raw_parts or ".." in raw_parts or rel_tok.endswith("/"):
+            return None, f"{rel_tok}: escapes gate checkout or uses '..' traversal"
+        norm_tok = "/".join(raw_parts)
         if cwd is not None:
-            cand = (cwd / norm_tok).resolve()
+            cur_p = cwd
+            for seg in raw_parts:
+                cur_p = cur_p / seg
+                if cur_p.is_symlink():
+                    return None, f"{rel_tok}: symlinked relative gate path cannot be statically fingerprinted"
+            cand = cur_p.resolve()
             cwd_real = cwd.resolve()
             if cand != cwd_real and cwd_real not in cand.parents:
                 return None, f"{rel_tok}: escapes gate checkout"
@@ -3225,6 +3231,22 @@ class MergeQueue:
                 return None, f"{rel_tok}: {exc}"
         if commit:
             try:
+                for idx in range(len(raw_parts)):
+                    prefix_rel = "/".join(raw_parts[: idx + 1])
+                    ls_proc = subprocess.run(
+                        [self.git.bin, *self.git.HARDENED_CONFIG, "-C", self.git.repo_dir,
+                         "ls-tree", "-z", commit, "--", prefix_rel],
+                        capture_output=True, env=self.git.env, timeout=30,
+                    )
+                    if ls_proc.returncode != 0 or not ls_proc.stdout:
+                        return None, f"{rel_tok}: relative executable or script not found in commit {commit}"
+                    mode_str = ls_proc.stdout.split(b" ", 1)[0].decode("ascii", errors="replace")
+                    if mode_str == "120000":
+                        return None, f"{rel_tok}: symlinked relative gate path cannot be statically fingerprinted"
+                    if idx < len(raw_parts) - 1 and mode_str != "040000":
+                        return None, f"{rel_tok}: non-directory intermediate path in commit {commit}"
+                    if idx == len(raw_parts) - 1 and mode_str not in ("100644", "100755"):
+                        return None, f"{rel_tok}: not a regular file in commit {commit}"
                 proc = subprocess.run(
                     [self.git.bin, *self.git.HARDENED_CONFIG, "-C", self.git.repo_dir,
                      "cat-file", "blob", f"{commit}:{norm_tok}"],
@@ -3354,28 +3376,10 @@ class MergeQueue:
                 except OSError:
                     return None
             return None
-        if cwd is not None:
-            cand = (cwd / tok).resolve()
-            cwd_real = cwd.resolve()
-            if (cand == cwd_real or cwd_real in cand.parents) and cand.is_file():
-                try:
-                    return cand.read_text(encoding="utf-8", errors="replace")
-                except OSError:
-                    return None
+        raw_bytes, err = self._read_rel_gate_bytes(tok, cwd, commit)
+        if err or raw_bytes is None:
             return None
-        norm_tok = Path(os.path.normpath(tok)).as_posix()
-        if commit and norm_tok not in ("", ".") and ".." not in Path(norm_tok).parts:
-            try:
-                proc = subprocess.run(
-                    [self.git.bin, *self.git.HARDENED_CONFIG, "-C", self.git.repo_dir,
-                     "cat-file", "blob", f"{commit}:{norm_tok}"],
-                    capture_output=True, env=self.git.env, timeout=30,
-                )
-                if proc.returncode == 0:
-                    return proc.stdout.decode("utf-8", errors="replace")
-            except (OSError, subprocess.SubprocessError):
-                return None
-        return None
+        return raw_bytes.decode("utf-8", errors="replace")
 
     def _gate_fingerprint(
         self,
@@ -3827,9 +3831,12 @@ class MergeQueue:
     def _sandbox_resolve_path(cls, path_str: str, ro_binds: tuple[str, ...] | None) -> str | None:
         if not path_str or not os.path.isabs(path_str):
             return None
+        requires_dir = path_str != "/" and path_str.endswith("/")
         if ro_binds is None:
             try:
-                real = os.path.realpath(path_str)
+                real = os.path.realpath(path_str, strict=True)
+                if requires_dir and not os.path.isdir(real):
+                    return None
                 return real if os.path.exists(real) else None
             except OSError:
                 return None
@@ -3838,9 +3845,13 @@ class MergeQueue:
         for b in ro_binds:
             nb = os.path.normpath(b)
             try:
-                bind_map[nb] = os.path.realpath(nb)
+                real_nb = os.path.realpath(nb)
             except OSError:
                 continue
+            nb_prefix = nb.rstrip("/") + "/"
+            for prev in [k for k in bind_map if k != nb and (nb == "/" or k.startswith(nb_prefix))]:
+                del bind_map[prev]
+            bind_map[nb] = real_nb
             parent = os.path.dirname(nb)
             while parent and parent not in ancestors:
                 ancestors.add(parent)
@@ -3859,7 +3870,7 @@ class MergeQueue:
                         best = mb
             return (best, bind_map[best]) if best is not None else None
 
-        pending = [seg for seg in os.path.normpath(path_str).split("/") if seg]
+        pending = [seg for seg in path_str.split("/") if seg]
         cur = "/"
         hops = 0
         while pending:
@@ -3880,6 +3891,8 @@ class MergeQueue:
             if nxt == mb:
                 if not os.path.exists(host_root):
                     return None
+                if pending and not os.path.isdir(host_root):
+                    return None
                 cur = nxt
                 continue
             rel = nxt[len(mb.rstrip("/")) + 1:]
@@ -3894,6 +3907,10 @@ class MergeQueue:
                     target = os.readlink(host_cur)
                 except OSError:
                     return None
+                if not target:
+                    return None
+                if target.endswith("/") and target != "/" and not pending:
+                    requires_dir = True
                 if os.path.isabs(target):
                     cur = "/"
                 target_segs = [s for s in target.split("/") if s]
@@ -3908,7 +3925,11 @@ class MergeQueue:
             return None
         mb, host_root = final_mnt
         host_final = host_root if cur == mb else os.path.join(host_root, cur[len(mb.rstrip("/")) + 1:])
-        return host_final if os.path.exists(host_final) else None
+        if not os.path.exists(host_final):
+            return None
+        if requires_dir and not os.path.isdir(host_final):
+            return None
+        return host_final
 
     @classmethod
     def _sandbox_which(cls, cmd_name: str, clean_path: str, ro_binds: tuple[str, ...] | None) -> str | None:
@@ -3918,10 +3939,9 @@ class MergeQueue:
             found = shutil.which(cmd_name, path=clean_path)
             return os.path.realpath(found) if found else None
         for raw_dir in clean_path.split(os.pathsep):
-            norm_dir = os.path.normpath(raw_dir) if raw_dir else ""
-            if not norm_dir or not os.path.isabs(norm_dir):
+            if not raw_dir or not os.path.isabs(raw_dir):
                 continue
-            cand = os.path.join(norm_dir, cmd_name)
+            cand = f"{raw_dir.rstrip('/') or '/'}/{cmd_name}"
             resolved = cls._sandbox_resolve_path(cand, ro_binds)
             if resolved and os.path.isfile(resolved) and os.access(resolved, os.X_OK):
                 return resolved

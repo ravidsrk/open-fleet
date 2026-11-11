@@ -994,6 +994,18 @@ class GateRunsIsolated(QueueCase):
         bad_shebang.write_text(f"#!{hidden_gate}\nexit 0\n", encoding="utf-8")
         bad_shebang.chmod(0o755)
 
+        tools_dir = mounted_dir / "tools"
+        v1_subdir = mounted_dir / "v1" / "subdir"
+        tools_dir.mkdir(parents=True, exist_ok=True)
+        v1_subdir.mkdir(parents=True, exist_ok=True)
+        (tools_dir / "link").symlink_to(v1_subdir)
+        decoy_gate = tools_dir / "gate"
+        decoy_gate.write_text("#!/bin/sh\necho decoy-v1\n", encoding="utf-8")
+        decoy_gate.chmod(0o755)
+        real_v1_gate = mounted_dir / "v1" / "gate"
+        real_v1_gate.write_text("#!/bin/sh\necho v1-real-1\n", encoding="utf-8")
+        real_v1_gate.chmod(0o755)
+
         q = self.w.queue()
         q.env.pop("MQ_GATE_SANDBOX_CMD", None)
         q.env["HOME"] = str(fake_home)
@@ -1029,6 +1041,35 @@ class GateRunsIsolated(QueueCase):
             fp_sb, probs_sb = q._gate_fingerprint("bad-shebang")
             self.assertEqual(fp_sb, "")
             self.assertTrue(probs_sb)
+            # POSIX symlink-before-dotdot: tools/link/../gate resolves v1/gate, not tools/gate.
+            dotdot_cmd = f"{tools_dir}/link/../gate"
+            fp_dd1, probs_dd1 = q._gate_fingerprint(dotdot_cmd)
+            self.assertEqual(probs_dd1, [])
+            self.assertTrue(fp_dd1)
+            decoy_gate.write_text("#!/bin/sh\necho decoy-v2\n", encoding="utf-8")
+            fp_dd_decoy, probs_dd_decoy = q._gate_fingerprint(dotdot_cmd)
+            self.assertEqual(probs_dd_decoy, [])
+            self.assertEqual(fp_dd_decoy, fp_dd1)
+            real_v1_gate.write_text("#!/bin/sh\necho v1-real-2\n", encoding="utf-8")
+            fp_dd2, probs_dd2 = q._gate_fingerprint(dotdot_cmd)
+            self.assertEqual(probs_dd2, [])
+            self.assertNotEqual(fp_dd2, fp_dd1)
+            # Nonexistent intermediate segment before '..' fails closed instead of lexical collapse.
+            fp_noent, probs_noent = q._gate_fingerprint(f"{mounted_dir}/no_such_dir/../shadow-gate")
+            self.assertEqual(fp_noent, "")
+            self.assertTrue(probs_noent)
+
+        with unittest.mock.patch.object(type(q), "_bwrap_mode", return_value=None):
+            fp_nb1, probs_nb1 = q._gate_fingerprint(f"{tools_dir}/link/../gate")
+            self.assertEqual(probs_nb1, [])
+            self.assertTrue(fp_nb1)
+            real_v1_gate.write_text("#!/bin/sh\necho v1-real-3\n", encoding="utf-8")
+            fp_nb2, probs_nb2 = q._gate_fingerprint(f"{tools_dir}/link/../gate")
+            self.assertEqual(probs_nb2, [])
+            self.assertNotEqual(fp_nb2, fp_nb1)
+            fp_nb_noent, probs_nb_noent = q._gate_fingerprint(f"{mounted_dir}/no_such_dir/../shadow-gate")
+            self.assertEqual(fp_nb_noent, "")
+            self.assertTrue(probs_nb_noent)
 
 
 class GitLaneFreshness(Freshness):
