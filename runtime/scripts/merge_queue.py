@@ -3118,6 +3118,8 @@ class MergeQueue:
         refs = self.git.out("for-each-ref", "--format=%(refname) %(objectname)")
         return _digest(db_rows, refs)
 
+    _BWRAP_SYS_DIRS: tuple[str, ...] = ("/usr", "/bin", "/lib", "/lib64", "/sbin", "/etc", "/opt")
+
     def _gate_exec_argv(self, gate_cmd: str, checkout: Path, gate_home: Path,
                         gate_tmp: Path) -> list[str]:
         req_sbx = (
@@ -3136,12 +3138,8 @@ class MergeQueue:
         if bw_mode is not None:
             bw, ns_flags = bw_mode
             cmd = [bw, *ns_flags, "--die-with-parent", "--proc", "/proc", "--dev", "/dev"]
-            sys_dirs = ("/usr", "/bin", "/lib", "/lib64", "/sbin", "/etc", "/opt")
+            sys_dirs = self._BWRAP_SYS_DIRS
             bound_ro: set[str] = set()
-            for sys_dir in sys_dirs:
-                if os.path.exists(sys_dir):
-                    bound_ro.add(sys_dir)
-                    cmd += ["--ro-bind", sys_dir, sys_dir]
             raw_forbidden = {
                 "/", "/root", "/home", "/Users", "/tmp", "/var", "/var/tmp", "/proc", "/sys", "/dev", "/run",
             }
@@ -3156,25 +3154,54 @@ class MergeQueue:
             )
             sensitive_ancestors: set[str] = set()
             forbidden_subtrees: list[str] = list(strict_subtrees)
+
+            def _mark_sensitive(raw_p: str, *, forbid_subtree: bool) -> None:
+                norm_p = os.path.normpath(raw_p)
+                if not norm_p or norm_p in (".", "/"):
+                    return
+                real_p = os.path.realpath(norm_p)
+                for cand_p in (norm_p, real_p):
+                    forbidden_roots.add(cand_p)
+                    sensitive_ancestors.add(cand_p)
+                    if forbid_subtree:
+                        forbidden_subtrees.append(cand_p)
+
             orig_home = os.path.normpath(self.env.get("HOME") or "")
             if orig_home and orig_home != ".":
-                forbidden_roots.add(orig_home)
+                _mark_sensitive(orig_home, forbid_subtree=False)
                 orig_home_real = os.path.realpath(orig_home)
-                forbidden_roots.add(orig_home_real)
-                sensitive_ancestors.add(orig_home_real)
-                for cred_sub in (".ssh", ".gnupg", ".aws", ".config", ".kube", ".docker", ".codex", ".claude", ".gemini"):
-                    c_dir = os.path.join(orig_home_real, cred_sub)
-                    forbidden_subtrees.append(os.path.realpath(c_dir) if os.path.exists(c_dir) else c_dir)
-            repo_real = str(Path(self.git.repo_dir).resolve())
-            forbidden_roots.add(repo_real)
-            sensitive_ancestors.add(repo_real)
-            forbidden_subtrees.append(repo_real)
+                for cred_sub in (
+                    ".ssh", ".gnupg", ".aws", ".config", ".kube", ".docker",
+                    ".codex", ".claude", ".gemini", ".netrc", ".git-credentials",
+                    ".npmrc", ".pypirc", ".pgpass",
+                ):
+                    _mark_sensitive(os.path.join(orig_home_real, cred_sub), forbid_subtree=True)
+            for env_cred_dir in ("XDG_CONFIG_HOME", "GH_CONFIG_DIR", "DOCKER_CONFIG", "GNUPGHOME"):
+                val_d = (self.env.get(env_cred_dir) or "").strip()
+                if val_d and os.path.isabs(val_d):
+                    _mark_sensitive(val_d, forbid_subtree=True)
+            for env_cred_file in ("AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE", "NETRC", "NPM_CONFIG_USERCONFIG"):
+                val_f = (self.env.get(env_cred_file) or "").strip()
+                if val_f and os.path.isabs(val_f):
+                    _mark_sensitive(val_f, forbid_subtree=True)
+            for kc_part in (self.env.get("KUBECONFIG") or "").split(os.pathsep):
+                kc_part = kc_part.strip()
+                if kc_part and os.path.isabs(kc_part):
+                    _mark_sensitive(kc_part, forbid_subtree=True)
+            _mark_sensitive(str(Path(self.git.repo_dir).resolve()), forbid_subtree=True)
             store_path = getattr(self.store, "path", None)
             if store_path:
-                store_dir_real = str(Path(store_path).resolve().parent)
-                forbidden_roots.add(store_dir_real)
-                sensitive_ancestors.add(store_dir_real)
-                forbidden_subtrees.append(store_dir_real)
+                _mark_sensitive(str(Path(store_path).resolve().parent), forbid_subtree=True)
+
+            def _directly_forbidden(norm_s: str, real_s: str) -> bool:
+                if not real_s or norm_s in forbidden_roots or real_s in forbidden_roots:
+                    return True
+                for p in (norm_s, real_s):
+                    if any(p == sa for sa in sensitive_ancestors):
+                        return True
+                    if any(p == sub or p.startswith(sub.rstrip("/") + "/") for sub in forbidden_subtrees):
+                        return True
+                return False
 
             def _forbidden_bind_source(src: str) -> bool:
                 norm_s = os.path.normpath(src)
@@ -3182,20 +3209,50 @@ class MergeQueue:
                     real_s = os.path.realpath(norm_s)
                 except OSError:
                     return True
-                if not real_s or norm_s in forbidden_roots or real_s in forbidden_roots:
+                if _directly_forbidden(norm_s, real_s):
                     return True
+                norm_slash = norm_s.rstrip("/") + "/"
                 real_slash = real_s.rstrip("/") + "/"
-                if any(sa == real_s or sa.startswith(real_slash) for sa in sensitive_ancestors):
-                    return True
-                if any(real_s == sub or real_s.startswith(sub.rstrip("/") + "/") for sub in forbidden_subtrees):
+                if any(sa.startswith(norm_slash) or sa.startswith(real_slash) for sa in sensitive_ancestors):
                     return True
                 return False
+
+            def _collect_safe_sys_binds(src: str, depth: int = 0) -> list[str]:
+                norm_s = os.path.normpath(src)
+                if not os.path.exists(norm_s):
+                    return []
+                try:
+                    real_s = os.path.realpath(norm_s)
+                except OSError:
+                    return []
+                if _directly_forbidden(norm_s, real_s):
+                    return []
+                if not _forbidden_bind_source(norm_s):
+                    return [norm_s]
+                if depth >= 6 or os.path.islink(norm_s) or not os.path.isdir(norm_s):
+                    return []
+                try:
+                    entries = sorted(os.listdir(norm_s))
+                except OSError:
+                    return []
+                if len(entries) > 4096:
+                    return []
+                out_binds: list[str] = []
+                for entry in entries:
+                    out_binds.extend(_collect_safe_sys_binds(os.path.join(norm_s, entry), depth + 1))
+                return out_binds
+
+            for sys_dir in sys_dirs:
+                for safe_b in _collect_safe_sys_binds(sys_dir):
+                    if safe_b not in bound_ro:
+                        bound_ro.add(safe_b)
+                        cmd += ["--ro-bind", safe_b, safe_b]
 
             for extra_dir in self._clean_gate_path().split(os.pathsep):
                 norm_extra = os.path.normpath(extra_dir)
                 if not norm_extra or not os.path.isabs(norm_extra) or not os.path.exists(norm_extra):
                     continue
-                if any(norm_extra == d or norm_extra.startswith(d + "/") for d in sys_dirs):
+                if any(norm_extra == d or norm_extra.startswith(d.rstrip("/") + "/") for d in bound_ro):
                     continue
                 if _forbidden_bind_source(norm_extra):
                     continue

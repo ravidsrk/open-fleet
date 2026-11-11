@@ -655,6 +655,39 @@ class GateRunsIsolated(QueueCase):
         self.assertNotIn(str(sym_home), ro_srcs)
         self.assertNotIn(str(sym_ssh), ro_srcs)
         self.assertIn(str(fake_home / "bin"), ro_srcs)
+        # Protected directories beneath `/opt` (or any `_BWRAP_SYS_DIRS` root) are never wholesale `--ro-bind`ed:
+        q_bw.env["HOME"] = "/opt/conductor"
+        with unittest.mock.patch.object(
+            type(q_bw), "_bwrap_mode", return_value=("/usr/bin/bwrap", ("--unshare-all",))
+        ):
+            opt_argv = q_bw._gate_exec_argv("true", self.w.tmp / "co", self.w.tmp / "gh", self.w.tmp / "gt")
+        opt_ro_srcs = [opt_argv[i + 1] for i, v in enumerate(opt_argv) if v == "--ro-bind"]
+        self.assertNotIn("/opt", opt_ro_srcs)
+        self.assertNotIn("/opt/conductor", opt_ro_srcs)
+        fake_opt = self.w.tmp / "fake-opt"
+        (fake_opt / "conductor" / ".config" / "gh").mkdir(parents=True, exist_ok=True)
+        (fake_opt / "conductor" / ".config" / "gh" / "hosts.yml").write_text("oauth_token: secret\n", encoding="utf-8")
+        (fake_opt / "gh-creds").mkdir(parents=True, exist_ok=True)
+        (fake_opt / "toolchain" / "bin").mkdir(parents=True, exist_ok=True)
+        (fake_opt / "leak-link").symlink_to(fake_opt / "conductor")
+        q_bw.env["HOME"] = str(fake_opt / "conductor")
+        q_bw.env["GH_CONFIG_DIR"] = str(fake_opt / "gh-creds")
+        with (
+            unittest.mock.patch.object(
+                type(q_bw), "_bwrap_mode", return_value=("/usr/bin/bwrap", ("--unshare-all",))
+            ),
+            unittest.mock.patch.object(
+                type(q_bw), "_BWRAP_SYS_DIRS", (*type(q_bw)._BWRAP_SYS_DIRS, str(fake_opt))
+            ),
+        ):
+            fopt_argv = q_bw._gate_exec_argv("true", self.w.tmp / "co", self.w.tmp / "gh", self.w.tmp / "gt")
+        fopt_ro_srcs = [fopt_argv[i + 1] for i, v in enumerate(fopt_argv) if v == "--ro-bind"]
+        self.assertNotIn(str(fake_opt), fopt_ro_srcs)
+        self.assertNotIn(str(fake_opt / "conductor"), fopt_ro_srcs)
+        self.assertNotIn(str(fake_opt / "gh-creds"), fopt_ro_srcs)
+        self.assertNotIn(str(fake_opt / "leak-link"), fopt_ro_srcs)
+        self.assertIn(str(fake_opt / "toolchain"), fopt_ro_srcs)
+        q_bw.env.pop("GH_CONFIG_DIR", None)
         # Dynamic command words (`eval`) and lookup-mutating forms (`PATH=`, `env PATH=`, `env -C`, `cd`, `command -p`) fail closed:
         for unsafe_gate in (
             "eval /bin/true",
