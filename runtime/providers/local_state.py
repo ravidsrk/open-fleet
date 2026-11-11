@@ -370,7 +370,13 @@ class LocalStateStore:
             },
             # claim_pid/claim_host: who holds a pending claim, so a claimer that died on this host
             # is reclaimed at once instead of after PENDING_STALE_S (2026-10-26 review).
-            "requests": {"payload_sha256": "TEXT", "intent_id": "TEXT", "claim_pid": "INTEGER", "claim_host": "TEXT"},
+            "requests": {
+                "payload_sha256": "TEXT",
+                "intent_id": "TEXT",
+                "claim_pid": "INTEGER",
+                "claim_host": "TEXT",
+                "caller_scope": "TEXT",
+            },
         }
         for table, cols in wanted.items():
             have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -383,6 +389,13 @@ class LocalStateStore:
                             raise
 
     # --- Idempotent request tracking ---
+    def _caller_request_scope(self) -> str:
+        bound_run = self._worker_bound_run()
+        own = sorted(set(self._own_worker_identity()))
+        if bound_run or own:
+            return f"worker:{bound_run or ''}:{','.join(own)}"
+        return "coordinator"
+
     def get_or_record_request(
         self,
         request_id: str | None,
@@ -403,12 +416,13 @@ class LocalStateStore:
             return None
         if payload_sha256 is None:
             payload_sha256 = ACTIVE_REQUEST_PAYLOAD_SHA.get()
+        caller_scope = self._caller_request_scope()
         now = time.time()
         host = socket.gethostname()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT method, state, response_json, payload_sha256, created_at, claim_pid, claim_host "
+                "SELECT method, state, response_json, payload_sha256, created_at, claim_pid, claim_host, caller_scope "
                 "FROM requests WHERE request_id = ?",
                 (request_id,),
             ).fetchone()
@@ -416,18 +430,24 @@ class LocalStateStore:
                 stale = now - float(row["created_at"] or now) > PENDING_STALE_S
                 claimer_gone = (row["claim_host"] == host and int(row["claim_pid"] or 0) > 0
                                 and not _pid_alive(int(row["claim_pid"])))
-                if stale or claimer_gone:
+                if (stale or claimer_gone) and (not row["caller_scope"] or row["caller_scope"] == caller_scope):
                     conn.execute("DELETE FROM requests WHERE request_id = ?", (request_id,))
                     row = None
             if not row:
                 conn.execute(
                     "INSERT INTO requests(request_id, method, state, response_json, created_at, payload_sha256, "
-                    "claim_pid, claim_host) VALUES (?, ?, 'pending', NULL, ?, ?, ?, ?)",
-                    (request_id, method, now, payload_sha256, os.getpid(), host),
+                    "claim_pid, claim_host, caller_scope) VALUES (?, ?, 'pending', NULL, ?, ?, ?, ?, ?)",
+                    (request_id, method, now, payload_sha256, os.getpid(), host, caller_scope),
                 )
                 conn.execute("COMMIT")
                 return None
             conn.execute("COMMIT")
+        if row["caller_scope"] and row["caller_scope"] != caller_scope:
+            raise ProviderError(
+                "request_mismatch",
+                f"retry-request {request_id!r} belongs to a different caller scope; use a new request id",
+                {"requestId": request_id},
+            )
         if row["method"] != method:
             raise ProviderError("request_mismatch", f"retry-request {request_id!r} bound to {row['method']}, not {method}")
         self.check_request_payload(request_id, row["payload_sha256"], payload_sha256)
@@ -477,13 +497,15 @@ class LocalStateStore:
             return
         if payload_sha256 is None:
             payload_sha256 = ACTIVE_REQUEST_PAYLOAD_SHA.get()
+        caller_scope = self._caller_request_scope()
         conn.execute(
-            "INSERT INTO requests(request_id, method, state, response_json, created_at, payload_sha256) "
-            "VALUES (?, ?, ?, ?, ?, ?) "
+            "INSERT INTO requests(request_id, method, state, response_json, created_at, payload_sha256, caller_scope) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(request_id) DO UPDATE SET method = excluded.method, state = excluded.state, "
             "response_json = excluded.response_json, "
-            "payload_sha256 = COALESCE(requests.payload_sha256, excluded.payload_sha256)",
-            (request_id, method, state, json.dumps(response), time.time(), payload_sha256),
+            "payload_sha256 = COALESCE(requests.payload_sha256, excluded.payload_sha256), "
+            "caller_scope = COALESCE(requests.caller_scope, excluded.caller_scope)",
+            (request_id, method, state, json.dumps(response), time.time(), payload_sha256, caller_scope),
         )
 
     def save_request(
@@ -501,19 +523,34 @@ class LocalStateStore:
             self._save_request_in_tx(conn, request_id, method, state, response, payload_sha256)
 
     def request_show(self, request_id: str) -> dict[str, Any]:
+        caller_scope = self._caller_request_scope()
+        bound = self._worker_bound_run()
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT state, response_json, intent_id FROM requests WHERE request_id = ?",
+                "SELECT state, response_json, intent_id, caller_scope FROM requests WHERE request_id = ?",
                 (request_id,),
             ).fetchone()
             if not row:
                 return {"requestId": request_id, "state": "absent"}
+            if bound and row["caller_scope"] and row["caller_scope"] != caller_scope:
+                raise ProviderError(
+                    "cross_run_access"
+                    if row["caller_scope"].startswith("worker:") and not row["caller_scope"].startswith(f"worker:{bound}:")
+                    else "request_mismatch",
+                    f"request {request_id!r} belongs to a different caller scope",
+                    {"requestId": request_id},
+                )
             out: dict[str, Any] = {"requestId": request_id, "state": row["state"]}
             intent = conn.execute(
-                "SELECT intent_id, phase, outcome, dispatch_id, task_id FROM launch_intents WHERE intent_id = ?",
+                "SELECT intent_id, phase, outcome, dispatch_id, task_id, run_id FROM launch_intents WHERE intent_id = ?",
                 (row["intent_id"],),
             ).fetchone() if row["intent_id"] else None
             if intent:
+                if bound and str(intent["run_id"] or "default") != bound:
+                    raise ProviderError(
+                        "cross_run_access",
+                        f"request {request_id!r} belongs to run {intent['run_id']!r}, not {bound!r}",
+                    )
                 # Read-only triage: which launch attempt this request names, and how far it got.
                 out["intent"] = {
                     "id": intent["intent_id"],
@@ -1302,8 +1339,17 @@ class LocalStateStore:
         elif isinstance(ack, list):
             ack_ids = [str(x).strip() for x in ack if str(x).strip()]
 
+        with self._connect() as conn:
+            allowed_recipients = self._mailbox_scope(conn, run_id, terminal)
         payload_sha = request_payload_sha256(
-            {"terminal": terminal, "run": run_id, "ack": ack_ids, "mode": mode, "types": types}
+            {
+                "terminal": terminal,
+                "run": run_id,
+                "ack": ack_ids,
+                "mode": mode,
+                "types": types,
+                "recipients": sorted(set(allowed_recipients)),
+            }
         )
         cached = self.get_or_record_request(retry_request, "check", payload_sha)
         if cached:
@@ -1402,11 +1448,31 @@ class LocalStateStore:
         retry_request: str | None = None,
     ) -> dict[str, Any]:
         eff_run = self._resolve_caller_run(run, default_run=None)
+        replier = sender or self._resolve_terminal(None) or COORDINATOR_ALIAS
         payload_sha = request_payload_sha256(
-            {"msg_id": msg_id, "body": body, "run": eff_run, "sender": sender}
+            {"msg_id": msg_id, "body": body, "run": eff_run, "sender": replier}
         )
         cached = self.get_or_record_request(retry_request, "reply", payload_sha)
         if cached:
+            with self._connect() as conn:
+                orig_c = conn.execute("SELECT * FROM messages WHERE id = ?", (msg_id,)).fetchone()
+                gate_c = None
+                if not orig_c:
+                    gate_c = conn.execute("SELECT * FROM gates WHERE gate_id = ?", (msg_id,)).fetchone()
+                    if gate_c and gate_c["message_id"]:
+                        orig_c = conn.execute("SELECT * FROM messages WHERE id = ?", (gate_c["message_id"],)).fetchone()
+                if orig_c and eff_run is not None and orig_c["run_id"] != eff_run:
+                    raise ProviderError(
+                        "cross_run_access",
+                        f"message {msg_id!r} belongs to run {orig_c['run_id']!r}, not {eff_run!r}",
+                    )
+                if orig_c:
+                    attrs_c = json.loads(orig_c["attrs_json"] or "{}")
+                    gid_c = gate_c["gate_id"] if gate_c else attrs_c.get("gateId")
+                    if gid_c:
+                        grow_c = gate_c or conn.execute("SELECT * FROM gates WHERE gate_id = ?", (gid_c,)).fetchone()
+                        if grow_c:
+                            self._check_gate_answerer(conn, grow_c, replier)
             return cached
         try:
             with self._connect() as conn:
@@ -1591,6 +1657,7 @@ class LocalStateStore:
                     or existing_opts != opts
                     or existing["run_id"] != run_id
                     or existing["recipient"] != (to or "human")
+                    or existing["sender"] != asker
                 ):
                     conn.execute("ROLLBACK")
                     raise ProviderError(
@@ -1685,14 +1752,23 @@ class LocalStateStore:
         if not gate_id or resolution is None:
             raise ProviderError("invalid_argument", "gate-resolve needs --id and --resolution")
         eff_run = self._resolve_caller_run(run, default_run=None)
+        who = sender or self._resolve_terminal(None) or COORDINATOR_ALIAS
         payload_sha = request_payload_sha256(
-            {"gate_id": gate_id, "resolution": resolution, "run": eff_run, "sender": sender}
+            {"gate_id": gate_id, "resolution": resolution, "run": eff_run, "sender": who}
         )
         cached = self.get_or_record_request(retry_request, "gate-resolve", payload_sha)
         if cached:
+            with self._connect() as conn:
+                row_c = self._find_gate(conn, gate_id)
+                if row_c:
+                    if eff_run is not None and row_c["run_id"] != eff_run:
+                        raise ProviderError(
+                            "cross_run_access",
+                            f"gate {row_c['gate_id']!r} belongs to run {row_c['run_id']!r}, not {eff_run!r}",
+                        )
+                    self._check_gate_answerer(conn, row_c, who)
             return cached
         try:
-            who = sender or self._resolve_terminal(None) or COORDINATOR_ALIAS
             with self._connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 row = self._find_gate(conn, gate_id)

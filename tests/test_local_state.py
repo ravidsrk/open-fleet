@@ -795,6 +795,55 @@ class TestCoordinatorTakeoverAndWorkerBindingFence(Base):
         ok = self.store.gate_resolve(gate_id=gd, resolution="yes", sender="coord-main", run="default")["gate"]
         self.assertEqual(ok["status"], "resolved")
 
+    def test_cached_inbox_and_request_scope_preserve_mailbox_isolation(self):
+        self.store.run_create(run="run-iso", sender="coord-iso")
+        t_iso = self.store.task_create(spec="iso-task", run="run-iso")["task"]["id"]
+        self.store.task_update(task_id=t_iso, status="dispatched", run="run-iso")
+        with self.store._connect() as conn:
+            conn.execute(
+                "INSERT INTO dispatches(dispatch_id, task_id, run_id, worktree, agent, terminal_handle, state, created_at, updated_at) "
+                "VALUES ('disp-iso', ?, 'run-iso', '/w', 'claude', 'term-iso', 'running', 10, 10)",
+                (t_iso,),
+            )
+        self.store.send_message(
+            subject="coord-secret",
+            msg_type="info",
+            payload="eyes-only",
+            to="coord-iso",
+            sender="term-iso",
+            run="run-iso",
+        )
+        coord_inbox = self.store.check_messages(terminal="coord-iso", run="run-iso", retry_request="req-inbox-k")
+        self.assertEqual(coord_inbox["count"], 1)
+        self.assertEqual(coord_inbox["messages"][0]["payload"], "eyes-only")
+        # Exact coordinator replay with same retry_request succeeds:
+        self.assertEqual(
+            self.store.check_messages(terminal="coord-iso", run="run-iso", retry_request="req-inbox-k")["count"],
+            1,
+        )
+        # Unfenced outsider replaying the same retry_request is blocked by mailbox fencing:
+        with self.assertRaises(self.mod.ProviderError) as ctx_fenced:
+            self.store.check_messages(terminal="rogue-coord", run="run-iso", retry_request="req-inbox-k")
+        self.assertEqual(ctx_fenced.exception.code, "consumer_fenced")
+        # Launched worker in run-iso replaying coordinator's retry_request with terminal="coord-iso" is refused:
+        w_iso = self.mod.LocalStateStore(
+            self.db,
+            env={"OPEN_FLEET_DISPATCH_ID": "disp-iso", "OPEN_FLEET_TERMINAL_HANDLE": "term-iso"},
+        )
+        with self.assertRaises(self.mod.ProviderError) as ctx_worker:
+            w_iso.check_messages(terminal="coord-iso", run="run-iso", retry_request="req-inbox-k")
+        self.assertEqual(ctx_worker.exception.code, "request_mismatch")
+        with self.assertRaises(self.mod.ProviderError) as ctx_show:
+            w_iso.request_show("req-inbox-k")
+        self.assertEqual(ctx_show.exception.code, "request_mismatch")
+        # Worker's own fresh retry_request reads only its own mailbox (empty) and replays idempotently:
+        w_inbox = w_iso.check_messages(terminal="coord-iso", run="run-iso", retry_request="req-worker-own")
+        self.assertEqual(w_inbox["count"], 0)
+        self.assertEqual(
+            w_iso.check_messages(terminal="coord-iso", run="run-iso", retry_request="req-worker-own")["count"],
+            0,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
