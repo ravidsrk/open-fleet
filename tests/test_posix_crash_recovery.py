@@ -1538,7 +1538,8 @@ class TestOrphanedWorkerIsStopped(CrashRecoveryBase):
         self.assertTrue(_alive(other.pid))
 
     def test_cross_run_worker_cannot_reconcile_or_replay_another_runs_launch(self):
-        from runtime.providers import ProviderError, get_provider
+        ProviderError = self.providers.ProviderError
+        get_provider = self.providers.get_provider
 
         prov = self.restart()
         run_a_task = prov.task_create(spec="run A work", run="run-A")["task"]["id"]

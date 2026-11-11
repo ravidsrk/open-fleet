@@ -3577,11 +3577,8 @@ def execute_negative_control(m, nc_command=None):
             return False, [f"--execute-nc: unsupported proof command: package hierarchy for '-m {py_mod}' "
                            "is missing tracked __init__.py in head_sha; fail-closed (#750 C19)"]
         extra_staged_ops = [c for c in all_cands if c in tracked_mods]
-        absent_mod_paths = [c for c in all_cands if c not in tracked_mods]
-        for k in range(1, len(mod_parts)):
-            sib_py = f"{'/'.join(mod_parts[:k])}.py"
-            if sib_py not in tracked_mods:
-                absent_mod_paths.append(sib_py)
+        sib_cands = [f"{'/'.join(mod_parts[:k])}.py" for k in range(1, len(mod_parts))]
+        absent_mod_paths = [c for c in [*all_cands, *sib_cands] if c not in tracked_mods]
     for st_op in _Authority._staged_script_operands(argv):
         norm_st_op = Path(os.path.normpath(st_op)).as_posix()
         if os.path.isabs(st_op) or norm_st_op in ("", ".") or ".." in Path(norm_st_op).parts:
