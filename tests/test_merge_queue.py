@@ -577,7 +577,33 @@ class GateRunsIsolated(QueueCase):
         rc_m, out_m = self.w.cli("merge", "--token", tok_cmp, "--require-gate", compound_cmd)
         self.assertNotEqual(rc_m, 0, out_m)
         self.assertEqual(out_m.get("code"), "gate_not_run", out_m)
-        # Dynamic command words (`eval`) and lookup-mutating forms (`PATH=`, `env PATH=`, `env -C`, `cd`) fail closed:
+        # Replacing a `sh <script>` operand after `plan` invalidates `merge --require-gate`:
+        ext_sh = self.w.tmp / "bin" / "gate-operand.sh"
+        ext_sh.write_text("exit 0\n", encoding="utf-8")
+        sh_operand_cmd = f"sh {ext_sh}"
+        tok_sh = self.acquire("c-sh-op", "--takeover")
+        self.board(tok_sh, self.w.unit("sh-op-unit"))
+        rc_sp, out_sp = self.w.cli("plan", "--token", tok_sh, "--gate-cmd", sh_operand_cmd)
+        self.assertEqual(rc_sp, 0, out_sp)
+        self.assertEqual(out_sp["planned"][0]["result"], "tested", out_sp)
+        ext_sh.write_text("exit 1\n", encoding="utf-8")
+        rc_sm, out_sm = self.w.cli("merge", "--token", tok_sh, "--require-gate", sh_operand_cmd)
+        self.assertNotEqual(rc_sm, 0, out_sm)
+        self.assertEqual(out_sm.get("code"), "gate_not_run", out_sm)
+        # Replacing a `python3 <script>` operand after `plan` also invalidates `merge --require-gate`:
+        ext_py = self.w.tmp / "bin" / "gate-operand.py"
+        ext_py.write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
+        py_operand_cmd = f"{sys.executable} -s {ext_py}"
+        tok_py = self.acquire("c-py-op", "--takeover")
+        self.board(tok_py, self.w.unit("py-op-unit"))
+        rc_pp, out_pp = self.w.cli("plan", "--token", tok_py, "--gate-cmd", py_operand_cmd)
+        self.assertEqual(rc_pp, 0, out_pp)
+        self.assertEqual(out_pp["planned"][0]["result"], "tested", out_pp)
+        ext_py.write_text("import sys\nsys.exit(1)\n", encoding="utf-8")
+        rc_pm, out_pm = self.w.cli("merge", "--token", tok_py, "--require-gate", py_operand_cmd)
+        self.assertNotEqual(rc_pm, 0, out_pm)
+        self.assertEqual(out_pm.get("code"), "gate_not_run", out_pm)
+        # Dynamic command words (`eval`) and lookup-mutating forms (`PATH=`, `env PATH=`, `env -C`, `cd`, `command -p`) fail closed:
         for unsafe_gate in (
             "eval /bin/true",
             "PATH=/opt/alternate/bin gate-check",
@@ -589,6 +615,11 @@ class GateRunsIsolated(QueueCase):
             "env -u PATH gate-check",
             "cd subdir && ./gate-check",
             "export PATH=/opt/alternate/bin; gate-check",
+            "command -p python3 -V",
+            "exec -c gate-check",
+            "sh bare_script.sh",
+            "sh -s",
+            ". bare_script.sh",
         ):
             _, _, dyn_probs = mq_mod.MergeQueue._analyze_gate_command(unsafe_gate)
             self.assertTrue(dyn_probs, f"expected fail-closed problem on {unsafe_gate!r}")

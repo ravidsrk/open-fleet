@@ -1990,7 +1990,9 @@ class MergeQueue:
                 if cw_base == "nice":
                     executables.append(cw)
                     wi += 1
-                    while wi < len(cmd_words) and cmd_words[wi][0].startswith("-"):
+                    while wi < len(cmd_words) and cmd_words[wi][0].startswith("-") and len(cmd_words[wi][0]) > 1:
+                        if is_dynamic(cmd_words[wi][1]):
+                            problems.append("nice: dynamic option cannot be statically fingerprinted")
                         if cmd_words[wi][0] == "--":
                             wi += 1
                             break
@@ -1999,7 +2001,9 @@ class MergeQueue:
                 if cw_base == "timeout":
                     executables.append(cw)
                     wi += 1
-                    while wi < len(cmd_words) and cmd_words[wi][0].startswith("-"):
+                    while wi < len(cmd_words) and cmd_words[wi][0].startswith("-") and len(cmd_words[wi][0]) > 1:
+                        if is_dynamic(cmd_words[wi][1]):
+                            problems.append("timeout: dynamic option cannot be statically fingerprinted")
                         if cmd_words[wi][0] == "--":
                             wi += 1
                             break
@@ -2010,7 +2014,9 @@ class MergeQueue:
                 if cw_base == "nohup":
                     executables.append(cw)
                     wi += 1
-                    while wi < len(cmd_words) and cmd_words[wi][0].startswith("-"):
+                    while wi < len(cmd_words) and cmd_words[wi][0].startswith("-") and len(cmd_words[wi][0]) > 1:
+                        if is_dynamic(cmd_words[wi][1]):
+                            problems.append("nohup: dynamic option cannot be statically fingerprinted")
                         if cmd_words[wi][0] == "--":
                             wi += 1
                             break
@@ -2019,12 +2025,19 @@ class MergeQueue:
                 if cw in ("command", "builtin"):
                     wi += 1
                     query_only = False
-                    while wi < len(cmd_words) and cmd_words[wi][0].startswith("-"):
-                        opt = cmd_words[wi][0]
+                    while wi < len(cmd_words) and cmd_words[wi][0].startswith("-") and len(cmd_words[wi][0]) > 1:
+                        opt, opt_flag = cmd_words[wi]
                         wi += 1
                         if opt == "--":
                             break
-                        if "v" in opt[1:] or "V" in opt[1:]:
+                        if is_dynamic(opt_flag):
+                            problems.append(f"{cw}: dynamic option {opt!r} cannot be statically fingerprinted")
+                            continue
+                        if cw == "command" and "p" in opt[1:]:
+                            problems.append(
+                                "command -p alters PATH lookup context and cannot be statically fingerprinted"
+                            )
+                        if cw == "command" and ("v" in opt[1:] or "V" in opt[1:]):
                             query_only = True
                     if query_only:
                         wi = len(cmd_words)
@@ -2032,11 +2045,15 @@ class MergeQueue:
                     continue
                 if cw == "exec":
                     wi += 1
-                    while wi < len(cmd_words) and cmd_words[wi][0].startswith("-"):
-                        opt = cmd_words[wi][0]
+                    while wi < len(cmd_words) and cmd_words[wi][0].startswith("-") and len(cmd_words[wi][0]) > 1:
+                        opt, opt_flag = cmd_words[wi]
                         if opt == "--":
                             wi += 1
                             break
+                        if is_dynamic(opt_flag):
+                            problems.append("exec: dynamic option cannot be statically fingerprinted")
+                        elif "c" in opt[1:]:
+                            problems.append("exec -c clears environment and alters PATH lookup context")
                         wi += 2 if opt == "-a" else 1
                     continue
                 break
@@ -2061,37 +2078,266 @@ class MergeQueue:
                     if arg_w.startswith("-") and arg_w != "--":
                         continue
                     vname = arg_w.split("=", 1)[0]
-                    if is_dynamic(arg_f) or vname.upper() in cls._LOOKUP_VARS:
+                    dyn_vname = is_dynamic(arg_f) and (
+                        any(ch_v in vname for ch_v in "$*?[`") or "__MQ_CMDSUB__" in vname
+                    )
+                    if dyn_vname or vname.upper() in cls._LOOKUP_VARS:
                         problems.append(
                             f"shell {final_word!r} builtin touching lookup variable cannot be statically fingerprinted"
                         )
+                        break
+                continue
+            if final_word == "read":
+                ri = wi + 1
+                while ri < len(cmd_words):
+                    rw, rf = cmd_words[ri]
+                    if rw == "--":
+                        ri += 1
+                        break
+                    if rw.startswith("-") and len(rw) > 1:
+                        ri += 2 if rw in ("-d", "-n", "-N", "-p", "-t", "-u") else 1
+                        continue
+                    break
+                for rw, rf in cmd_words[ri:]:
+                    if is_dynamic(rf) or rw.upper() in cls._LOOKUP_VARS:
+                        problems.append("shell 'read' builtin touching lookup variable cannot be statically fingerprinted")
+                        break
+                continue
+            if final_word == "printf":
+                for pi in range(wi + 1, len(cmd_words)):
+                    pw, _ = cmd_words[pi]
+                    if pw == "--":
+                        break
+                    if pw == "-v":
+                        if pi + 1 >= len(cmd_words) or is_dynamic(cmd_words[pi + 1][1]) or (
+                            cmd_words[pi + 1][0].upper() in cls._LOOKUP_VARS
+                        ):
+                            problems.append(
+                                "shell 'printf -v' touching lookup variable cannot be statically fingerprinted"
+                            )
                         break
                 continue
             if final_word in (".", "source"):
                 if wi + 1 >= len(cmd_words) or is_dynamic(cmd_words[wi + 1][1]):
                     problems.append(f"{final_word}: dynamic or missing script target cannot be fingerprinted")
                 else:
-                    sourced.append(cmd_words[wi + 1][0])
+                    src_target = cmd_words[wi + 1][0]
+                    if "/" not in src_target and not os.path.isabs(src_target):
+                        problems.append(
+                            f"{final_word}: script target {src_target!r} without '/' searches PATH and cannot be statically fingerprinted"
+                        )
+                    else:
+                        sourced.append(src_target)
                 continue
             if final_word and final_word not in cls._SHELL_BUILTINS and final_word not in defined_funcs:
                 executables.append(final_word)
-            if Path(final_word).name in cls._SHELL_NAMES:
-                for j in range(wi + 1, len(cmd_words)):
-                    a, _ = cmd_words[j]
-                    if a == "--":
-                        break
-                    if a == "-c" or (a.startswith("-") and not a.startswith("--") and "c" in a[1:]):
-                        if j + 1 < len(cmd_words):
-                            sub_script, sub_flag = cmd_words[j + 1]
-                            if is_dynamic(sub_flag):
-                                problems.append(f"{final_word} -c: dynamic script cannot be fingerprinted")
-                            else:
-                                e2, s2, p2 = cls._analyze_gate_command(sub_script, _depth + 1)
-                                executables.extend(e2)
-                                sourced.extend(s2)
-                                problems.extend(p2)
-                        break
+            final_base = Path(final_word).name
+            if final_base in cls._SHELL_NAMES:
+                s_src, s_exe, s_prob = cls._analyze_shell_invocation(final_word, cmd_words[wi + 1:], _depth)
+                executables.extend(s_exe)
+                sourced.extend(s_src)
+                problems.extend(s_prob)
+            else:
+                i_exe, i_prob = cls._analyze_interpreter_invocation(final_word, cmd_words[wi + 1:])
+                executables.extend(i_exe)
+                problems.extend(i_prob)
         return executables, sourced, problems
+
+    @classmethod
+    def _analyze_shell_invocation(
+        cls, shell_word: str, args: list[tuple[str, Any]], _depth: int
+    ) -> tuple[list[str], list[str], list[str]]:
+        """Analyze `sh`/`bash`/etc. invocations (`-c <cmd>` or `<script>` operand), failing closed on
+        stdin/interactive/login modes or ambiguous flags."""
+        sourced: list[str] = []
+        executables: list[str] = []
+        problems: list[str] = []
+        if Path(shell_word).name in ("csh", "tcsh"):
+            return [], [], [f"{shell_word}: non-POSIX shell cannot be statically fingerprinted"]
+
+        def is_dynamic(flag: Any) -> bool:
+            return bool(isinstance(flag, dict) and flag.get("dynamic"))
+
+        allowed_dash = set("abefhmnuvxBCHPcoO")
+        allowed_plus = set("abefhmnuvxBCHPoO")
+        j = 0
+        used_dash_c = False
+        while j < len(args):
+            a, a_flag = args[j]
+            if a in ("--", "-"):
+                j += 1
+                break
+            if not a.startswith(("-", "+")) or a == "+":
+                break
+            if is_dynamic(a_flag):
+                problems.append(f"{shell_word}: dynamic option {a!r} cannot be statically fingerprinted")
+                return sourced, executables, problems
+            if a.startswith("--"):
+                if a in ("--posix", "--norc", "--noprofile"):
+                    j += 1
+                    continue
+                problems.append(f"{shell_word}: option {a!r} cannot be statically fingerprinted")
+                return sourced, executables, problems
+            if a in ("-o", "+o", "-O", "+O"):
+                if j + 1 >= len(args) or is_dynamic(args[j + 1][1]):
+                    problems.append(f"{shell_word} {a}: missing or dynamic option name cannot be fingerprinted")
+                    return sourced, executables, problems
+                j += 2
+                continue
+            short = a[1:]
+            allowed = allowed_dash if a.startswith("-") else allowed_plus
+            if a.startswith("-") and any(ch_s in short for ch_s in ("l", "i", "s", "r")):
+                problems.append(f"{shell_word} {a}: interactive/login/stdin mode cannot be statically fingerprinted")
+                return sourced, executables, problems
+            if any(ch_s not in allowed for ch_s in short):
+                problems.append(f"{shell_word} {a}: unsupported option cannot be statically fingerprinted")
+                return sourced, executables, problems
+            if "o" in short or "O" in short:
+                if not (short.endswith(("o", "O")) and (short.count("o") + short.count("O") == 1) and "c" not in short):
+                    problems.append(f"{shell_word} {a}: ambiguous -o option cluster cannot be statically fingerprinted")
+                    return sourced, executables, problems
+                if j + 1 >= len(args) or is_dynamic(args[j + 1][1]):
+                    problems.append(f"{shell_word} {a}: missing or dynamic option name cannot be fingerprinted")
+                    return sourced, executables, problems
+                j += 2
+                continue
+            if a.startswith("-") and "c" in short:
+                used_dash_c = True
+                if j + 1 >= len(args):
+                    problems.append(f"{shell_word} -c: missing command string cannot be statically fingerprinted")
+                else:
+                    sub_script, sub_flag = args[j + 1]
+                    if is_dynamic(sub_flag):
+                        problems.append(f"{shell_word} -c: dynamic script cannot be fingerprinted")
+                    else:
+                        e2, s2, p2 = cls._analyze_gate_command(sub_script, _depth + 1)
+                        executables.extend(e2)
+                        sourced.extend(s2)
+                        problems.extend(p2)
+                break
+            j += 1
+
+        if not used_dash_c:
+            if j >= len(args):
+                problems.append(
+                    f"{shell_word}: shell invoked without -c or script operand cannot be statically fingerprinted"
+                )
+            else:
+                script_arg, script_flag = args[j]
+                if is_dynamic(script_flag):
+                    problems.append(f"{shell_word}: dynamic script operand {script_arg!r} cannot be fingerprinted")
+                elif "/" not in script_arg and not os.path.isabs(script_arg):
+                    problems.append(
+                        f"{shell_word}: script operand {script_arg!r} without '/' has shell-dependent lookup; use ./{script_arg} or an explicit path"
+                    )
+                else:
+                    sourced.append(script_arg)
+        return sourced, executables, problems
+
+    @classmethod
+    def _analyze_interpreter_invocation(
+        cls, exe_word: str, args: list[tuple[str, Any]]
+    ) -> tuple[list[str], list[str]]:
+        """Extract direct script file operands for non-shell interpreters (`python*`, `perl`, `ruby`, `node`, etc.)
+        so replacing an external script after `plan` invalidates the saved fingerprint."""
+        base = Path(exe_word).name
+
+        def is_dynamic(flag: Any) -> bool:
+            return bool(isinstance(flag, dict) and flag.get("dynamic"))
+
+        def norm_script(p: str) -> str:
+            return p if ("/" in p or os.path.isabs(p)) else f"./{p}"
+
+        if re.match(r"^(?:python|pypy)(?:\d+(?:\.\d+)*)?$", base):
+            j = 0
+            while j < len(args):
+                a, a_flag = args[j]
+                if a == "--":
+                    j += 1
+                    break
+                if not a.startswith("-") or a == "-":
+                    break
+                if is_dynamic(a_flag):
+                    return [], [f"{exe_word}: dynamic option {a!r} cannot be statically fingerprinted"]
+                if a in ("-V", "--version", "-h", "--help"):
+                    return [], []
+                if a in ("-W", "-X", "--check-hash-based-pycs"):
+                    if j + 1 >= len(args) or is_dynamic(args[j + 1][1]):
+                        return [], [f"{exe_word} {a}: missing or dynamic option value cannot be fingerprinted"]
+                    j += 2
+                    continue
+                if a.startswith(("-W", "-X", "--check-hash-based-pycs=")):
+                    j += 1
+                    continue
+                if a.startswith("--"):
+                    return [], [f"{exe_word}: option {a!r} cannot be statically fingerprinted"]
+                short = a[1:]
+                if "i" in short:
+                    return [], [f"{exe_word} {a}: interactive mode cannot be statically fingerprinted"]
+                if short.endswith(("c", "m")) and all(c in "bBdEIOqsSuvx" for c in short[:-1]):
+                    if j + 1 >= len(args) or is_dynamic(args[j + 1][1]):
+                        return [], [f"{exe_word} {a}: missing or dynamic target cannot be statically fingerprinted"]
+                    return [], []
+                if all(c in "bBdEIOqsSuvxP" for c in short):
+                    j += 1
+                    continue
+                return [], [f"{exe_word} {a}: unsupported option cannot be statically fingerprinted"]
+            if j >= len(args):
+                return [], [f"{exe_word}: interpreter invoked without script, -c, or -m cannot be fingerprinted"]
+            script_arg, script_flag = args[j]
+            if script_arg == "-" or is_dynamic(script_flag):
+                return [], [f"{exe_word}: stdin or dynamic script operand cannot be statically fingerprinted"]
+            return [norm_script(script_arg)], []
+
+        if base in ("perl", "ruby", "node", "nodejs", "deno", "bun", "php", "lua", "Rscript"):
+            if not args:
+                return [], [f"{exe_word}: interpreter invoked without script operand cannot be fingerprinted"]
+            a0, f0 = args[0]
+            if a0 in ("-v", "-V", "--version", "-h", "--help"):
+                return [], []
+            if a0 == "-e":
+                if len(args) < 2 or is_dynamic(args[1][1]):
+                    return [], [f"{exe_word} -e: missing or dynamic inline script cannot be fingerprinted"]
+                return [], []
+            if a0 == "--":
+                if len(args) < 2 or args[1][0] == "-" or is_dynamic(args[1][1]):
+                    return [], [f"{exe_word}: missing or dynamic script operand cannot be fingerprinted"]
+                return [norm_script(args[1][0])], []
+            if a0.startswith("-"):
+                return [], [f"{exe_word}: option {a0!r} cannot be statically fingerprinted"]
+            if is_dynamic(f0):
+                return [], [f"{exe_word}: dynamic script operand {a0!r} cannot be fingerprinted"]
+            return [norm_script(a0)], []
+
+        if base in ("awk", "gawk", "mawk", "nawk", "sed"):
+            files: list[str] = []
+            j = 0
+            while j < len(args):
+                a, a_flag = args[j]
+                if a == "--":
+                    break
+                if not a.startswith("-") or a == "-":
+                    break
+                if is_dynamic(a_flag):
+                    return [], [f"{exe_word}: dynamic option {a!r} cannot be statically fingerprinted"]
+                if a in ("-f", "--file"):
+                    if j + 1 >= len(args) or is_dynamic(args[j + 1][1]):
+                        return [], [f"{exe_word} {a}: missing or dynamic script file cannot be fingerprinted"]
+                    files.append(norm_script(args[j + 1][0]))
+                    j += 2
+                    continue
+                if a.startswith("-f") and len(a) > 2:
+                    files.append(norm_script(a[2:]))
+                    j += 1
+                    continue
+                if a.startswith("--file="):
+                    files.append(norm_script(a.split("=", 1)[1]))
+                    j += 1
+                    continue
+                j += 1
+            return files, []
+
+        return [], []
 
     @classmethod
     def _extract_gate_executables(cls, gate_cmd: str, _depth: int = 0) -> list[str]:
