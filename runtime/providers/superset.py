@@ -30,6 +30,7 @@ Source-verified against superset-sh/superset `packages/cli/src/commands/**` (all
 """
 from __future__ import annotations
 
+import json
 import uuid
 from pathlib import Path
 from typing import Any, Callable
@@ -168,6 +169,24 @@ class SupersetProvider(RuntimeProvider):
     def worktree_rm(self, *, selector: str = "", force: bool = False, **kwargs: Any) -> dict[str, Any]:
         if not selector:
             raise ProviderError("invalid_selector", "superset worktree rm requires an explicit workspace id")
+        bound = self.state._worker_bound_run()
+        if bound:
+            with self.state._connect() as conn:
+                rows = conn.execute(
+                    "SELECT worktree, launch_effective FROM dispatches WHERE backend = ? AND run_id = ?",
+                    (self.name, bound),
+                ).fetchall()
+            owned = False
+            for r in rows:
+                try:
+                    eff = json.loads(r["launch_effective"] or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    eff = {}
+                if selector in (r["worktree"], eff.get("workspaceId") if isinstance(eff, dict) else None):
+                    owned = True
+                    break
+            if not owned:
+                raise ProviderError("cross_run_access", f"superset workspace {selector!r} is not owned by run {bound!r}")
         # `workspaces delete` (= archive) removes the folder with any uncommitted changes and has
         # no --force/--keep-dirty switch: every safety check happens here, before the call.
         shown = self.worktree_show(selector=selector)["worktree"]

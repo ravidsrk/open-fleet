@@ -878,6 +878,16 @@ class GateRunsIsolated(QueueCase):
             "bash -c 'x=\"a[\\$(/opt/tools/probe)]\"; [[ $x -eq 0 ]]'",
             "/bin/true\r",
             "gate-check\r",
+            "ruby3.1 -e 'exit 0'",
+            "perl5.38 -e '1'",
+            "php8.2 -r 'exit(0);'",
+            "lua5.4 -e 'os.exit(0)'",
+            "luajit-2.1 -e 'os.exit(0)'",
+            "node20 inspect check.js",
+            "gsed 's/a/b/'",
+            "gawk-5.1 '{print}'",
+            "bash5 -i ./gate.sh",
+            "tcsh ./gate.csh",
         ):
             _, _, bad_probs = mq_mod.MergeQueue._analyze_gate_command(unsafe_form)
             self.assertTrue(bad_probs, f"expected fail-closed problem on {unsafe_form!r}")
@@ -887,6 +897,25 @@ class GateRunsIsolated(QueueCase):
         self.assertEqual(rc_p, 0, out_p)
         self.assertEqual(out_p["planned"][0]["result"], "tested", out_p)
         probe.write_text("#!/bin/sh\necho 1\n", encoding="utf-8")
+        rc_m, out_m = self.w.cli("merge", "--token", tok, "--require-gate", gate_cmd)
+        self.assertNotEqual(rc_m, 0, out_m)
+        self.assertEqual(out_m.get("code"), "gate_not_run", out_m)
+
+    def test_versioned_interpreter_external_script_replacement_invalidates_plan(self):
+        tools_dir = self.w.tmp / "ver-interp"
+        tools_dir.mkdir(parents=True, exist_ok=True)
+        ruby31 = tools_dir / "ruby3.1"
+        ruby31.write_text("#!/bin/sh\nexec /bin/sh \"$1\"\n", encoding="utf-8")
+        ruby31.chmod(0o755)
+        ext_rb = tools_dir / "check.rb"
+        ext_rb.write_text("exit 0\n", encoding="utf-8")
+        gate_cmd = f"{ruby31} {ext_rb}"
+        tok = self.acquire("c-ver-interp")
+        self.board(tok, self.w.unit("ver-interp-unit"))
+        rc_p, out_p = self.w.cli("plan", "--token", tok, "--gate-cmd", gate_cmd)
+        self.assertEqual(rc_p, 0, out_p)
+        self.assertEqual(out_p["planned"][0]["result"], "tested", out_p)
+        ext_rb.write_text("exit 1\n", encoding="utf-8")
         rc_m, out_m = self.w.cli("merge", "--token", tok, "--require-gate", gate_cmd)
         self.assertNotEqual(rc_m, 0, out_m)
         self.assertEqual(out_m.get("code"), "gate_not_run", out_m)

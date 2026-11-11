@@ -1064,6 +1064,18 @@ class _Authority:
         return not bool(_extract_diff(raw.decode("utf-8", "replace")))
 
     _SHELL_NAMES = frozenset({"sh", "bash", "dash", "zsh", "ksh", "ash", "csh", "tcsh"})
+    _SHELL_RE = re.compile(
+        r"(?:sh|bash|dash|zsh|ksh|mksh|pdksh|yash|posh|ash|csh|tcsh)(?:[-.]?\d+(?:\.\d+)*)?"
+    )
+    _MUX_RE = re.compile(r"(?:g?sed|gnused|[gmn]?awk|deno|bun)(?:[-.]?\d+(?:\.\d+)*)?")
+
+    @classmethod
+    def _is_shell_name(cls, name):
+        return name in cls._SHELL_NAMES or bool(cls._SHELL_RE.fullmatch(name))
+
+    @classmethod
+    def _is_mux_exe(cls, name):
+        return name in cls._NC_FORBID_MUX_EXES or bool(cls._MUX_RE.fullmatch(name))
     _SAFE_SHELL_O_OPTIONS = frozenset({
         "allexport", "braceexpand", "errexit", "errtrace", "functrace",
         "hashall", "histexpand", "monitor", "noclobber", "noexec",
@@ -1117,7 +1129,7 @@ class _Authority:
     @classmethod
     def _parse_shell_script_operand(cls, tok, rest):
         """Parse shell argv tail `rest` and return `(script_op, err)` enforcing staged repo-relative path."""
-        if Path(tok).name in ("csh", "tcsh"):
+        if re.fullmatch(r"(?:csh|tcsh)(?:[-.]?\d+(?:\.\d+)*)?", Path(tok).name):
             return None, f"proof executable {tok!r} invokes non-POSIX shell; fail-closed (#750 C19)"
         si = 0
         while si < len(rest):
@@ -1181,7 +1193,7 @@ class _Authority:
         staged = []
         program = name
         scan_idx = 0
-        if re.fullmatch(r"(?:python(?:[0-9.]+)?|pypy[0-9]*)", name):
+        if re.fullmatch(r"(?:python|pypy)(?:[-.]?\d+(?:\.\d+)*)?", name):
             pi = 0
             while pi < len(rest) and rest[pi] in {
                 "-B", "-E", "-I", "-O", "-OO", "-s", "-S", "-u", "-q",
@@ -1224,7 +1236,7 @@ class _Authority:
                     return None, err
                 staged.append(rest[pi])
                 scan_idx = pi + 1
-        elif re.fullmatch(r"(?:node(?:js)?|ruby|perl|php|lua|Rscript)(?:[0-9.]+)?", name):
+        elif re.fullmatch(r"(?:node(?:js)?|ruby|perl|php|lua(?:jit)?|Rscript)(?:[-.]?\d+(?:\.\d+)*)?", name):
             pi = 1 if rest[:1] == ["--"] else 0
             if pi >= len(rest) or rest[pi].startswith("-"):
                 bad_opt = rest[pi] if pi < len(rest) else ""
@@ -1449,7 +1461,7 @@ class _Authority:
             return None
         target_idx, target_tok = indexed[-1]
         tail = argv[target_idx + 1:]
-        if not re.fullmatch(r"(?:python(?:[0-9.]+)?|pypy[0-9]*)", Path(target_tok).name):
+        if not re.fullmatch(r"(?:python|pypy)(?:[-.]?\d+(?:\.\d+)*)?", Path(target_tok).name):
             return None
         pi = 0
         while pi < len(tail) and tail[pi] in {"-B", "-E", "-I", "-O", "-OO", "-s", "-S", "-u", "-q"}:
@@ -1467,7 +1479,7 @@ class _Authority:
             return []
         target_idx, target_tok = indexed[-1]
         tail = argv[target_idx + 1:]
-        if Path(target_tok).name in cls._SHELL_NAMES:
+        if cls._is_shell_name(Path(target_tok).name):
             sh_op, s_err = cls._parse_shell_script_operand(target_tok, tail)
             return [] if (s_err or sh_op is None) else [sh_op]
         ops, t_err = cls._parse_target_operands(target_tok, tail)
@@ -1515,7 +1527,7 @@ class _Authority:
         if err or not indexed:
             return None
         target_idx, target_tok = indexed[-1]
-        if Path(target_tok).name not in cls._SHELL_NAMES:
+        if not cls._is_shell_name(Path(target_tok).name):
             return None
         script_op, s_err = cls._parse_shell_script_operand(target_tok, argv[target_idx + 1:])
         return None if s_err else script_op
@@ -1528,12 +1540,12 @@ class _Authority:
         while idx < len(argv):
             tok = argv[idx]
             name = Path(tok).name
-            if name in cls._NC_FORBID_MUX_EXES:
+            if cls._is_mux_exe(name):
                 return None, (f"proof executable {tok!r} multiplexes inner commands whose targets "
                               "cannot be statically pinned; fail-closed (#750 C19)")
             indexed.append((idx, tok))
             rest = argv[idx + 1:]
-            if name in cls._SHELL_NAMES:
+            if cls._is_shell_name(name):
                 _, sh_err = cls._parse_shell_script_operand(tok, rest)
                 if sh_err:
                     return None, sh_err
@@ -2315,8 +2327,13 @@ def _command_oracle_paths(command):
             return None
         inputs.append(argv[0])
     program = Path(argv[0]).name
-    python = re.fullmatch(r"(?:python(?:[0-9.]+)?|pypy[0-9]*)", program)
-    interpreter = python or program in {"sh", "bash", "zsh", "node", "ruby", "perl"}
+    python = re.fullmatch(r"(?:python|pypy)(?:[-.]?\d+(?:\.\d+)*)?", program)
+    interpreter = python or bool(
+        re.fullmatch(
+            r"(?:sh|bash|dash|zsh|ksh|mksh|pdksh|yash|posh|ash|node(?:js)?|ruby|perl|php|lua(?:jit)?|Rscript)(?:[-.]?\d+(?:\.\d+)*)?",
+            program,
+        )
+    )
     module = None
     # Where the sweep below starts: the option list it reads belongs to the program, and for an
     # interpreter that is the SCRIPT, whose arguments begin after the script name.
@@ -2354,6 +2371,8 @@ def _command_oracle_paths(command):
                 i += 1
             if i >= len(argv) or argv[i].startswith("-"):
                 return None  # inline programs, preload options and stdin are not parsed
+            if program.startswith("node") and argv[i] in ("inspect", "debug"):
+                return None
             inputs.append(argv[i])
             scan_from = i + 1
     elif program in {"make", "gmake"}:

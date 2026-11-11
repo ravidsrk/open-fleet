@@ -326,8 +326,16 @@ class T3CodeProvider(RuntimeProvider):
         retry_request: str | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        worker_run = self.state._worker_bound_run()
+        resolved_run = self.state._resolve_caller_run(run, default_run=None)
         payload_sha = request_payload_sha256(
-            {"task_id": task_id, "to_handle": to_handle, "run": run, "sender": sender, "prompt": prompt}
+            {
+                "task_id": task_id,
+                "to_handle": to_handle,
+                "run": resolved_run if worker_run else run,
+                "sender": sender,
+                "prompt": prompt,
+            }
         )
         cached = self.state.get_or_record_request(retry_request, "dispatch", payload_sha)
         if cached:
@@ -344,7 +352,17 @@ class T3CodeProvider(RuntimeProvider):
                 ).fetchone()
             if inj_row:
                 thread_id = self._thread_id_of_row(dict(inj_row))
-            resolved_run = self.state._resolve_caller_run(run, default_run=None)
+            if worker_run:
+                with self.state._connect() as conn:
+                    same_run = conn.execute(
+                        "SELECT 1 FROM dispatches WHERE backend = ? AND (dispatch_id = ? OR session_id = ? OR terminal_handle = ?) AND run_id = ? LIMIT 1",
+                        (self.name, thread_id, thread_id, f"t3:{thread_id}", worker_run),
+                    ).fetchone()
+                if same_run is None:
+                    raise ProviderError(
+                        "cross_run_access",
+                        f"launched worker in run {worker_run!r} cannot inject into thread {thread_id!r} outside its run",
+                    )
             message = self.resolve_task_prompt(task_id, prompt)
             claimed, eff_run = claim_local_task(self.state, task_id, resolved_run)
             target_run = eff_run or resolved_run or "default"

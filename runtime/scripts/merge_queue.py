@@ -1390,6 +1390,13 @@ class MergeQueue:
     GATE_ENV_FORBID_SUFFIX = ("_TOKEN", "_SECRET", "_KEY", "_PASSWORD", "_CREDENTIAL", "_CREDENTIALS")
     GATE_ENV_ISOLATED_KEYS = ("HOME", "TMPDIR", "TMP", "TEMP", "XDG_CONFIG_HOME", "GH_CONFIG_DIR")
     _SHELL_NAMES = frozenset({"sh", "bash", "dash", "zsh", "ksh", "ash", "csh", "tcsh"})
+    _SHELL_RE = re.compile(
+        r"(?:sh|bash|dash|zsh|ksh|mksh|pdksh|yash|posh|ash|csh|tcsh)(?:[-.]?\d+(?:\.\d+)*)?"
+    )
+
+    @classmethod
+    def _is_shell_name(cls, name: str) -> bool:
+        return name in cls._SHELL_NAMES or bool(cls._SHELL_RE.fullmatch(name))
     _SHELL_BUILTINS = frozenset({
         "true", "false", "test", "[", "echo", "printf", "exit", "cd", "pwd",
         "export", "set", "unset", "shift", "return", "break", "continue", ":",
@@ -2770,7 +2777,7 @@ class MergeQueue:
                 for fa, ff in cmd_words[wi + 1:]
             ):
                 problems.append("find -exec/-ok or dynamic predicate dispatches commands that cannot be statically fingerprinted")
-            elif final_base in cls._SHELL_NAMES:
+            elif cls._is_shell_name(final_base):
                 s_src, s_exe, s_prob = cls._analyze_shell_invocation(final_word, cmd_words[wi + 1:], _depth)
                 executables.extend(s_exe)
                 sourced.extend(s_src)
@@ -2796,7 +2803,7 @@ class MergeQueue:
         sourced: list[str] = []
         executables: list[str] = []
         problems: list[str] = []
-        if Path(shell_word).name in ("csh", "tcsh"):
+        if re.fullmatch(r"(?:csh|tcsh)(?:[-.]?\d+(?:\.\d+)*)?", Path(shell_word).name):
             return [], [], [f"{shell_word}: non-POSIX shell cannot be statically fingerprinted"]
 
         def is_dynamic(flag: Any) -> bool:
@@ -2899,7 +2906,7 @@ class MergeQueue:
         def norm_script(p: str) -> str:
             return p if ("/" in p or os.path.isabs(p)) else f"./{p}"
 
-        if re.match(r"^(?:python|pypy)(?:\d+(?:\.\d+)*)?$", base):
+        if re.fullmatch(r"(?:python|pypy)(?:[-.]?\d+(?:\.\d+)*)?", base):
             j = 0
             saw_isolated = False
             while j < len(args):
@@ -2990,7 +2997,7 @@ class MergeQueue:
                 return [], [f"{exe_word}: stdin or dynamic script operand cannot be statically fingerprinted"]
             return [norm_script(script_arg)], []
 
-        if base in ("perl", "ruby", "node", "nodejs", "php", "lua", "Rscript"):
+        if re.fullmatch(r"(?:perl|ruby|node(?:js)?|php|lua(?:jit)?|Rscript)(?:[-.]?\d+(?:\.\d+)*)?", base):
             if not args:
                 return [], [f"{exe_word}: interpreter invoked without script operand cannot be fingerprinted"]
             a0, f0 = args[0]
@@ -3002,13 +3009,13 @@ class MergeQueue:
                 return [norm_script(args[1][0])], []
             if a0.startswith("-"):
                 return [], [f"{exe_word}: inline code or option {a0!r} cannot statically fingerprint external targets"]
-            if base in ("node", "nodejs") and a0 in ("inspect", "debug"):
+            if re.fullmatch(r"node(?:js)?(?:[-.]?\d+(?:\.\d+)*)?", base) and a0 in ("inspect", "debug"):
                 return [], [f"{exe_word} {a0}: subcommand cannot statically fingerprint external targets"]
             if is_dynamic(f0):
                 return [], [f"{exe_word}: dynamic script operand {a0!r} cannot be fingerprinted"]
             return [norm_script(a0)], []
 
-        if base in ("deno", "bun"):
+        if re.fullmatch(r"(?:deno|bun)(?:[-.]?\d+(?:\.\d+)*)?", base):
             if not args:
                 return [], [f"{exe_word}: interpreter invoked without script operand cannot be fingerprinted"]
             a0, f0 = args[0]
@@ -3016,10 +3023,10 @@ class MergeQueue:
                 return [], []
             if a0 == "run" and len(args) >= 2 and not args[1][0].startswith("-") and not is_dynamic(args[1][1]):
                 s_target = args[1][0]
-                if base == "deno" or s_target.endswith((".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx")):
+                if base.startswith("deno") or s_target.endswith((".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx")):
                     return [norm_script(s_target)], []
             if (
-                base == "bun"
+                base.startswith("bun")
                 and not a0.startswith("-")
                 and not is_dynamic(f0)
                 and a0.endswith((".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"))
@@ -3027,7 +3034,7 @@ class MergeQueue:
                 return [norm_script(a0)], []
             return [], [f"{exe_word}: subcommand, task, or option {a0!r} cannot statically fingerprint external targets"]
 
-        if base == "sed":
+        if re.fullmatch(r"(?:g?sed|gnused)(?:[-.]?\d+(?:\.\d+)*)?", base):
             files: list[str] = []
             j = 0
             while j < len(args):
@@ -3114,7 +3121,7 @@ class MergeQueue:
                 ]
             return files, []
 
-        if base in ("awk", "gawk", "mawk", "nawk"):
+        if re.fullmatch(r"(?:[gmn]?awk)(?:[-.]?\d+(?:\.\d+)*)?", base):
             awk_files: list[str] = []
             j = 0
             while j < len(args):

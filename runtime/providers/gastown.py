@@ -516,7 +516,28 @@ class GastownProvider(RuntimeProvider):
     ) -> dict[str, Any]:
         eff_body = payload if payload is not None else (kwargs.get("body") if kwargs.get("body") is not None else subject)
 
-        def _relay(_run_id: str) -> dict[str, Any]:
+        def _relay(eff_run: str) -> dict[str, Any]:
+            if self.state._worker_bound_run() and to and to not in ("mayor", "coordinator"):
+                with self.state._connect() as conn:
+                    rows = conn.execute(
+                        "SELECT dispatch_id, terminal_handle, launch_effective FROM dispatches WHERE backend = ? AND run_id = ?",
+                        (self.name, eff_run),
+                    ).fetchall()
+                matched = False
+                for r in rows:
+                    try:
+                        eff = json.loads(r["launch_effective"] or "{}")
+                    except (json.JSONDecodeError, TypeError):
+                        eff = {}
+                    addr = str(eff.get("address") or "") if isinstance(eff, dict) else ""
+                    if to in (r["dispatch_id"], r["terminal_handle"], addr, f"polecat:{addr}"):
+                        matched = True
+                        break
+                if not matched:
+                    raise ProviderError(
+                        "cross_run_access",
+                        f"recipient {to!r} is not owned by run {eff_run!r}",
+                    )
             recipient = to or "mayor"
             gt_type = msg_type if msg_type in GT_MAIL_TYPES else "notification"
             gt_subject = subject if msg_type in GT_MAIL_TYPES else f"[{msg_type}] {subject}"
@@ -554,13 +575,33 @@ class GastownProvider(RuntimeProvider):
         retry_request: str | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        eff_run = self.state._resolve_caller_run(run, default_run="default") or "default"
+        bound = self.state._worker_bound_run()
+        if bound:
+            own_did = env_get("OPEN_FLEET_DISPATCH_ID", "ORCA_DISPATCH_ID", self.state.env, "")
+            with self.state._connect() as conn:
+                own_row = conn.execute(
+                    "SELECT launch_effective FROM dispatches WHERE backend = ? AND dispatch_id = ? AND run_id = ? LIMIT 1",
+                    (self.name, own_did, bound),
+                ).fetchone()
+            eff = json.loads(own_row["launch_effective"] or "{}") if own_row else {}
+            eff_terminal = str(eff.get("address") or "") if isinstance(eff, dict) else ""
+            if not eff_terminal:
+                raise ProviderError(
+                    "cross_run_access",
+                    f"launched worker {own_did!r} has no {self.name} mailbox in run {bound!r}",
+                )
+        else:
+            with self.state._connect() as conn:
+                self.state._mailbox_scope(conn, eff_run, self.state._resolve_terminal(terminal))
+            eff_terminal = terminal
         signal: Any = None
         if wait:
             secs = max(1, int((timeout_ms or 60000) / 1000))
             signal = self._run_json(["gt", "mol", "step", "await-signal", "--json", "--timeout", f"{secs}s"], timeout=secs + 30)
         inbox_argv = ["gt", "mail", "inbox", "--json"] + (["--unread"] if mode == "unread" else ["--all"])
-        if terminal:
-            inbox_argv += ["--address", str(terminal)]
+        if eff_terminal:
+            inbox_argv += ["--address", str(eff_terminal)]
         upstream = parse_json_strict(self._run(inbox_argv), self.name)
         local = self.state.check_messages(
             terminal=terminal,
@@ -593,6 +634,8 @@ class GastownProvider(RuntimeProvider):
         except ProviderError as exc:
             if exc.code != "message_not_found":
                 raise
+        if self.state._worker_bound_run():
+            raise ProviderError("cross_run_access", "launched worker cannot reply to unverified upstream mail id")
         # Not a local message id: it is a Gastown mail id from `upstreamInbox`.
         out = self._run(["gt", "mail", "reply", str(msg_id), "-m", str(body)])
         return {"replied": True, "id": msg_id, "scope": "upstream", "upstream": {"output": out}}

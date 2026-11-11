@@ -1820,6 +1820,26 @@ class TestPosixAdversarialRemediation750(PosixRealProcessBase):
             self.prov.dispatch_inject(task_id=t2, to_handle=ws["agentTerminalHandle"], run="run-2")
         self.assertEqual(ctx.exception.code, "cross_run_access")
 
+        unreg_term = self.prov.terminal_create(title="unsupervised")["terminal"]["handle"]
+        t1_next = self.prov.task_create(spec="in run 1 next", run="run-1")["task"]["id"]
+        bound_prov = self.providers.get_provider(
+            "posix",
+            env={**self.env, "OPEN_FLEET_DISPATCH_ID": ws["dispatchId"]},
+        )
+        for bad_op in (
+            lambda: bound_prov.terminal_create(title="escaped"),
+            lambda: bound_prov.terminal_read(unreg_term),
+            lambda: bound_prov.terminal_send(unreg_term, "hi"),
+            lambda: bound_prov.dispatch_inject(task_id=t1_next, to_handle=unreg_term),
+        ):
+            with self.assertRaises(self.posix.ProviderError) as bctx:
+                bad_op()
+            self.assertEqual(bctx.exception.code, "cross_run_access")
+        self.assertEqual(
+            [t["handle"] for t in bound_prov.terminal_list()["terminals"]],
+            [ws["agentTerminalHandle"]],
+        )
+
     def test_c32_send_body_flag_and_fence_retry_request_idempotency(self):
         from unittest import mock
 

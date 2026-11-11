@@ -1576,6 +1576,18 @@ class PosixWorktreeProvider(RuntimeProvider):
             raise ProviderError("invalid_argument", "worktree rm needs a worktree selector")
         shown = self.worktree_show(selector)["worktree"]
         wt_path = Path(shown["path"]).resolve()
+        worker_run = self.state._worker_bound_run()
+        if worker_run:
+            with self.state._connect() as conn:
+                owned_wt = conn.execute(
+                    "SELECT 1 FROM dispatches WHERE worktree = ? AND run_id = ? LIMIT 1",
+                    (str(wt_path), worker_run),
+                ).fetchone()
+            if owned_wt is None:
+                raise ProviderError(
+                    "cross_run_access",
+                    f"launched worker in run {worker_run!r} cannot remove worktree {wt_path!r} outside its run",
+                )
         repo_root = self.repo_root.resolve()
         common = _line(_git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=repo_root).stdout)
         protected = {repo_root, Path.home().resolve(), Path("/").resolve()}
@@ -3598,6 +3610,12 @@ if {repr(self.backend)} == "cmux":
         shell: str | None = None,
         focus: bool = False,
     ) -> dict[str, Any]:
+        worker_run = self.state._worker_bound_run()
+        if worker_run:
+            raise ProviderError(
+                "cross_run_access",
+                f"launched worker in run {worker_run!r} cannot create unsupervised terminals",
+            )
         wt_path = self._resolve_worktree_path(worktree or "current", title)
         Path(wt_path).mkdir(parents=True, exist_ok=True)
         handle = f"term_{uuid.uuid4().hex[:8]}"
@@ -3660,13 +3678,26 @@ if {repr(self.backend)} == "cmux":
                 if bound
                 else None
             )
-        if not r:
-            raise ProviderError("terminal_not_found", f"terminal {terminal!r} not found")
+            owned = (
+                conn.execute(
+                    "SELECT 1 FROM dispatches WHERE terminal_handle = ? AND run_id = ? LIMIT 1",
+                    (terminal, bound),
+                ).fetchone()
+                if bound
+                else True
+            )
         if foreign:
             raise ProviderError(
                 "cross_run_access",
                 f"terminal {terminal!r} is bound to run {foreign['run_id']!r}, not {bound!r}",
             )
+        if bound and not owned:
+            raise ProviderError(
+                "cross_run_access",
+                f"launched worker in run {bound!r} cannot access unregistered terminal {terminal!r}",
+            )
+        if not r:
+            raise ProviderError("terminal_not_found", f"terminal {terminal!r} not found")
         return r
 
     def _screen(self, r: Any) -> str | None:
@@ -3795,6 +3826,17 @@ if {repr(self.backend)} == "cmux":
                 if bound
                 else set()
             )
+            owned_handles = (
+                {
+                    str(orow["terminal_handle"])
+                    for orow in conn.execute(
+                        "SELECT DISTINCT terminal_handle FROM dispatches WHERE terminal_handle != '' AND run_id = ?",
+                        (bound,),
+                    ).fetchall()
+                }
+                if bound
+                else None
+            )
         terms = [
             {
                 "handle": r["handle"],
@@ -3803,7 +3845,9 @@ if {repr(self.backend)} == "cmux":
                 "state": r["state"],
             }
             for r in rows
-            if r["handle"] not in foreign_handles and (not worktree or r["worktree"] == worktree)
+            if r["handle"] not in foreign_handles
+            and (owned_handles is None or r["handle"] in owned_handles)
+            and (not worktree or r["worktree"] == worktree)
         ]
         truncated = False
         if limit and len(terms) > int(limit):
@@ -3935,6 +3979,7 @@ if {repr(self.backend)} == "cmux":
         run: str | None = None,
         sender: str | None = None,
     ) -> dict[str, Any]:
+        worker_run = self.state._worker_bound_run()
         eff_run = self.state._resolve_caller_run(run, default_run=None)
         req_id = f"req_{uuid.uuid4().hex[:10]}"
         dispatch_id = f"disp_{uuid.uuid4().hex[:10]}"
@@ -3966,6 +4011,17 @@ if {repr(self.backend)} == "cmux":
                     "cross_run_access",
                     f"terminal {to_handle!r} is bound to run {bound_disp['run_id']!r}, not {effective_run!r}",
                 )
+            if worker_run:
+                owned_disp = conn.execute(
+                    "SELECT 1 FROM dispatches WHERE terminal_handle = ? AND run_id = ? LIMIT 1",
+                    (to_handle, effective_run),
+                ).fetchone()
+                if owned_disp is None:
+                    conn.execute("ROLLBACK")
+                    raise ProviderError(
+                        "cross_run_access",
+                        f"launched worker in run {worker_run!r} cannot inject into unregistered terminal {to_handle!r}",
+                    )
             cur = conn.execute(
                 "UPDATE tasks SET status = 'dispatched', updated_at = ? WHERE id = ? AND status = 'ready'",
                 (now, task_id),

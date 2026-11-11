@@ -1116,24 +1116,79 @@ class TestExternalAdversarialRemediation750(ProviderTestBase):
             hooks=lambda w, a, p: {},
         ).worker_start(task_id=t_foreign_disp, worktree=str(wt_t3), agent="codex", profile="rw", run="run-other")
 
+        ao_calls: list[dict[str, object]] = []
+        bound_ao = ComposioAOProvider(
+            state=bound_state,
+            runner=lambda call, **_kw: (ao_calls.append(dict(call)) or {"ok": True}),
+            env={"OPEN_FLEET_AO_PROJECT": "proj-1", "OPEN_FLEET_DISPATCH_ID": "thr-1"},
+        )
+        emdash_calls: list[tuple[str, object]] = []
+        bound_emdash = EmdashProvider(
+            state=bound_state,
+            caller=lambda method, params=None: (emdash_calls.append((method, params)) or {"ok": True}),
+            snapshotter=lambda topic: (emdash_calls.append(("snap", topic)) or {"data": {"text": "secret"}}),
+            env={"OPEN_FLEET_DISPATCH_ID": "thr-1"},
+        )
+        ov_calls: list[list[str]] = []
+        bound_ov = OverstoryProvider(
+            state=bound_state,
+            runner=lambda argv, **_kw: (ov_calls.append(list(argv)) or {"success": True, "messages": []}),
+            env={"OPEN_FLEET_DISPATCH_ID": "thr-1"},
+        )
+        gt_calls: list[list[str]] = []
+        bound_gt = GastownProvider(
+            state=bound_state,
+            runner=lambda argv, **_kw: (gt_calls.append(list(argv)) or "[]"),
+            env={"OPEN_FLEET_GASTOWN_RIG": "rig1", "OPEN_FLEET_DISPATCH_ID": "thr-1"},
+        )
+        sup_calls: list[list[str]] = []
+        bound_sup = MODS["superset"].SupersetProvider(
+            state=bound_state,
+            runner=lambda argv, **_kw: (sup_calls.append(list(argv)) or "{}"),
+            env={"OPEN_FLEET_DISPATCH_ID": "thr-1"},
+        )
+
         for bad_call in (
             lambda: bound_wt.worker_start(task_id=t_foreign, agent="claude", profile="rw", prompt="go"),
             lambda: bound_wt.worker_start(task_id=t_own_ready, agent="claude", profile="rw", prompt="go", run="run-other"),
             lambda: bound_wt.worker_start(task_id=t_foreign, agent="claude", profile="rw"),
+            lambda: bound_wt.worktree_rm(selector="unregistered-branch"),
+            lambda: bound_sup.worktree_rm(selector="ws-unregistered"),
             lambda: bound_t3.dispatch_inject(task_id=t_foreign, to_handle="t3:thr-1", prompt="go"),
             lambda: bound_t3.dispatch_inject(task_id=t_own_ready, to_handle="t3:thr-1", prompt="go", run="run-other"),
+            lambda: bound_t3.dispatch_inject(task_id="", to_handle="t3:unregistered-thread", prompt="go"),
+            lambda: bound_t3.dispatch_inject(task_id=t_own_ready, to_handle="t3:unregistered-thread", prompt="go"),
             lambda: bound_t3.worker_list(run="run-other"),
             lambda: bound_t3.worker_list(include_remote=True),
             lambda: bound_t3.worker_show(dispatch_id="thr-other"),
             lambda: bound_t3.worker_read(dispatch_id="thr-other"),
             lambda: bound_t3.worker_fence(verb="stop", dispatch_id="thr-other", reason="cross-run"),
             lambda: bound_wt.worker_list(run="run-other"),
+            lambda: bound_ao.terminal_send(terminal="ao:unregistered-session", text="hi"),
+            lambda: bound_emdash.terminal_send(terminal="emdash:unregistered-conv", text="hi"),
+            lambda: bound_emdash.terminal_read(terminal="emdash:unregistered-conv"),
+            lambda: bound_ov.send_message(subject="hi", to="unregistered-agent"),
+            lambda: bound_ov.check_messages(),
+            lambda: bound_ov.reply_message(msg_id="upstream-only-id", body="no"),
+            lambda: bound_ov.worktree_rm(selector="unregistered-agent"),
+            lambda: bound_gt.send_message(subject="hi", to="rig1/unregistered"),
+            lambda: bound_gt.check_messages(),
+            lambda: bound_gt.reply_message(msg_id="upstream-only-id", body="no"),
         ):
             with self.assertRaises(ProviderError) as ctx_bound:
                 bad_call()
             self.assertEqual(ctx_bound.exception.code, "cross_run_access")
         self.assertEqual(wt_calls, [])
         self.assertEqual(t3_calls, [])
+        self.assertEqual(ao_calls, [])
+        self.assertEqual(emdash_calls, [])
+        self.assertEqual(ov_calls, [])
+        self.assertEqual(gt_calls, [])
+        self.assertEqual(sup_calls, [])
+        self.assertEqual(
+            {t["id"]: t["status"] for t in self.state.task_list(run="run-t3")["tasks"]}[t_own_ready],
+            "ready",
+        )
         # Implicit `worker_list()` from a bound worker scopes strictly to its bound run (`run-t3`), omitting `thr-other`:
         bound_list_t3 = T3CodeProvider(
             state=bound_state,

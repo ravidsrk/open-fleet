@@ -33,6 +33,7 @@ from .base import (
     ProviderError,
     RuntimeProvider,
     check_monotonic_profile,
+    env_get,
     fence_state,
     normalize_read,
     parse_json_strict,
@@ -297,7 +298,18 @@ class OverstoryProvider(RuntimeProvider):
     ) -> dict[str, Any]:
         eff_body = payload if payload is not None else (kwargs.get("body") if kwargs.get("body") is not None else subject)
 
-        def _relay(_run_id: str) -> Any:
+        def _relay(eff_run: str) -> Any:
+            if self.state._worker_bound_run() and to and to not in ("orchestrator", "coordinator"):
+                with self.state._connect() as conn:
+                    owned = conn.execute(
+                        "SELECT 1 FROM dispatches WHERE backend = ? AND (dispatch_id = ? OR session_id = ? OR terminal_handle = ?) AND run_id = ? LIMIT 1",
+                        (self.name, to, to, to, eff_run),
+                    ).fetchone()
+                if owned is None:
+                    raise ProviderError(
+                        "cross_run_access",
+                        f"recipient {to!r} is not owned by run {eff_run!r}",
+                    )
             ov_type = "status" if msg_type == "info" else msg_type
             if ov_type not in OV_MAIL_TYPES:
                 raise ProviderError("invalid_type", f"overstory mail has no type {msg_type!r} (want {', '.join(OV_MAIL_TYPES)})")
@@ -342,7 +354,25 @@ class OverstoryProvider(RuntimeProvider):
         retry_request: str | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        agent_name = terminal or "orchestrator"
+        eff_run = self.state._resolve_caller_run(run, default_run="default") or "default"
+        bound = self.state._worker_bound_run()
+        if bound:
+            own_did = env_get("OPEN_FLEET_DISPATCH_ID", "ORCA_DISPATCH_ID", self.state.env, "")
+            with self.state._connect() as conn:
+                own_row = conn.execute(
+                    "SELECT dispatch_id FROM dispatches WHERE backend = ? AND dispatch_id = ? AND run_id = ? LIMIT 1",
+                    (self.name, own_did, bound),
+                ).fetchone()
+            if own_row is None:
+                raise ProviderError(
+                    "cross_run_access",
+                    f"launched worker {own_did!r} has no {self.name} mailbox in run {bound!r}",
+                )
+            agent_name = str(own_row["dispatch_id"])
+        else:
+            with self.state._connect() as conn:
+                self.state._mailbox_scope(conn, eff_run, self.state._resolve_terminal(terminal))
+            agent_name = terminal or "orchestrator"
         if mode == "unread":
             upstream = self._ov(["ov", "mail", "check", "--agent", str(agent_name), "--json"])
         else:
@@ -380,6 +410,8 @@ class OverstoryProvider(RuntimeProvider):
         except ProviderError as exc:
             if exc.code != "message_not_found":
                 raise
+        if self.state._worker_bound_run():
+            raise ProviderError("cross_run_access", "launched worker cannot reply to unverified upstream mail id")
         # Not a local id: an Overstory mail id from `upstreamMessages`.
         argv = ["ov", "mail", "reply", str(msg_id), "--body", str(body), "--json"]
         if sender:
@@ -398,6 +430,16 @@ class OverstoryProvider(RuntimeProvider):
         if not selector:
             # `ov worktree clean` has no selector: it would remove EVERY finished worktree.
             raise ProviderError("invalid_selector", "overstory worktree rm requires an explicit agent name, branch or path")
+        bound = self.state._worker_bound_run()
+        if bound:
+            sel_check = os.path.realpath(selector) if os.path.isabs(selector) else selector
+            with self.state._connect() as conn:
+                owned_wt = conn.execute(
+                    "SELECT 1 FROM dispatches WHERE backend = ? AND (dispatch_id = ? OR worktree = ? OR worktree = ?) AND run_id = ? LIMIT 1",
+                    (self.name, selector, selector, sel_check, bound),
+                ).fetchone()
+            if owned_wt is None:
+                raise ProviderError("cross_run_access", f"overstory worktree {selector!r} is not owned by run {bound!r}")
         items = self.worktree_list()["worktrees"]
         sel_real = os.path.realpath(selector) if os.path.isabs(selector) else None
         match = next(

@@ -306,6 +306,18 @@ class ComposioAOProvider(ExternalDispatchMixin, RuntimeProvider):
 
     def terminal_send(self, *, terminal: str = "", text: str = "", enter: bool = True, **kwargs: Any) -> dict[str, Any]:
         session_id = terminal.split(":", 1)[1] if terminal.startswith("ao:") else terminal
+        bound = self.state._resolve_caller_run(None, default_run=None)
+        if bound:
+            with self.state._connect() as conn:
+                same = conn.execute(
+                    "SELECT 1 FROM dispatches WHERE backend = ? AND (dispatch_id = ? OR session_id = ? OR terminal_handle = ?) AND run_id = ? LIMIT 1",
+                    (self.name, session_id, session_id, f"ao:{session_id}", bound),
+                ).fetchone()
+            if same is None:
+                raise ProviderError(
+                    "cross_run_access",
+                    f"ao session {session_id!r} is not owned by run {bound!r}",
+                )
         if not text or len(text) > AO_SEND_MAX_CHARS:
             raise ProviderError("invalid_message", f"ao: send message must be 1..{AO_SEND_MAX_CHARS} characters")
         raw = self._invoke({"method": "POST", "path": f"/api/v1/sessions/{session_id}/send", "body": {"message": text}})
