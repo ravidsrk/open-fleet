@@ -1005,6 +1005,37 @@ class GateRunsIsolated(QueueCase):
             self.assertEqual(probs_w2, [])
             self.assertNotEqual(fp_w2, fp_w1)
 
+        # `rg --pre` is rejected fail-closed in `plan`, and `rg -f <pattern_file>` invalidates `plan_passed` on replacement:
+        rg_bin = tools_dir / "rg"
+        rg_bin.write_text('#!/bin/sh\nexec grep "$@"\n', encoding="utf-8")
+        rg_bin.chmod(0o755)
+        pre_prog = tools_dir / "rg-pre-check"
+        pre_prog.write_text("#!/bin/sh\ncat \"$1\"\n", encoding="utf-8")
+        pre_prog.chmod(0o755)
+        tok_rg = self.acquire("c-rg-pre", "--takeover")
+        self.board(tok_rg, self.w.unit("rg-pre-unit"))
+        rc_pre, out_pre = self.w.cli(
+            "plan", "--token", tok_rg, "--gate-cmd", f"{rg_bin} --pre {pre_prog} fleet README.md"
+        )
+        self.assertEqual(rc_pre, 0, out_pre)
+        self.assertEqual(out_pre["planned"][0]["result"], "fail", out_pre)
+        self.assertEqual(out_pre["planned"][0]["gate"]["fingerprint"], "", out_pre)
+        self.w.cli(
+            "resolve", "--token", tok_rg, "--entry", out_pre["planned"][0]["entry"],
+            "--action", "drop", "--reason", "rg-pre-rejected",
+        )
+        rg_pat = tools_dir / "patterns.txt"
+        rg_pat.write_text("fleet\n", encoding="utf-8")
+        rg_file_cmd = f"{rg_bin} -q -f {rg_pat} README.md"
+        self.board(tok_rg, self.w.unit("rg-file-unit"))
+        rc_rfp, out_rfp = self.w.cli("plan", "--token", tok_rg, "--gate-cmd", rg_file_cmd)
+        self.assertEqual(rc_rfp, 0, out_rfp)
+        self.assertEqual(out_rfp["planned"][0]["result"], "tested", out_rfp)
+        rg_pat.write_text("never-matches-sentinel\n", encoding="utf-8")
+        rc_rfm, out_rfm = self.w.cli("merge", "--token", tok_rg, "--require-gate", rg_file_cmd)
+        self.assertNotEqual(rc_rfm, 0, out_rfm)
+        self.assertEqual(out_rfm.get("code"), "gate_not_run", out_rfm)
+
     def test_bwrap_filtered_path_and_dangling_symlinks_fingerprint_sandbox_view(self):
         fake_home = self.w.tmp / "bw-fp-home"
         forbidden_dir = fake_home / ".ssh" / "tools"
@@ -1151,6 +1182,19 @@ class GateRunsIsolated(QueueCase):
                 "awk -f ./- /etc/hostname",
                 "python3 /dev/stdin",
                 "sh /dev/fd/0",
+                f"rg --pre {real_v1_gate} needle README.md",
+                f"rg --pre={real_v1_gate} needle README.md",
+                "rg -z needle README.md",
+                "rg -f - needle README.md",
+                "RIPGREP_CONFIG_PATH=/opt/gates/rgrc rg needle README.md",
+                "grep -f - README.md",
+                f"grep needle README.md -f {stdin_link}",
+                "git -c alias.x='!/opt/gates/evil' x",
+                "git --exec-path=/opt/gates rev-parse HEAD",
+                "tar --to-command=/opt/gates/evil -xf a.tar",
+                "sort --compress-program=/opt/gates/evil README.md",
+                "split --filter=/opt/gates/evil README.md",
+                "make -f /opt/gates/Makefile",
             ):
                 fp_u, probs_u = q._gate_fingerprint(unsafe_gate, cwd=fake_checkout)
                 self.assertEqual(fp_u, "", unsafe_gate)

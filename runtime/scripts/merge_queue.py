@@ -1426,12 +1426,32 @@ class MergeQueue:
         "bwrap", "firejail", "proot", "strace", "ltrace", "gdb", "lldb", "perf", "valgrind",
         "torsocks", "tsocks", "proxychains", "proxychains4", "catchsegv",
         "fish", "elvish", "nu", "nushell", "xonsh", "pwsh", "powershell", "rc", "es",
+        "ag", "ack", "fd", "fdfind", "fzf", "ugrep", "ug",
+        "tar", "gtar", "bsdtar", "cpio", "pax", "zip", "unzip",
+        "sort", "gsort", "split", "gsplit",
+        "rsync", "scp", "sftp", "ftp", "socat", "ncat", "netcat", "nc", "openssl",
+        "m4", "gm4", "bc", "dc", "ed", "red", "ex", "vi", "vim", "nvim", "view", "rvim", "gvim",
+        "emacs", "emacsclient", "nano", "less", "more", "most", "man", "info",
+        "sqlite3", "psql", "mysql", "mariadb", "redis-cli", "jq", "yq",
+        "make", "gmake", "bmake", "dmake", "nmake", "ninja", "samu", "cmake", "ctest",
+        "meson", "scons", "bazel", "bazelisk", "buck", "buck2", "just", "task",
+        "cargo", "rustc", "rustup", "go", "mvn", "gradle", "ant", "sbt",
+        "npm", "npx", "pnpm", "pnpx", "yarn", "corepack",
+        "pip", "pip3", "pipx", "uv", "uvx", "poetry", "pdm", "pipenv", "tox", "nox", "conda", "mamba", "virtualenv",
+        "bundle", "bundler", "rake", "rspec", "gem", "irb", "erb",
+        "composer", "phpunit", "cpan", "prove",
+        "R", "julia", "elixir", "mix", "erl", "escript", "dotnet", "swift", "zig",
+        "gcc", "cc", "g++", "c++", "clang", "clang++", "ld", "lld", "gold", "cpp",
+        "at", "batch", "crontab", "service", "systemctl", "systemd-run",
+        "busctl", "gdbus", "dbus-launch", "dbus-run-session", "xdg-open", "open", "gio",
+        "entr", "watchexec", "nodemon", "docker", "podman", "kubectl", "gh",
     })
     _MULTICALL_BOX_RE = re.compile(r"(?:busybox|toybox|sbase-box|ubase-box)(?:[.-][A-Za-z0-9_.-]+)?")
     _MUX_WRAPPER_RE = re.compile(
         r"(?:(?:busybox|toybox|sbase-box|ubase-box)(?:[.-][A-Za-z0-9_.-]+)?"
         r"|ld\.so(?:\.[0-9]+)?|ld-linux[A-Za-z0-9_.-]*|ld-musl[A-Za-z0-9_.-]*"
-        r"|proxychains[0-9]*)"
+        r"|proxychains[0-9]*"
+        r"|(?:gcc|g\+\+|clang|clang\+\+|pip)(?:[-.]?\d+(?:\.\d+)*)?)"
     )
 
     @classmethod
@@ -1479,6 +1499,10 @@ class MergeQueue:
             ("bun", r"bun(?:[-.]?\d+(?:\.\d+)*)?"),
             ("sed", r"(?:[gs]?sed|gnused)(?:[-.]?\d+(?:\.\d+)*)?"),
             ("awk", r"(?:[gmnb]?awk)(?:[-.]?\d+(?:\.\d+)*)?"),
+            ("rg", r"(?:rg|ripgrep)(?:[-.]?\d+(?:\.\d+)*)?"),
+            ("grep", r"(?:g?[ef]?grep)(?:[-.]?\d+(?:\.\d+)*)?"),
+            ("git", r"git(?:[-.]?\d+(?:\.\d+)*)?"),
+            ("pytest", r"(?:pytest|py\.test)(?:[-.]?\d+(?:\.\d+)*)?"),
         ):
             if re.fullmatch(pat, name):
                 return f"interp:{k}"
@@ -1507,8 +1531,11 @@ class MergeQueue:
         "PHPRC", "PHP_INI_SCAN_DIR",
         "R_PROFILE", "R_PROFILE_USER", "R_ENVIRON", "R_ENVIRON_USER",
         "R_LIBS", "R_LIBS_USER", "R_LIBS_SITE",
+        "RIPGREP_CONFIG_PATH", "GREP_OPTIONS",
+        "MAKEFLAGS", "MFLAGS", "PYTEST_ADDOPTS", "PYTEST_PLUGINS",
+        "TAR_OPTIONS", "GZIP", "BZIP2", "XZ_OPT", "ZSTD_NBTHREADS",
     })
-    _LOOKUP_PREFIXES = ("BASH_FUNC_", "LD_", "DYLD_", "LUA_")
+    _LOOKUP_PREFIXES = ("BASH_FUNC_", "LD_", "DYLD_", "LUA_", "GIT_")
 
     @classmethod
     def _touches_lookup_var(cls, raw_target: str) -> bool:
@@ -3372,6 +3399,292 @@ class MergeQueue:
                     f"{exe_word}: inline awk program without -f cannot statically fingerprint external command/file targets"
                 ]
             return awk_files, []
+
+        if re.fullmatch(r"(?:rg|ripgrep)(?:[-.]?\d+(?:\.\d+)*)?", base):
+            rg_files: list[str] = []
+            rg_zero_long = {
+                "--quiet", "--fixed-strings", "--invert-match", "--ignore-case", "--smart-case",
+                "--case-sensitive", "--word-regexp", "--line-regexp", "--line-number", "--no-line-number",
+                "--column", "--files", "--files-with-matches", "--files-without-match", "--count",
+                "--count-matches", "--only-matching", "--text", "--hidden", "--no-ignore", "--no-ignore-vcs",
+                "--multiline", "--multiline-dotall", "--pcre2", "--null", "--null-data", "--no-heading",
+                "--heading", "--no-filename", "--with-filename", "--no-messages", "--no-config",
+                "--passthru", "--vimgrep", "--json", "--stats", "--trim",
+            }
+            rg_val_short = {"-e", "-g", "-t", "-T", "-m", "-A", "-B", "-C", "-j", "-E", "-M", "-r"}
+            rg_val_long = (
+                "--regexp", "--glob", "--iglob", "--type", "--type-not", "--max-count",
+                "--after-context", "--before-context", "--context", "--color", "--colors",
+                "--max-depth", "--max-filesize", "--threads", "--encoding", "--max-columns",
+                "--replace", "--path-separator", "--field-match-separator", "--context-separator",
+            )
+            rg_zero_chars = "ivwxFlcnNHIoqsSuUaLP0b"
+            j = 0
+            saw_ddash = False
+            while j < len(args):
+                a, a_flag = args[j]
+                if a == "--":
+                    saw_ddash = True
+                    j += 1
+                    break
+                if not a.startswith("-") or a == "-":
+                    break
+                if is_dynamic(a_flag):
+                    return [], [f"{exe_word}: dynamic option {a!r} cannot be statically fingerprinted"]
+                if a in ("-V", "--version", "-h", "--help") and j + 1 == len(args):
+                    return [], []
+                if (
+                    a in ("--pre", "--pre-glob", "-z", "--search-zip")
+                    or a.startswith(("--pre=", "--pre-glob="))
+                ):
+                    return [], [
+                        f"{exe_word} {a}: preprocessor or decompressor execution cannot be statically fingerprinted"
+                    ]
+                if a in rg_zero_long:
+                    j += 1
+                    continue
+                if a in ("-f", "--file"):
+                    if j + 1 >= len(args) or is_dynamic(args[j + 1][1]) or cls._is_stdin_or_special_script(args[j + 1][0]):
+                        return [], [f"{exe_word} {a}: missing, stdin/special, or dynamic pattern file cannot be fingerprinted"]
+                    rg_files.append(norm_script(args[j + 1][0]))
+                    j += 2
+                    continue
+                if a.startswith("--file="):
+                    f_val = a.split("=", 1)[1]
+                    if cls._is_stdin_or_special_script(f_val):
+                        return [], [f"{exe_word} {a}: missing or stdin/special pattern file cannot be fingerprinted"]
+                    rg_files.append(norm_script(f_val))
+                    j += 1
+                    continue
+                if a in rg_val_short or a in rg_val_long:
+                    if j + 1 >= len(args) or is_dynamic(args[j + 1][1]):
+                        return [], [f"{exe_word} {a}: missing or dynamic option value cannot be fingerprinted"]
+                    j += 2
+                    continue
+                if a.startswith(tuple(opt + "=" for opt in rg_val_long)):
+                    j += 1
+                    continue
+                if a.startswith("--"):
+                    return [], [f"{exe_word}: option {a!r} cannot be statically fingerprinted"]
+                short = a[1:]
+                k = 0
+                while k < len(short) and short[k] in rg_zero_chars:
+                    k += 1
+                if k == len(short):
+                    j += 1
+                    continue
+                rem = short[k:]
+                if "z" in rem:
+                    return [], [f"{exe_word} {a}: decompressor option '-z' cannot be statically fingerprinted"]
+                if rem == "f":
+                    if j + 1 >= len(args) or is_dynamic(args[j + 1][1]) or cls._is_stdin_or_special_script(args[j + 1][0]):
+                        return [], [f"{exe_word} {a}: missing, stdin/special, or dynamic pattern file cannot be fingerprinted"]
+                    rg_files.append(norm_script(args[j + 1][0]))
+                    j += 2
+                    continue
+                if rem.startswith("f"):
+                    if cls._is_stdin_or_special_script(rem[1:]):
+                        return [], [f"{exe_word} {a}: stdin or special pattern file cannot be fingerprinted"]
+                    rg_files.append(norm_script(rem[1:]))
+                    j += 1
+                    continue
+                if f"-{rem[0]}" in rg_val_short:
+                    if len(rem) == 1:
+                        if j + 1 >= len(args) or is_dynamic(args[j + 1][1]):
+                            return [], [f"{exe_word} {a}: missing or dynamic option value cannot be fingerprinted"]
+                        j += 2
+                    else:
+                        j += 1
+                    continue
+                return [], [f"{exe_word} {a}: unsupported option cannot be statically fingerprinted"]
+            if not saw_ddash:
+                for pa, pf in args[j:]:
+                    if pa == "--":
+                        break
+                    if is_dynamic(pf) or (pa.startswith("-") and pa != "-"):
+                        return [], [f"{exe_word}: post-operand or dynamic option {pa!r} cannot be statically fingerprinted"]
+            return rg_files, []
+
+        if re.fullmatch(r"(?:g?[ef]?grep)(?:[-.]?\d+(?:\.\d+)*)?", base):
+            grep_files: list[str] = []
+            grep_zero_long = {
+                "--quiet", "--silent", "--fixed-strings", "--basic-regexp", "--extended-regexp",
+                "--perl-regexp", "--ignore-case", "--no-ignore-case", "--invert-match",
+                "--word-regexp", "--line-regexp", "--count", "--files-with-matches",
+                "--files-without-match", "--line-number", "--no-filename", "--with-filename",
+                "--only-matching", "--text", "--null", "--null-data", "--no-messages",
+                "--byte-offset", "--initial-tab", "--recursive", "--dereference-recursive",
+                "--binary-files=without-match", "--binary-files=text", "--binary-files=binary",
+            }
+            grep_val_short = {"-e", "-m", "-A", "-B", "-C", "-d", "-D"}
+            grep_val_long = (
+                "--regexp", "--max-count", "--after-context", "--before-context", "--context",
+                "--color", "--colour", "--label", "--include", "--exclude", "--exclude-dir",
+                "--directories", "--devices", "--binary-files",
+            )
+            grep_zero_chars = "EFGPivwxclLnhHoqasuUzZ0IrRHTb"
+            j = 0
+            saw_ddash = False
+            while j < len(args):
+                a, a_flag = args[j]
+                if a == "--":
+                    saw_ddash = True
+                    j += 1
+                    break
+                if not a.startswith("-") or a == "-":
+                    break
+                if is_dynamic(a_flag):
+                    return [], [f"{exe_word}: dynamic option {a!r} cannot be statically fingerprinted"]
+                if a in ("-V", "--version", "-h", "--help") and j + 1 == len(args):
+                    return [], []
+                if a in grep_zero_long:
+                    j += 1
+                    continue
+                if a in ("-f", "--file"):
+                    if j + 1 >= len(args) or is_dynamic(args[j + 1][1]) or cls._is_stdin_or_special_script(args[j + 1][0]):
+                        return [], [f"{exe_word} {a}: missing, stdin/special, or dynamic pattern file cannot be fingerprinted"]
+                    grep_files.append(norm_script(args[j + 1][0]))
+                    j += 2
+                    continue
+                if a.startswith("--file="):
+                    f_val = a.split("=", 1)[1]
+                    if cls._is_stdin_or_special_script(f_val):
+                        return [], [f"{exe_word} {a}: missing or stdin/special pattern file cannot be fingerprinted"]
+                    grep_files.append(norm_script(f_val))
+                    j += 1
+                    continue
+                if a in grep_val_short or a in grep_val_long:
+                    if j + 1 >= len(args) or is_dynamic(args[j + 1][1]):
+                        return [], [f"{exe_word} {a}: missing or dynamic option value cannot be fingerprinted"]
+                    j += 2
+                    continue
+                if a.startswith(tuple(opt + "=" for opt in grep_val_long)):
+                    j += 1
+                    continue
+                if a.startswith("--"):
+                    return [], [f"{exe_word}: option {a!r} cannot be statically fingerprinted"]
+                short = a[1:]
+                k = 0
+                while k < len(short) and short[k] in grep_zero_chars:
+                    k += 1
+                if k == len(short):
+                    j += 1
+                    continue
+                rem = short[k:]
+                if rem == "f":
+                    if j + 1 >= len(args) or is_dynamic(args[j + 1][1]) or cls._is_stdin_or_special_script(args[j + 1][0]):
+                        return [], [f"{exe_word} {a}: missing, stdin/special, or dynamic pattern file cannot be fingerprinted"]
+                    grep_files.append(norm_script(args[j + 1][0]))
+                    j += 2
+                    continue
+                if rem.startswith("f"):
+                    if cls._is_stdin_or_special_script(rem[1:]):
+                        return [], [f"{exe_word} {a}: stdin or special pattern file cannot be fingerprinted"]
+                    grep_files.append(norm_script(rem[1:]))
+                    j += 1
+                    continue
+                if f"-{rem[0]}" in grep_val_short:
+                    if len(rem) == 1:
+                        if j + 1 >= len(args) or is_dynamic(args[j + 1][1]):
+                            return [], [f"{exe_word} {a}: missing or dynamic option value cannot be fingerprinted"]
+                        j += 2
+                    else:
+                        j += 1
+                    continue
+                return [], [f"{exe_word} {a}: unsupported option cannot be statically fingerprinted"]
+            if not saw_ddash:
+                for pa, pf in args[j:]:
+                    if pa == "--":
+                        break
+                    if is_dynamic(pf) or (pa.startswith("-") and pa != "-"):
+                        return [], [f"{exe_word}: post-operand or dynamic option {pa!r} cannot be statically fingerprinted"]
+            return grep_files, []
+
+        if re.fullmatch(r"git(?:[-.]?\d+(?:\.\d+)*)?", base):
+            if not args:
+                return [], [f"{exe_word}: git invoked without subcommand cannot be statically fingerprinted"]
+            a0, f0 = args[0]
+            if len(args) == 1 and not is_dynamic(f0) and a0 in ("-v", "--version", "-h", "--help"):
+                return [], []
+            if is_dynamic(f0) or a0.startswith("-"):
+                return [], [f"{exe_word} {a0!r}: top-level git option or dynamic subcommand cannot be statically fingerprinted"]
+            allowed_git_subs = {
+                "rev-parse", "remote", "status", "diff", "log", "show",
+                "ls-files", "ls-tree", "cat-file", "describe", "symbolic-ref",
+                "for-each-ref", "merge-base",
+            }
+            if a0 not in allowed_git_subs:
+                return [], [f"{exe_word} {a0}: git subcommand cannot statically fingerprint external hooks/helpers"]
+            if a0 == "remote":
+                if len(args) < 2 or is_dynamic(args[1][1]) or args[1][0] not in ("get-url", "-v", "--verbose"):
+                    return [], [f"{exe_word} remote: only read-only 'get-url'/'-v' is permitted"]
+            for ga, gf in args[1:]:
+                if is_dynamic(gf):
+                    return [], [f"{exe_word} {a0}: dynamic git argument {ga!r} cannot be statically fingerprinted"]
+                if ga in ("--ext-diff", "--textconv") or ga.startswith("--git-dir") or ga.startswith("--work-tree"):
+                    return [], [f"{exe_word} {a0} {ga}: external helper or repo override cannot be statically fingerprinted"]
+            return [], []
+
+        if re.fullmatch(r"(?:pytest|py\.test)(?:[-.]?\d+(?:\.\d+)*)?", base):
+            pt_files: list[str] = []
+            j = 0
+            after_ddash = False
+            while j < len(args):
+                a, a_flag = args[j]
+                if is_dynamic(a_flag):
+                    return [], [f"{exe_word}: dynamic pytest argument {a!r} cannot be statically fingerprinted"]
+                if not after_ddash and a == "--":
+                    after_ddash = True
+                    j += 1
+                    continue
+                if after_ddash or not a.startswith("-"):
+                    p_part = a.split("::", 1)[0]
+                    if cls._is_stdin_or_special_script(p_part) or os.path.isabs(p_part) or ".." in Path(p_part).parts:
+                        return [], [f"{exe_word}: external or special test target {a!r} cannot be statically fingerprinted"]
+                    j += 1
+                    continue
+                if a in ("-V", "--version", "-h", "--help") and j + 1 == len(args):
+                    return [], []
+                if (
+                    a in ("-o", "-p", "--override-ini", "--rootdir", "--confcutdir", "--basetemp", "--import-mode", "--pyargs")
+                    or a.startswith(("--override-ini=", "--rootdir=", "--confcutdir=", "--basetemp=", "--import-mode="))
+                ):
+                    return [], [f"{exe_word} {a}: dynamic config/plugin/rootdir option cannot be statically fingerprinted"]
+                if a in ("-c", "--config-file"):
+                    if j + 1 >= len(args) or is_dynamic(args[j + 1][1]) or cls._is_stdin_or_special_script(args[j + 1][0]):
+                        return [], [f"{exe_word} {a}: missing, stdin/special, or dynamic config file cannot be fingerprinted"]
+                    pt_files.append(norm_script(args[j + 1][0]))
+                    j += 2
+                    continue
+                if a.startswith("--config-file="):
+                    c_val = a.split("=", 1)[1]
+                    if cls._is_stdin_or_special_script(c_val):
+                        return [], [f"{exe_word} {a}: missing or stdin/special config file cannot be fingerprinted"]
+                    pt_files.append(norm_script(c_val))
+                    j += 1
+                    continue
+                if a.startswith("-c") and len(a) > 2:
+                    if cls._is_stdin_or_special_script(a[2:]):
+                        return [], [f"{exe_word} {a}: stdin or special config file cannot be fingerprinted"]
+                    pt_files.append(norm_script(a[2:]))
+                    j += 1
+                    continue
+                if a in ("-k", "-m", "-W", "--maxfail", "--tb", "--color", "--durations"):
+                    if j + 1 >= len(args) or is_dynamic(args[j + 1][1]):
+                        return [], [f"{exe_word} {a}: missing or dynamic option value cannot be fingerprinted"]
+                    j += 2
+                    continue
+                if a.startswith(("-k", "-m", "-W", "--maxfail=", "--tb=", "--color=", "--durations=")):
+                    j += 1
+                    continue
+                if a in ("--quiet", "--verbose", "--exitfirst", "--capture=no", "--strict-markers", "--strict-config", "--no-header", "--no-summary"):
+                    j += 1
+                    continue
+                if not a.startswith("--") and all(c in "qvxsrlfEnN" for c in a[1:]):
+                    j += 1
+                    continue
+                return [], [f"{exe_word} {a}: unsupported pytest option cannot be statically fingerprinted"]
+            return pt_files, []
 
         return [], []
 

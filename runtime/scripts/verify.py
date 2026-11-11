@@ -1166,7 +1166,9 @@ class _Authority:
         "strace", "ltrace", "gdb", "lldb", "perf", "valgrind",
         "torsocks", "tsocks", "proxychains", "proxychains4", "catchsegv",
         "fish", "elvish", "nu", "nushell", "xonsh", "pwsh", "powershell", "rc", "es",
-        "sed", "awk", "gawk", "mawk", "nawk", "deno", "bun",
+        "sed", "gsed", "ssed", "awk", "gawk", "mawk", "nawk", "bawk", "deno", "bun",
+        "rg", "ripgrep", "ag", "ack", "fd", "fdfind", "fzf", "ugrep", "ug",
+        "tar", "gtar", "bsdtar", "sort", "gsort", "split", "gsplit", "m4", "gm4",
     })
 
     @classmethod
