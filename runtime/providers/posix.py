@@ -1395,8 +1395,8 @@ class PosixWorktreeProvider(RuntimeProvider):
     def request_show(self, request_id: str) -> dict[str, Any]:
         return self.state.request_show(request_id)
 
-    def send_message(self, **kwargs: Any) -> dict[str, Any]:
-        return self.state.send_message(**kwargs)
+    def send_message(self, *, retry_request: str | None = None, **kwargs: Any) -> dict[str, Any]:
+        return self.state.send_message(retry_request=retry_request, **kwargs)
 
     def check_messages(self, **kwargs: Any) -> dict[str, Any]:
         return self.state.check_messages(**kwargs)

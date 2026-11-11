@@ -26,6 +26,7 @@ import subprocess
 import sys
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -1215,6 +1216,8 @@ class LocalStateStore:
             return by_handle[-1] if by_handle else None
         return None
 
+    _NO_UPSTREAM = object()
+
     def send_message(
         self,
         *,
@@ -1229,6 +1232,7 @@ class LocalStateStore:
         attrs: dict[str, Any] | None = None,
         reply_to: str | None = None,
         retry_request: str | None = None,
+        upstream_fn: Callable[[str], Any] | None = None,
     ) -> dict[str, Any]:
         run_id = self._resolve_caller_run(run, default_run="default") or "default"
         recipient = to or COORDINATOR_ALIAS
@@ -1255,64 +1259,72 @@ class LocalStateStore:
         if cached:
             return cached
         try:
+            extra_upstream = upstream_fn(run_id) if upstream_fn is not None else self._NO_UPSTREAM
             now = time.time()
             with self._connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
-                is_term_mail = msg_type in TERMINAL_MESSAGE_TYPES and "fileTouchConflict" not in clean_attrs
-                has_hint_task, hint_task = self._extract_task_hint(clean_attrs)
-                disp_row = (
-                    self._resolve_sender_dispatch(
-                        conn,
-                        run_id,
-                        sender_id,
-                        has_task_hint=has_hint_task,
-                        hint_task_id=hint_task,
+                try:
+                    is_term_mail = msg_type in TERMINAL_MESSAGE_TYPES and "fileTouchConflict" not in clean_attrs
+                    has_hint_task, hint_task = self._extract_task_hint(clean_attrs)
+                    disp_row = (
+                        self._resolve_sender_dispatch(
+                            conn,
+                            run_id,
+                            sender_id,
+                            has_task_hint=has_hint_task,
+                            hint_task_id=hint_task,
+                        )
+                        if is_term_mail
+                        else None
                     )
-                    if is_term_mail
-                    else None
-                )
-                stored_attrs = dict(clean_attrs)
-                if is_term_mail:
-                    for dk in ("dispatchId", "dispatch_id", "dispatch-id"):
-                        stored_attrs.pop(dk, None)
-                    if disp_row is not None:
-                        stored_attrs["dispatchId"] = disp_row["dispatch_id"]
-                msg_id, deliv_id = self._insert_message(
-                    conn,
-                    run_id=run_id,
-                    sender=sender_id,
-                    recipient=recipient,
-                    msg_type=msg_type,
-                    subject=subject,
-                    outcome=outcome,
-                    payload=effective_payload,
-                    attrs=stored_attrs,
-                    reply_to=reply_to,
-                )
-                if msg_type == "worker_done" and outcome in ("succeeded", "failed"):
-                    if disp_row and disp_row["state"] not in (*FENCED_DISPATCH_STATES, "died", "completed"):
-                        self._settle_dispatch_task(conn, disp_row["dispatch_id"], succeeded=(outcome == "succeeded"), now=now)
-                message = {
-                    "id": msg_id,
-                    "deliveryId": deliv_id,
-                    "type": msg_type,
-                    "subject": subject,
-                    "from": sender_id,
-                    "to": recipient,
-                    "outcome": outcome,
-                    "payload": effective_payload,
-                    "body": effective_payload if effective_payload is not None else subject,
-                }
-                res = {
-                    "sent": True,
-                    "messageId": msg_id,
-                    "deliveryId": deliv_id,
-                    "message": message,
-                    # send_msg.py reads `relay.messageId` (Orca's receipt shape, #578 audit).
-                    "relay": {"messageId": msg_id, "deliveryId": deliv_id, "to": recipient},
-                }
-                self._save_request_in_tx(conn, retry_request, "send", "completed", res, payload_sha)
-                conn.execute("COMMIT")
+                    stored_attrs = dict(clean_attrs)
+                    if is_term_mail:
+                        for dk in ("dispatchId", "dispatch_id", "dispatch-id"):
+                            stored_attrs.pop(dk, None)
+                        if disp_row is not None:
+                            stored_attrs["dispatchId"] = disp_row["dispatch_id"]
+                    msg_id, deliv_id = self._insert_message(
+                        conn,
+                        run_id=run_id,
+                        sender=sender_id,
+                        recipient=recipient,
+                        msg_type=msg_type,
+                        subject=subject,
+                        outcome=outcome,
+                        payload=effective_payload,
+                        attrs=stored_attrs,
+                        reply_to=reply_to,
+                    )
+                    if msg_type == "worker_done" and outcome in ("succeeded", "failed"):
+                        if disp_row and disp_row["state"] not in (*FENCED_DISPATCH_STATES, "died", "completed"):
+                            self._settle_dispatch_task(conn, disp_row["dispatch_id"], succeeded=(outcome == "succeeded"), now=now)
+                    message = {
+                        "id": msg_id,
+                        "deliveryId": deliv_id,
+                        "type": msg_type,
+                        "subject": subject,
+                        "from": sender_id,
+                        "to": recipient,
+                        "outcome": outcome,
+                        "payload": effective_payload,
+                        "body": effective_payload if effective_payload is not None else subject,
+                    }
+                    res: dict[str, Any] = {
+                        "sent": True,
+                        "messageId": msg_id,
+                        "deliveryId": deliv_id,
+                        "message": message,
+                        # send_msg.py reads `relay.messageId` (Orca's receipt shape, #578 audit).
+                        "relay": {"messageId": msg_id, "deliveryId": deliv_id, "to": recipient},
+                    }
+                    if extra_upstream is not self._NO_UPSTREAM:
+                        res["upstream"] = extra_upstream
+                    self._save_request_in_tx(conn, retry_request, "send", "completed", res, payload_sha)
+                    conn.execute("COMMIT")
+                except BaseException:
+                    if conn.in_transaction:
+                        conn.execute("ROLLBACK")
+                    raise
         except BaseException:
             self.release_request(retry_request)
             raise

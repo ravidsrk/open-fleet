@@ -1821,19 +1821,47 @@ class TestPosixAdversarialRemediation750(PosixRealProcessBase):
         self.assertEqual(ctx.exception.code, "cross_run_access")
 
     def test_c32_send_body_flag_and_fence_retry_request_idempotency(self):
+        from unittest import mock
+
         self.fake_agent("claude", "exit 0")
-        # orchestration send --body maps to payload and --retry-request deduplicates
-        s1 = self.prov.dispatch(
-            ["orchestration", "send", "--subject", "sub", "--type", "info", "--to", "coordinator",
-             "--body", "hello-body", "--retry-request", "req-send-1"],
-        )
-        s2 = self.prov.dispatch(
-            ["orchestration", "send", "--subject", "sub", "--type", "info", "--to", "coordinator",
-             "--body", "hello-body", "--retry-request", "req-send-1"],
-        )
+        # orchestration send --body maps to payload and --retry-request commits message + request
+        # atomically via LocalStateStore._save_request_in_tx (never the two-tx save_request fallback).
+        with mock.patch.object(
+            self.prov.state,
+            "save_request",
+            side_effect=AssertionError("CLI send must commit retry_request in-tx, not via separate save_request"),
+        ):
+            s1 = self.prov.dispatch(
+                ["orchestration", "send", "--subject", "sub", "--type", "info", "--to", "coordinator",
+                 "--body", "hello-body", "--retry-request", "req-send-1"],
+            )
+            s2 = self.prov.dispatch(
+                ["orchestration", "send", "--subject", "sub", "--type", "info", "--to", "coordinator",
+                 "--body", "hello-body", "--retry-request", "req-send-1"],
+            )
         self.assertEqual(s1["messageId"], s2["messageId"])
         msgs = self.prov.check_messages(terminal="coordinator")["messages"]
-        self.assertEqual(msgs[-1]["payload"], "hello-body")
+        self.assertEqual(len(msgs), 1)
+        self.assertEqual(msgs[0]["payload"], "hello-body")
+        self.prov.check_messages(terminal="coordinator", ack=s1["deliveryId"])
+
+        # Crash before COMMIT rolls back BOTH message and request; retry delivers once.
+        orig_save_in_tx = self.prov.state._save_request_in_tx
+        with mock.patch.object(self.prov.state, "_save_request_in_tx", side_effect=RuntimeError("boom-pre-commit")):
+            with self.assertRaisesRegex(RuntimeError, "boom-pre-commit"):
+                self.prov.dispatch(
+                    ["orchestration", "send", "--subject", "sub-crash", "--type", "info", "--to", "coordinator",
+                     "--body", "crash-body", "--retry-request", "req-send-crash"],
+                )
+        self.assertEqual(self.prov.check_messages(terminal="coordinator")["messages"], [])
+        self.assertEqual(self.prov.request_show("req-send-crash")["state"], "absent")
+        recovered = self.prov.dispatch(
+            ["orchestration", "send", "--subject", "sub-crash", "--type", "info", "--to", "coordinator",
+             "--body", "crash-body", "--retry-request", "req-send-crash"],
+        )
+        self.assertIsNotNone(orig_save_in_tx)
+        msgs_after = self.prov.check_messages(terminal="coordinator")["messages"]
+        self.assertEqual([m["id"] for m in msgs_after], [recovered["messageId"]])
 
         # worker-stop with --retry-request deduplicates and rejects changed verb
         t = self.prov.task_create(spec="fence retry")["task"]["id"]

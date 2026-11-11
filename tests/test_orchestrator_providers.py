@@ -264,6 +264,20 @@ class TestGastownProvider(ProviderTestBase):
         self.assertEqual(len(inbox["messages"]), 1)
         self.assertEqual(inbox["upstreamInbox"], [{"id": "m1"}])
 
+        # CLI send --retry-request deduplicates both local mailbox and upstream gt mail send
+        gt_sends_before = sum(1 for c in calls if c[:3] == ["gt", "mail", "send"])
+        cs1 = prov.dispatch(
+            ["orchestration", "send", "--subject", "cli", "--type", "info", "--to", "mayor",
+             "--body", "once", "--retry-request", "gt-send-1"],
+        )
+        cs2 = prov.dispatch(
+            ["orchestration", "send", "--subject", "cli", "--type", "info", "--to", "mayor",
+             "--body", "once", "--retry-request", "gt-send-1"],
+        )
+        self.assertEqual(cs1["messageId"], cs2["messageId"])
+        self.assertIn("upstream", cs2)
+        self.assertEqual(sum(1 for c in calls if c[:3] == ["gt", "mail", "send"]), gt_sends_before + 1)
+
 
 class TestWorktrunkProvider(ProviderTestBase):
     """#583: WorktrunkProvider (`wt`) (full suite: test_gastown_worktrunk_providers.py)."""

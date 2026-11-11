@@ -943,12 +943,15 @@ class RuntimeProvider:
                     "attrs": attrs,
                 }
                 retry_req = flags.get("retry-request")
+                if type(self).send_message is RuntimeProvider.send_message:
+                    return self.send_message(**send_kw)
                 try:
                     sig = inspect.signature(self.send_message)
                     params = set(sig.parameters)
+                    has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
                 except (TypeError, ValueError):
-                    params = set()
-                if "retry_request" in params:
+                    params, has_var_kw = set(), False
+                if "retry_request" in params or (has_var_kw and retry_req is not None):
                     send_kw["retry_request"] = retry_req
                     return self.send_message(**send_kw)
                 state = getattr(self, "state", None)

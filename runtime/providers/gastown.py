@@ -511,27 +511,34 @@ class GastownProvider(RuntimeProvider):
         payload: str | None = None,
         run: str | None = None,
         attrs: dict[str, Any] | None = None,
+        retry_request: str | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        local = self.state.send_message(
+        eff_body = payload if payload is not None else (kwargs.get("body") if kwargs.get("body") is not None else subject)
+
+        def _relay(_run_id: str) -> dict[str, Any]:
+            recipient = to or "mayor"
+            gt_type = msg_type if msg_type in GT_MAIL_TYPES else "notification"
+            gt_subject = subject if msg_type in GT_MAIL_TYPES else f"[{msg_type}] {subject}"
+            argv = ["gt", "mail", "send", str(recipient), "-s", gt_subject, "-m", str(eff_body), "--type", gt_type]
+            if sender:
+                argv += ["--from", str(sender)]
+            return {"output": self._run(argv)}
+
+        return self.state.send_message(
             subject=subject,
             msg_type=msg_type,
             to=to,
             outcome=outcome,
             sender=sender,
             payload=payload,
+            body=kwargs.get("body"),
             run=run,
             attrs=attrs,
+            reply_to=kwargs.get("reply_to"),
+            retry_request=retry_request,
+            upstream_fn=_relay,
         )
-        recipient = to or "mayor"
-        body = payload if payload is not None else subject
-        gt_type = msg_type if msg_type in GT_MAIL_TYPES else "notification"
-        gt_subject = subject if msg_type in GT_MAIL_TYPES else f"[{msg_type}] {subject}"
-        argv = ["gt", "mail", "send", str(recipient), "-s", gt_subject, "-m", str(body), "--type", gt_type]
-        if sender:
-            argv += ["--from", str(sender)]
-        local["upstream"] = {"output": self._run(argv)}
-        return local
 
     def check_messages(
         self,

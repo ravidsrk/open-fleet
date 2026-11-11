@@ -292,34 +292,41 @@ class OverstoryProvider(RuntimeProvider):
         payload: str | None = None,
         run: str | None = None,
         attrs: dict[str, Any] | None = None,
+        retry_request: str | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        ov_type = "status" if msg_type == "info" else msg_type
-        if ov_type not in OV_MAIL_TYPES:
-            raise ProviderError("invalid_type", f"overstory mail has no type {msg_type!r} (want {', '.join(OV_MAIL_TYPES)})")
-        local = self.state.send_message(
+        eff_body = payload if payload is not None else (kwargs.get("body") if kwargs.get("body") is not None else subject)
+
+        def _relay(_run_id: str) -> Any:
+            ov_type = "status" if msg_type == "info" else msg_type
+            if ov_type not in OV_MAIL_TYPES:
+                raise ProviderError("invalid_type", f"overstory mail has no type {msg_type!r} (want {', '.join(OV_MAIL_TYPES)})")
+            argv = [
+                "ov", "mail", "send",
+                "--to", str(to or "orchestrator"),
+                "--subject", str(subject),
+                "--body", str(eff_body),
+                "--type", ov_type,
+                "--json",
+            ]
+            if sender:
+                argv += ["--from", str(sender)]
+            return self._ov(argv)
+
+        return self.state.send_message(
             subject=subject,
             msg_type=msg_type,
             to=to,
             outcome=outcome,
             sender=sender,
             payload=payload,
+            body=kwargs.get("body"),
             run=run,
             attrs=attrs,
+            reply_to=kwargs.get("reply_to"),
+            retry_request=retry_request,
+            upstream_fn=_relay,
         )
-        body = payload if payload is not None else subject
-        argv = [
-            "ov", "mail", "send",
-            "--to", str(to or "orchestrator"),
-            "--subject", str(subject),
-            "--body", str(body),
-            "--type", ov_type,
-            "--json",
-        ]
-        if sender:
-            argv += ["--from", str(sender)]
-        local["upstream"] = self._ov(argv)
-        return local
 
     def check_messages(
         self,

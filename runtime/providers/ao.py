@@ -398,8 +398,8 @@ class ComposioAOProvider(ExternalDispatchMixin, RuntimeProvider):
     def task_list(self, **kwargs: Any) -> dict[str, Any]:
         return self.state.task_list(**kwargs)
 
-    def send_message(self, **kwargs: Any) -> dict[str, Any]:
-        return self.state.send_message(**kwargs)
+    def send_message(self, *, retry_request: str | None = None, **kwargs: Any) -> dict[str, Any]:
+        return self.state.send_message(retry_request=retry_request, **kwargs)
 
     def check_messages(self, **kwargs: Any) -> dict[str, Any]:
         return self.state.check_messages(**kwargs)
