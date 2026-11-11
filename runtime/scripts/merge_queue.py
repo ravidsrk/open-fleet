@@ -1453,8 +1453,8 @@ class MergeQueue:
             return "wrap:nohup"
         if name in ("command", "builtin"):
             return f"wrap:{name}"
-        if re.fullmatch(r"(?:csh|tcsh)(?:[-.]?\d+(?:\.\d+)*)?", name):
-            return "shell:csh"
+        if re.fullmatch(r"(?:csh|tcsh|r?zsh)(?:[-.]?\d+(?:\.\d+)*)?", name):
+            return "shell:non_posix"
         if cls._is_shell_name(name):
             return "shell:posix"
         if re.fullmatch(r"(?:python|pypy)(?:[-.]?\d+(?:\.\d+)*)?", name):
@@ -2329,6 +2329,12 @@ class MergeQueue:
                     problems.append(f"dynamic command word {cw!r} cannot be statically fingerprinted")
                     wi = len(cmd_words)
                     break
+                if cw.startswith("-") or Path(cw).name.startswith("-"):
+                    problems.append(
+                        f"leading-dash command word {cw!r} triggers login-shell startup files or ambiguous option dispatch"
+                    )
+                    wi = len(cmd_words)
+                    break
                 cw_is_shell_dispatch = (
                     not force_external
                     and "/" not in cw
@@ -2608,29 +2614,14 @@ class MergeQueue:
                     wi += 1
                     while wi < len(cmd_words) and cmd_words[wi][0].startswith("-") and len(cmd_words[wi][0]) > 1:
                         opt, opt_flag = cmd_words[wi]
-                        if opt == "--":
+                        if opt == "--" and not is_dynamic(opt_flag):
                             wi += 1
                             break
-                        if is_dynamic(opt_flag):
-                            problems.append("exec: dynamic option cannot be statically fingerprinted")
-                            wi = len(cmd_words)
-                            break
-                        if "c" in opt[1:]:
-                            problems.append("exec -c clears environment and alters PATH lookup context")
-                        if opt == "-a":
-                            if wi + 1 >= len(cmd_words) or is_dynamic(cmd_words[wi + 1][1]):
-                                problems.append(
-                                    "exec -a: missing or dynamic name operand cannot be statically fingerprinted"
-                                )
-                                wi = len(cmd_words)
-                                break
-                            wi += 2
-                        elif opt == "-l":
-                            wi += 1
-                        else:
-                            problems.append(f"exec: unsupported option {opt!r} cannot be statically fingerprinted")
-                            wi = len(cmd_words)
-                            break
+                        problems.append(
+                            f"exec {opt!r} alters environment or argv[0]/login-shell dispatch and cannot be statically fingerprinted"
+                        )
+                        wi = len(cmd_words)
+                        break
                     if wi < len(cmd_words):
                         force_external = True
                     continue
@@ -2641,6 +2632,11 @@ class MergeQueue:
             final_word, final_flag = cmd_words[wi]
             if is_dynamic(final_flag):
                 problems.append(f"dynamic command word {final_word!r} cannot be statically fingerprinted")
+                continue
+            if final_word.startswith("-") or Path(final_word).name.startswith("-"):
+                problems.append(
+                    f"leading-dash command word {final_word!r} triggers login-shell startup files or ambiguous option dispatch"
+                )
                 continue
             if not force_external:
                 if final_word == "eval":
@@ -2949,8 +2945,11 @@ class MergeQueue:
         executables: list[str] = []
         problems: list[str] = []
         shell_base = _resolved_base or Path(shell_word).name
-        if re.fullmatch(r"(?:csh|tcsh)(?:[-.]?\d+(?:\.\d+)*)?", shell_base):
-            return [], [], [f"{shell_word}: non-POSIX shell cannot be statically fingerprinted"]
+        if re.fullmatch(r"(?:csh|tcsh)(?:[-.]?\d+(?:\.\d+)*)?", shell_base) or (
+            re.fullmatch(r"r?zsh(?:[-.]?\d+(?:\.\d+)*)?", shell_base)
+            and Path(shell_word).name != "sh"
+        ):
+            return [], [], [f"{shell_word}: non-POSIX shell or zsh startup files cannot be statically fingerprinted"]
 
         def is_dynamic(flag: Any) -> bool:
             return bool(isinstance(flag, dict) and flag.get("dynamic"))
@@ -3408,7 +3407,7 @@ class MergeQueue:
             return True
         if any(re.fullmatch(r"(?:python|pypy)(?:[-.]?\d+(?:\.\d+)*)?", n) for n in interp_names):
             return bool(re.fullmatch(r"-[BEIOPSsuq]+", interp_arg))
-        if any(re.fullmatch(r"(?:sh|bash|dash|ash|ksh|mksh|zsh|yash)(?:[-.]?\d+(?:\.\d+)*)?", n) for n in interp_names):
+        if any(re.fullmatch(r"(?:sh|bash|dash|ash|ksh|mksh|yash)(?:[-.]?\d+(?:\.\d+)*)?", n) for n in interp_names):
             return bool(re.fullmatch(r"-[abefhmnuvxBCEHP]+", interp_arg))
         if any(re.fullmatch(r"perl(?:[-.]?\d+(?:\.\d+)*)?", n) for n in interp_names):
             return bool(re.fullmatch(r"-[wTt]+", interp_arg))
@@ -3470,6 +3469,7 @@ class MergeQueue:
             or self._is_mux_wrapper(eff_i_real_base)
             or (interp_names & {"nice", "gnice", "timeout", "gtimeout", "nohup", "gnohup", "command", "builtin"})
             or any(re.fullmatch(r"(?:csh|tcsh)(?:[-.]?\d+(?:\.\d+)*)?", n) for n in interp_names)
+            or (i_base != "sh" and any(re.fullmatch(r"r?zsh(?:[-.]?\d+(?:\.\d+)*)?", n) for n in interp_names))
         ):
             probs.append(f"{label}: shebang multiplexer or wrapper {interp!r} cannot be statically fingerprinted")
             return chain, probs
@@ -3502,6 +3502,7 @@ class MergeQueue:
                 or self._is_mux_wrapper(eff_e_real_base)
                 or (e_names & {"env", "genv", "nice", "gnice", "timeout", "gtimeout", "nohup", "gnohup", "command", "builtin"})
                 or any(re.fullmatch(r"(?:csh|tcsh)(?:[-.]?\d+(?:\.\d+)*)?", n) for n in e_names)
+                or (e_base != "sh" and any(re.fullmatch(r"r?zsh(?:[-.]?\d+(?:\.\d+)*)?", n) for n in e_names))
             ):
                 probs.append(
                     f"{label}: shebang env target {interp_arg!r} resolves to multiplexer or wrapper and cannot be statically fingerprinted"

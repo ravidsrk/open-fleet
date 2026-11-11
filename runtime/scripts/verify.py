@@ -1101,8 +1101,8 @@ class _Authority:
             return "wrap:nohup"
         if name in ("command", "builtin"):
             return f"wrap:{name}"
-        if re.fullmatch(r"(?:csh|tcsh)(?:[-.]?\d+(?:\.\d+)*)?", name):
-            return "shell:csh"
+        if re.fullmatch(r"(?:csh|tcsh|r?zsh)(?:[-.]?\d+(?:\.\d+)*)?", name):
+            return "shell:non_posix"
         if cls._is_shell_name(name):
             return "shell:posix"
         for k, pat in (
@@ -1181,8 +1181,8 @@ class _Authority:
     @classmethod
     def _parse_shell_script_operand(cls, tok, rest):
         """Parse shell argv tail `rest` and return `(script_op, err)` enforcing staged repo-relative path."""
-        if re.fullmatch(r"(?:csh|tcsh)(?:[-.]?\d+(?:\.\d+)*)?", Path(tok).name):
-            return None, f"proof executable {tok!r} invokes non-POSIX shell; fail-closed (#750 C19)"
+        if re.fullmatch(r"(?:csh|tcsh|r?zsh)(?:[-.]?\d+(?:\.\d+)*)?", Path(tok).name):
+            return None, f"proof executable {tok!r} invokes non-POSIX shell or zsh startup files; fail-closed (#750 C19)"
         si = 0
         while si < len(rest):
             arg = rest[si]
@@ -1596,6 +1596,9 @@ class _Authority:
         while idx < len(argv):
             tok = argv[idx]
             name = Path(tok).name
+            if tok.startswith("-") or name.startswith("-"):
+                return None, (f"proof executable {tok!r} starts with '-', triggering login-shell startup "
+                              "or ambiguous option dispatch; fail-closed (#750 C19)")
             if cls._is_mux_exe(name):
                 return None, (f"proof executable {tok!r} multiplexes inner commands whose targets "
                               "cannot be statically pinned; fail-closed (#750 C19)")
@@ -1810,6 +1813,7 @@ class _Authority:
             or cls._is_mux_exe(eff_i_real_base)
             or (interp_names & {"nice", "gnice", "timeout", "gtimeout", "nohup", "gnohup", "command", "builtin"})
             or any(re.fullmatch(r"(?:csh|tcsh)(?:[-.]?\d+(?:\.\d+)*)?", n) for n in interp_names)
+            or (i_base != "sh" and any(re.fullmatch(r"r?zsh(?:[-.]?\d+(?:\.\d+)*)?", n) for n in interp_names))
         ):
             return None, (f"proof executable {label!r} uses multiplexer or wrapper shebang {interp!r}; "
                           "fail-closed (#750 C19)")
@@ -1839,6 +1843,7 @@ class _Authority:
                 or cls._is_mux_exe(eff_e_real_base)
                 or (e_names & {"env", "genv", "nice", "gnice", "timeout", "gtimeout", "nohup", "gnohup", "command", "builtin"})
                 or any(re.fullmatch(r"(?:csh|tcsh)(?:[-.]?\d+(?:\.\d+)*)?", n) for n in e_names)
+                or (e_base != "sh" and any(re.fullmatch(r"r?zsh(?:[-.]?\d+(?:\.\d+)*)?", n) for n in e_names))
             ):
                 return None, (f"proof executable {label!r} shebang env target {interp_arg!r} "
                               "resolves to multiplexer or wrapper; fail-closed (#750 C19)")
@@ -1854,7 +1859,7 @@ class _Authority:
             return True
         if any(re.fullmatch(r"(?:python|pypy)(?:[-.]?\d+(?:\.\d+)*)?", n) for n in interp_names):
             return bool(re.fullmatch(r"-[BEIOPSsuq]+", interp_arg))
-        if any(re.fullmatch(r"(?:sh|bash|dash|ash|ksh|mksh|zsh|yash)(?:[-.]?\d+(?:\.\d+)*)?", n) for n in interp_names):
+        if any(re.fullmatch(r"(?:sh|bash|dash|ash|ksh|mksh|yash)(?:[-.]?\d+(?:\.\d+)*)?", n) for n in interp_names):
             return bool(re.fullmatch(r"-[abefhmnuvxBCEHP]+", interp_arg))
         if any(re.fullmatch(r"perl(?:[-.]?\d+(?:\.\d+)*)?", n) for n in interp_names):
             return bool(re.fullmatch(r"-[wTt]+", interp_arg))
@@ -1900,7 +1905,12 @@ class _Authority:
             )
             real_fam = cls._exec_family(eff_real_base)
             tok_fam = cls._exec_family(tok_base)
-            if real_fam is not None and real_fam != tok_fam:
+            sh_emulated_zsh = (
+                tok_base == "sh"
+                and real_fam == "shell:non_posix"
+                and bool(re.fullmatch(r"r?zsh(?:[-.]?\d+(?:\.\d+)*)?", eff_real_base))
+            )
+            if real_fam is not None and real_fam != tok_fam and not sh_emulated_zsh:
                 return None, (f"proof executable {tok!r} resolves to {chain[0][1]!r} ({real_fam}) "
                               "via alias; invoke the canonical tool name so operands are verified (#750 C19)")
             records.append((argv_idx, tok, *chain[0], chain[1:]))

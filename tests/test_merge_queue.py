@@ -1122,6 +1122,12 @@ class GateRunsIsolated(QueueCase):
                 f"/lib64/ld-linux-x86-64.so.2 {real_v1_gate}",
                 "bash -c 'readonly -i y=1; exit 0'",
                 "bash -c 'export -f f; exit 0'",
+                "bash -c 'exec -l /bin/bash -c true'",
+                "bash -c 'exec -a -bash /bin/bash -c true'",
+                "bash -c 'exec -a sh /bin/true'",
+                "env -- -bash -c true",
+                "/opt/gates/-bash -c true",
+                "zsh -c true",
             ):
                 fp_u, probs_u = q._gate_fingerprint(unsafe_gate)
                 self.assertEqual(fp_u, "", unsafe_gate)
