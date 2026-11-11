@@ -1926,6 +1926,14 @@ if {repr(self.backend)} == "cmux":
                 "danger_requires_linked_worktree",
                 "profile='danger' never runs in the main checkout; use --worktree new-child",
             )
+        eff_run = self.state._resolve_caller_run(run, default_run=None)
+        with self.state._connect() as conn:
+            t_pre = conn.execute("SELECT run_id FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if t_pre is not None and eff_run is not None and t_pre["run_id"] != eff_run:
+            raise ProviderError(
+                "cross_run_access",
+                f"task {task_id!r} belongs to run {t_pre['run_id']!r}, not {eff_run!r}",
+            )
         payload_sha = _launch_payload_sha256(
             {
                 "task": task_id,
@@ -1942,13 +1950,12 @@ if {repr(self.backend)} == "cmux":
             }
         )
         if retry_request:
-            replay = self._replay_worker_start(retry_request, payload_sha)
+            replay = self._replay_worker_start(retry_request, payload_sha, eff_run=eff_run)
             if replay is not None:
                 return replay
 
         # A dead coordinator's unfinished launch of THIS task is settled before a new claim (#597).
-        eff_run = self.state._resolve_caller_run(run, default_run=None)
-        self._reconcile_dead_intents(task_id=task_id)
+        self._reconcile_dead_intents(task_id=task_id, run_id=eff_run)
         with self.state._connect() as conn:
             t_row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         if not t_row:
@@ -2061,14 +2068,15 @@ if {repr(self.backend)} == "cmux":
                 )
                 if retry_request:
                     conn.execute(
-                        "INSERT INTO requests(request_id, method, state, response_json, created_at, payload_sha256, intent_id) "
-                        "VALUES (?, 'worker-start', 'pending', NULL, ?, ?, ?)",
-                        (retry_request, now, payload_sha, intent_id),
+                        "INSERT INTO requests(request_id, method, state, response_json, created_at, payload_sha256, intent_id, caller_scope) "
+                        "VALUES (?, 'worker-start', 'pending', NULL, ?, ?, ?, ?)",
+                        (retry_request, now, payload_sha, intent_id, self.state._caller_request_scope()),
                     )
                 conn.execute("COMMIT")
         if raced:
             # The same request id is being (or was) launched by another call: its outcome, never a second launch.
-            return self._replay_worker_start(str(retry_request), payload_sha) or {}
+            bound_raced = self.state._resolve_caller_run(None, default_run=None)
+            return self._replay_worker_start(str(retry_request), payload_sha, eff_run=bound_raced) or {}
         self._boundary("intent_claimed", info)
 
         try:
@@ -2484,11 +2492,34 @@ if {repr(self.backend)} == "cmux":
             }
         return ProviderError("task_not_startable", f"task {task_id!r} has status {status!r} (must be 'ready')", data)
 
-    def _replay_worker_start(self, request_id: str, payload_sha: str) -> dict[str, Any] | None:
+    def _replay_worker_start(
+        self, request_id: str, payload_sha: str, *, eff_run: str | None = None
+    ) -> dict[str, Any] | None:
         """A retried `--retry-request`: the recorded outcome, never a second launch (#597)."""
         row = self.state.request_row(request_id)
         if row is None:
             return None
+        it_pre = self.state.launch_intent(row["intent_id"]) if row.get("intent_id") else None
+        if eff_run is not None and it_pre is not None:
+            it_run = str(it_pre["run_id"] or "default")
+            if it_run != eff_run:
+                raise ProviderError(
+                    "cross_run_access",
+                    f"task {it_pre['task_id']!r} belongs to run {it_run!r}, not {eff_run!r}",
+                )
+        caller_scope = self.state._caller_request_scope()
+        if row.get("caller_scope") and row["caller_scope"] != caller_scope:
+            if eff_run is not None and row["caller_scope"].startswith("worker:") and not row["caller_scope"].startswith(f"worker:{eff_run}:"):
+                raise ProviderError(
+                    "cross_run_access",
+                    f"retry-request {request_id!r} belongs to another run's worker scope",
+                    {"requestId": request_id},
+                )
+            raise ProviderError(
+                "request_mismatch",
+                f"retry-request {request_id!r} belongs to a different caller scope; use a new request id",
+                {"requestId": request_id},
+            )
         if row["method"] != "worker-start":
             raise ProviderError("request_mismatch", f"retry-request {request_id!r} bound to {row['method']}, not worker-start")
         self.state.check_request_payload(request_id, row.get("payload_sha256"), payload_sha)
@@ -2531,6 +2562,7 @@ if {repr(self.backend)} == "cmux":
         takeover: bool = False,
     ) -> dict[str, Any]:
         """Settle launches a dead coordinator left open; `takeover` also fences a LIVE one (#597)."""
+        bound = self.state._resolve_caller_run(None, default_run=None)
         if request:
             row = self.state.request_row(request)
             if row is None:
@@ -2540,11 +2572,26 @@ if {repr(self.backend)} == "cmux":
             if intent and intent != row["intent_id"]:
                 raise ProviderError("invalid_argument", f"request {request!r} names intent {row['intent_id']!r}, not {intent!r}")
             intent = row["intent_id"]
-        ids = [intent] if intent else [r["intent_id"] for r in self.state.open_launch_intents()]
+        if intent:
+            it_chk = self.state.launch_intent(intent)
+            if it_chk is not None and bound is not None:
+                it_run = str(it_chk["run_id"] or "default")
+                if it_run != bound:
+                    raise ProviderError(
+                        "cross_run_access",
+                        f"launch intent {intent!r} belongs to run {it_run!r}, not {bound!r}",
+                    )
+            ids = [intent]
+        else:
+            ids = [
+                r["intent_id"]
+                for r in self.state.open_launch_intents()
+                if bound is None or str(r["run_id"] or "default") == bound
+            ]
         receipts = [self._reconcile_intent(i, takeover=takeover) for i in ids]
         return {"reconciled": receipts, "count": len(receipts)}
 
-    def _reconcile_dead_intents(self, task_id: str | None = None) -> None:
+    def _reconcile_dead_intents(self, task_id: str | None = None, *, run_id: str | None = None) -> None:
         """Settle every open launch on this host whose coordinator is provably gone.
 
         An `unknown` launch is left to an explicit `launch-reconcile`: it waits on an inspection,
@@ -2552,6 +2599,8 @@ if {repr(self.backend)} == "cmux":
         """
         host = socket.gethostname()
         for it in self.state.open_launch_intents(task_id):
+            if run_id is not None and str(it["run_id"] or "default") != run_id:
+                continue
             if it["owner_host"] != host or it["outcome"] == "unknown":
                 continue
             try:
@@ -3275,7 +3324,7 @@ if {repr(self.backend)} == "cmux":
             q += " AND task_id = ?"
             params.append(task)
         q += " ORDER BY created_at DESC, dispatch_id DESC"
-        self._reconcile_dead_intents()
+        self._reconcile_dead_intents(run_id=run)
         self._sweep_liveness(self._dispatch_rows(q, tuple(params)))
         rows = self._dispatch_rows(q, tuple(params))
         if terminal_state:
@@ -3313,7 +3362,7 @@ if {repr(self.backend)} == "cmux":
 
     def worker_show(self, dispatch_id: str) -> dict[str, Any]:
         bound = self.state._resolve_caller_run(None, default_run=None)
-        self._reconcile_dead_intents()
+        self._reconcile_dead_intents(run_id=bound)
         rows = self._dispatch_rows("WHERE dispatch_id = ?", (dispatch_id,))
         if not rows:
             raise ProviderError("dispatch_not_found", f"dispatch {dispatch_id!r} not found")

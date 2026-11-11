@@ -1420,10 +1420,23 @@ class MergeQueue:
     )
     _LOOKUP_VARS = frozenset({
         "PATH", "IFS", "CDPATH", "ENV", "BASH_ENV",
-        "LD_PRELOAD", "LD_LIBRARY_PATH", "PYTHONPATH",
-        "PYTHONHOME", "PYTHONSTARTUP", "NODE_OPTIONS", "PERL5OPT", "RUBYOPT",
-        "FPATH", "GLOBIGNORE", "EXECIGNORE",
+        "SHELLOPTS", "BASHOPTS", "BASH_LOADABLES_PATH", "BASH_COMPAT",
+        "POSIXLY_CORRECT", "ZDOTDIR", "FPATH", "GLOBIGNORE", "EXECIGNORE",
+        "PROMPT_COMMAND", "PS0", "PS4",
+        "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "GLIBC_TUNABLES",
+        "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONSAFEPATH",
+        "PYTHONPYCACHEPREFIX", "PYTHONWARNINGS", "PYTHONINSPECT",
+        "PYTHONUSERBASE", "VIRTUAL_ENV",
+        "NODE_OPTIONS", "NODE_PATH", "NODE_REPL_EXTERNAL_MODULE",
+        "DENO_DIR", "BUN_INSTALL",
+        "PERL5OPT", "PERL5LIB", "PERLLIB",
+        "RUBYOPT", "RUBYLIB", "GEM_HOME", "GEM_PATH", "BUNDLE_GEMFILE",
+        "AWKPATH", "AWKLIBPATH",
+        "PHPRC", "PHP_INI_SCAN_DIR",
+        "R_PROFILE", "R_PROFILE_USER", "R_ENVIRON", "R_ENVIRON_USER",
+        "R_LIBS", "R_LIBS_USER", "R_LIBS_SITE",
     })
+    _LOOKUP_PREFIXES = ("BASH_FUNC_", "LD_", "DYLD_", "LUA_")
 
     @classmethod
     def _touches_lookup_var(cls, raw_target: str) -> bool:
@@ -1432,17 +1445,17 @@ class MergeQueue:
         if "[" in raw_target or "]" in raw_target:
             return True
         base = re.split(r"[\+=]", raw_target, maxsplit=1)[0]
-        if base.upper() in cls._LOOKUP_VARS or base.upper().startswith("BASH_FUNC_"):
+        if base.upper() in cls._LOOKUP_VARS or base.upper().startswith(cls._LOOKUP_PREFIXES):
             return True
         return any(
-            ident.upper() in cls._LOOKUP_VARS or ident.upper().startswith("BASH_FUNC_")
+            ident.upper() in cls._LOOKUP_VARS or ident.upper().startswith(cls._LOOKUP_PREFIXES)
             for ident in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", base)
         )
 
     @classmethod
     def _allowed_extra_keep(cls, name: str) -> bool:
         up = name.upper()
-        if up in cls.GATE_ENV_ISOLATED_KEYS or up in cls._LOOKUP_VARS:
+        if up in cls.GATE_ENV_ISOLATED_KEYS or up in cls._LOOKUP_VARS or up.startswith(cls._LOOKUP_PREFIXES):
             return False
         if up.startswith(cls.GATE_ENV_FORBID_PREFIX) or up.endswith(cls.GATE_ENV_FORBID_SUFFIX):
             return False

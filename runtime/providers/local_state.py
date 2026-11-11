@@ -994,6 +994,14 @@ class LocalStateStore:
         retry_request: str | None = None,
     ) -> dict[str, Any]:
         eff_run = self._resolve_caller_run(run, default_run=None)
+        if eff_run is not None:
+            with self._connect() as conn:
+                r_pre = conn.execute("SELECT run_id FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if r_pre is not None and r_pre["run_id"] != eff_run:
+                raise ProviderError(
+                    "cross_run_access",
+                    f"task {task_id!r} belongs to run {r_pre['run_id']!r}, not {eff_run!r}",
+                )
         payload_sha = request_payload_sha256(
             {"task_id": task_id, "status": status, "result": result, "run": eff_run}
         )
@@ -1886,6 +1894,14 @@ class LocalStateStore:
         if not task_id or not question:
             raise ProviderError("invalid_argument", "gate-create needs both --task and --question")
         eff_run = self._resolve_caller_run(run, default_run=None)
+        if eff_run is not None:
+            with self._connect() as conn:
+                t_pre = conn.execute("SELECT run_id FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if t_pre is not None and t_pre["run_id"] != eff_run:
+                raise ProviderError(
+                    "cross_run_access",
+                    f"task {task_id!r} belongs to run {t_pre['run_id']!r}, not {eff_run!r}",
+                )
         payload_sha = request_payload_sha256(
             {"task_id": task_id, "question": question, "options": options, "run": eff_run, "sender": sender}
         )

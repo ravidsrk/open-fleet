@@ -739,6 +739,11 @@ class GateRunsIsolated(QueueCase):
             "gawk -e 'BEGIN {exit system(\"/opt/gates/check\")}'",
             "sed 'e /opt/gates/check' /dev/null",
             "sed -e 's/.*/x/e' /dev/null",
+            "env SHELLOPTS=keyword bash -c 'gate-check PATH=/opt/alternate/bin'",
+            "SHELLOPTS=keyword bash -c 'gate-check PATH=/opt/alternate/bin'",
+            "PYTHONSAFEPATH=1 python3 -m gate_mod",
+            "env PYTHONWARNINGS=ignore::ext_pkg.Warn python3 ./script.py",
+            "AWKPATH=/opt/gates awk -f check.awk /dev/null",
         ):
             _, _, dyn_probs = mq_mod.MergeQueue._analyze_gate_command(unsafe_gate)
             self.assertTrue(dyn_probs, f"expected fail-closed problem on {unsafe_gate!r}")
