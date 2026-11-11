@@ -2903,6 +2903,14 @@ class EndToEndMutationGreen(MutationFixture):
                 )
                 self.assertIsNone(recs_after)
                 self.assertIn('proof executable changed before control phase', err_after)
+
+                py_alias = ext_root / 'pycheck'
+                py_alias.symlink_to(sys.executable)
+                recs_alias, err_alias = verify._Authority.nc_exec_identity(
+                    [str(py_alias), 'tests/test_probe.py'], str(self.repo)
+                )
+                self.assertIsNone(recs_alias)
+                self.assertIn('via alias', err_alias)
         finally:
             shutil.rmtree(self.repo / 'bin', ignore_errors=True)
 

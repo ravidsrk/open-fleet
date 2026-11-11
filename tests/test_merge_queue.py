@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.util
 import hashlib
 import json
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -964,6 +965,46 @@ class GateRunsIsolated(QueueCase):
                 self.w.env.pop("PATH", None)
             else:
                 self.w.env["PATH"] = saved_path
+
+    def test_interpreter_alias_script_replacement_invalidates_saved_plan(self):
+        tools_dir = self.w.tmp / "bin" / "interp-alias"
+        tools_dir.mkdir(parents=True, exist_ok=True)
+        pycheck = tools_dir / "pycheck"
+        pycheck.symlink_to(sys.executable)
+        check_py = tools_dir / "check.py"
+        check_py.write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
+        gate_cmd = f"{pycheck} {check_py}"
+
+        tok = self.acquire("c-interp-alias")
+        self.board(tok, self.w.unit("interp-alias-unit"))
+        rc_p, out_p = self.w.cli("plan", "--token", tok, "--gate-cmd", gate_cmd)
+        self.assertEqual(rc_p, 0, out_p)
+        self.assertEqual(out_p["planned"][0]["result"], "tested", out_p)
+
+        # Replacing the external script operand after `plan` must invalidate `plan_passed`.
+        check_py.write_text("import sys\nsys.exit(1)\n", encoding="utf-8")
+        rc_m, out_m = self.w.cli("merge", "--token", tok, "--require-gate", gate_cmd)
+        self.assertNotEqual(rc_m, 0, out_m)
+        self.assertEqual(out_m.get("code"), "gate_not_run", out_m)
+
+        # Inline `-c` via an interpreter alias must fail closed just like canonical `python3 -c`.
+        q = self.w.queue()
+        fp_inline, probs_inline = q._gate_fingerprint(f"{pycheck} -c 'import sys'")
+        self.assertEqual(fp_inline, "")
+        self.assertTrue(probs_inline)
+
+        env_bin = shutil.which("env")
+        if env_bin:
+            envwrap = tools_dir / "envwrap"
+            envwrap.symlink_to(env_bin)
+            wrap_cmd = f"{envwrap} FOO=1 {pycheck} {check_py}"
+            fp_w1, probs_w1 = q._gate_fingerprint(wrap_cmd)
+            self.assertEqual(probs_w1, [])
+            self.assertTrue(fp_w1)
+            check_py.write_text("import sys\nsys.exit(2)\n", encoding="utf-8")
+            fp_w2, probs_w2 = q._gate_fingerprint(wrap_cmd)
+            self.assertEqual(probs_w2, [])
+            self.assertNotEqual(fp_w2, fp_w1)
 
     def test_bwrap_filtered_path_and_dangling_symlinks_fingerprint_sandbox_view(self):
         fake_home = self.w.tmp / "bw-fp-home"

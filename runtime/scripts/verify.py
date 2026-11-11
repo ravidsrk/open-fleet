@@ -1069,6 +1069,7 @@ class _Authority:
     _SHELL_RE = re.compile(
         r"(?:sh|bash|rbash|dash|zsh|rzsh|ksh|rksh|mksh|pdksh|yash|posh|ash|hush|csh|tcsh)(?:[-.]?\d+(?:\.\d+)*)?"
     )
+    _MULTICALL_BOX_RE = re.compile(r"(?:busybox|toybox|sbase-box|ubase-box)(?:[.-][A-Za-z0-9_.-]+)?")
     _MUX_RE = re.compile(
         r"(?:(?:g?sed|gnused|[gmn]?awk|deno|bun)(?:[-.]?\d+(?:\.\d+)*)?"
         r"|(?:busybox|toybox|sbase-box|ubase-box)(?:[.-][A-Za-z0-9_.-]+)?"
@@ -1083,6 +1084,43 @@ class _Authority:
     @classmethod
     def _is_mux_exe(cls, name):
         return name in cls._NC_FORBID_MUX_EXES or bool(cls._MUX_RE.fullmatch(name))
+
+    @classmethod
+    def _exec_family(cls, name):
+        if cls._MULTICALL_BOX_RE.fullmatch(name):
+            return "multicall_box"
+        if cls._is_mux_exe(name):
+            return "mux_wrapper"
+        if name in ("env", "genv"):
+            return "wrap:env"
+        if name in ("nice", "gnice"):
+            return "wrap:nice"
+        if name in ("timeout", "gtimeout"):
+            return "wrap:timeout"
+        if name in ("nohup", "gnohup"):
+            return "wrap:nohup"
+        if name in ("command", "builtin"):
+            return f"wrap:{name}"
+        if re.fullmatch(r"(?:csh|tcsh)(?:[-.]?\d+(?:\.\d+)*)?", name):
+            return "shell:csh"
+        if cls._is_shell_name(name):
+            return "shell:posix"
+        for k, pat in (
+            ("interp:python", r"(?:python|pypy)(?:[-.]?\d+(?:\.\d+)*)?"),
+            ("interp:node", r"node(?:js)?(?:[-.]?\d+(?:\.\d+)*)?"),
+            ("interp:perl", r"perl(?:[-.]?\d+(?:\.\d+)*)?"),
+            ("interp:ruby", r"ruby(?:[-.]?\d+(?:\.\d+)*)?"),
+            ("interp:php", r"php(?:[-.]?\d+(?:\.\d+)*)?"),
+            ("interp:lua", r"lua(?:jit)?(?:[-.]?\d+(?:\.\d+)*)?"),
+            ("interp:Rscript", r"Rscript(?:[-.]?\d+(?:\.\d+)*)?"),
+            ("runner:pytest", r"(?:pytest|py\.test)(?:[-.]?\d+(?:\.\d+)*)?"),
+            ("runner:make", r"g?make(?:[-.]?\d+(?:\.\d+)*)?"),
+            ("runner:grep", r"(?:[efg]?grep)(?:[-.]?\d+(?:\.\d+)*)?"),
+            ("runner:rg", r"(?:rg|ripgrep)(?:[-.]?\d+(?:\.\d+)*)?"),
+        ):
+            if re.fullmatch(pat, name):
+                return k
+        return None
     _SAFE_SHELL_O_OPTIONS = frozenset({
         "allexport", "braceexpand", "errexit", "errtrace", "functrace",
         "hashall", "histexpand", "monitor", "noclobber", "noexec",
@@ -1119,7 +1157,7 @@ class _Authority:
     )
     _NC_FORBID_MUX_EXES = frozenset({
         "busybox", "toybox", "sbase-box", "ubase-box",
-        "xargs", "find", "stdbuf", "setsid", "flock", "chrt", "ionice",
+        "xargs", "gxargs", "find", "gfind", "stdbuf", "setsid", "flock", "chrt", "ionice",
         "taskset", "prlimit", "choom", "uclampset", "numactl", "eatmydata", "chronic",
         "script", "expect", "screen", "tmux", "ssh",
         "su", "sudo", "doas", "pkexec", "runuser", "dzdo", "pfexec",
@@ -1263,7 +1301,7 @@ class _Authority:
                 return None, err
             staged.append(rest[pi])
             scan_idx = pi + 1
-        elif name in {"make", "gmake"}:
+        elif re.fullmatch(r"g?make(?:[-.]?\d+(?:\.\d+)*)?", name):
             mi = 0
             while mi < len(rest):
                 a = rest[mi]
@@ -1294,6 +1332,10 @@ class _Authority:
                 else:
                     mi += 1
             return staged, None
+        elif re.fullmatch(r"(?:pytest|py\.test)(?:[-.]?\d+(?:\.\d+)*)?", name):
+            program = "pytest"
+        elif re.fullmatch(r"(?:[efg]?grep)(?:[-.]?\d+(?:\.\d+)*)?", name):
+            program = "grep"
 
         if program == "unittest":
             ui, u_after, u_pos = scan_idx, False, []
@@ -1565,7 +1607,7 @@ class _Authority:
                     return None, sh_err
                 break
             idx += 1
-            if name == "env":
+            if name in ("env", "genv"):
                 while idx < len(argv):
                     a = argv[idx]
                     if a == "--":
@@ -1641,7 +1683,7 @@ class _Authority:
                     return None, f"command option {argv[idx]!r} alters lookup/execution; fail-closed (#750 C19)"
                 if idx >= len(argv):
                     return None, "command wrapper has no target proof command; fail-closed (#750 C19)"
-            elif name == "nohup":
+            elif name in ("nohup", "gnohup"):
                 while idx < len(argv) and argv[idx].startswith("-") and len(argv[idx]) > 1:
                     if argv[idx] == "--":
                         idx += 1
@@ -1649,7 +1691,7 @@ class _Authority:
                     return None, f"nohup option {argv[idx]!r} is unsupported; fail-closed (#750 C19)"
                 if idx >= len(argv):
                     return None, "nohup wrapper has no target proof command; fail-closed (#750 C19)"
-            elif name == "nice":
+            elif name in ("nice", "gnice"):
                 while idx < len(argv) and argv[idx].startswith("-") and len(argv[idx]) > 1:
                     opt = argv[idx]
                     if opt == "--":
@@ -1665,7 +1707,7 @@ class _Authority:
                         return None, f"nice option {opt!r} is unsupported; fail-closed (#750 C19)"
                 if idx >= len(argv):
                     return None, "nice wrapper has no target proof command; fail-closed (#750 C19)"
-            elif name == "timeout":
+            elif name in ("timeout", "gtimeout"):
                 while idx < len(argv) and argv[idx].startswith("-") and len(argv[idx]) > 1:
                     opt = argv[idx]
                     if opt == "--":
@@ -1755,8 +1797,23 @@ class _Authority:
         )
         if sub_err:
             return None, sub_err
-        interp_names = {Path(interp).name, Path(sub_chain[0][1]).name}
-        if "env" in interp_names:
+        i_base = Path(interp).name
+        i_real_base = Path(sub_chain[0][1]).name
+        eff_i_real_base = (
+            i_base
+            if (cls._MULTICALL_BOX_RE.fullmatch(i_real_base) and not cls._MULTICALL_BOX_RE.fullmatch(i_base))
+            else i_real_base
+        )
+        interp_names = {i_base, eff_i_real_base}
+        if (
+            cls._is_mux_exe(i_base)
+            or cls._is_mux_exe(eff_i_real_base)
+            or (interp_names & {"nice", "gnice", "timeout", "gtimeout", "nohup", "gnohup", "command", "builtin"})
+            or any(re.fullmatch(r"(?:csh|tcsh)(?:[-.]?\d+(?:\.\d+)*)?", n) for n in interp_names)
+        ):
+            return None, (f"proof executable {label!r} uses multiplexer or wrapper shebang {interp!r}; "
+                          "fail-closed (#750 C19)")
+        if interp_names & {"env", "genv"}:
             if not interp_arg or interp_arg.startswith("-") or "=" in interp_arg or any(c in interp_arg for c in " \t"):
                 return None, (f"proof executable {label!r} shebang env argument {interp_arg!r} "
                               "alters lookup or splits options; fail-closed (#750 C19)")
@@ -1769,6 +1826,22 @@ class _Authority:
             )
             if env_err:
                 return None, env_err
+            e_base = Path(interp_arg).name
+            e_real_base = Path(env_chain[0][1]).name
+            eff_e_real_base = (
+                e_base
+                if (cls._MULTICALL_BOX_RE.fullmatch(e_real_base) and not cls._MULTICALL_BOX_RE.fullmatch(e_base))
+                else e_real_base
+            )
+            e_names = {e_base, eff_e_real_base}
+            if (
+                cls._is_mux_exe(e_base)
+                or cls._is_mux_exe(eff_e_real_base)
+                or (e_names & {"env", "genv", "nice", "gnice", "timeout", "gtimeout", "nohup", "gnohup", "command", "builtin"})
+                or any(re.fullmatch(r"(?:csh|tcsh)(?:[-.]?\d+(?:\.\d+)*)?", n) for n in e_names)
+            ):
+                return None, (f"proof executable {label!r} shebang env target {interp_arg!r} "
+                              "resolves to multiplexer or wrapper; fail-closed (#750 C19)")
             return (self_rec, *sub_chain, *env_chain), None
         if interp_arg and not cls._shebang_arg_allowed(interp_names, interp_arg):
             return None, (f"proof executable {label!r} shebang option {interp_arg!r} "
@@ -1818,6 +1891,18 @@ class _Authority:
             chain, chain_err = cls._verify_exec_file_and_shebang(resolved, tok, roots, search_path)
             if chain_err:
                 return None, chain_err
+            tok_base = Path(tok).name
+            real_base = Path(chain[0][1]).name
+            eff_real_base = (
+                tok_base
+                if (cls._MULTICALL_BOX_RE.fullmatch(real_base) and not cls._MULTICALL_BOX_RE.fullmatch(tok_base))
+                else real_base
+            )
+            real_fam = cls._exec_family(eff_real_base)
+            tok_fam = cls._exec_family(tok_base)
+            if real_fam is not None and real_fam != tok_fam:
+                return None, (f"proof executable {tok!r} resolves to {chain[0][1]!r} ({real_fam}) "
+                              "via alias; invoke the canonical tool name so operands are verified (#750 C19)")
             records.append((argv_idx, tok, *chain[0], chain[1:]))
         out = tuple(records)
         if expected is not None and out != expected:

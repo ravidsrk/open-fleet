@@ -1417,7 +1417,7 @@ class MergeQueue:
     })
     _MUX_WRAPPERS = frozenset({
         "busybox", "toybox", "sbase-box", "ubase-box",
-        "xargs", "find", "stdbuf", "setsid", "flock", "chrt", "ionice",
+        "xargs", "gxargs", "find", "gfind", "stdbuf", "setsid", "flock", "chrt", "ionice",
         "taskset", "prlimit", "choom", "uclampset", "numactl", "eatmydata", "chronic",
         "parallel", "watch", "time", "script", "expect", "screen", "tmux", "ssh",
         "su", "sudo", "doas", "pkexec", "runuser", "dzdo", "pfexec",
@@ -1436,6 +1436,45 @@ class MergeQueue:
     @classmethod
     def _is_mux_wrapper(cls, name: str) -> bool:
         return name in cls._MUX_WRAPPERS or bool(cls._MUX_WRAPPER_RE.fullmatch(name))
+
+    @classmethod
+    def _exec_family(cls, name: str) -> str | None:
+        if cls._MULTICALL_BOX_RE.fullmatch(name):
+            return "multicall_box"
+        if cls._is_mux_wrapper(name):
+            return "mux_wrapper"
+        if name in ("env", "genv"):
+            return "wrap:env"
+        if name in ("nice", "gnice"):
+            return "wrap:nice"
+        if name in ("timeout", "gtimeout"):
+            return "wrap:timeout"
+        if name in ("nohup", "gnohup"):
+            return "wrap:nohup"
+        if name in ("command", "builtin"):
+            return f"wrap:{name}"
+        if re.fullmatch(r"(?:csh|tcsh)(?:[-.]?\d+(?:\.\d+)*)?", name):
+            return "shell:csh"
+        if cls._is_shell_name(name):
+            return "shell:posix"
+        if re.fullmatch(r"(?:python|pypy)(?:[-.]?\d+(?:\.\d+)*)?", name):
+            return "interp:python"
+        if re.fullmatch(r"node(?:js)?(?:[-.]?\d+(?:\.\d+)*)?", name):
+            return "interp:node"
+        for k, pat in (
+            ("perl", r"perl(?:[-.]?\d+(?:\.\d+)*)?"),
+            ("ruby", r"ruby(?:[-.]?\d+(?:\.\d+)*)?"),
+            ("php", r"php(?:[-.]?\d+(?:\.\d+)*)?"),
+            ("lua", r"lua(?:jit)?(?:[-.]?\d+(?:\.\d+)*)?"),
+            ("Rscript", r"Rscript(?:[-.]?\d+(?:\.\d+)*)?"),
+            ("deno", r"deno(?:[-.]?\d+(?:\.\d+)*)?"),
+            ("bun", r"bun(?:[-.]?\d+(?:\.\d+)*)?"),
+            ("sed", r"(?:g?sed|gnused)(?:[-.]?\d+(?:\.\d+)*)?"),
+            ("awk", r"(?:[gmn]?awk)(?:[-.]?\d+(?:\.\d+)*)?"),
+        ):
+            if re.fullmatch(pat, name):
+                return f"interp:{k}"
+        return None
     _COMPOUND_PREFIX_KEYWORDS = frozenset({
         "!", "{", "}", "if", "then", "elif", "else", "while", "until", "do",
     })
@@ -2064,7 +2103,13 @@ class MergeQueue:
 
     @classmethod
     def _analyze_gate_command(
-        cls, gate_cmd: str, _depth: int = 0, _exec_tokens: set[str] | None = None
+        cls,
+        gate_cmd: str,
+        _depth: int = 0,
+        _exec_tokens: set[str] | None = None,
+        *,
+        _resolve_exec_base: Callable[[str], str | None] | None = None,
+        _analyzed_bases: dict[str, str] | None = None,
     ) -> tuple[list[str], list[str], list[str]]:
         """Extract `(executables, sourced_files, problems)` across simple and compound shell syntax."""
         if _depth > 6:
@@ -2076,7 +2121,13 @@ class MergeQueue:
         sourced: list[str] = []
         problems: list[str] = list(sub_problems)
         for sub in subs:
-            s_exe, s_src, s_prob = cls._analyze_gate_command(sub, _depth + 1, _exec_tokens=_exec_tokens)
+            s_exe, s_src, s_prob = cls._analyze_gate_command(
+                sub,
+                _depth + 1,
+                _exec_tokens=_exec_tokens,
+                _resolve_exec_base=_resolve_exec_base,
+                _analyzed_bases=_analyzed_bases,
+            )
             executables.extend(s_exe)
             sourced.extend(s_src)
             problems.extend(s_prob)
@@ -2278,14 +2329,30 @@ class MergeQueue:
                     problems.append(f"dynamic command word {cw!r} cannot be statically fingerprinted")
                     wi = len(cmd_words)
                     break
-                cw_base = Path(cw).name
+                cw_is_shell_dispatch = (
+                    not force_external
+                    and "/" not in cw
+                    and (
+                        (cw in defined_funcs and not skip_funcs)
+                        or cw in cls._SHELL_BUILTINS
+                        or cw in ("command", "builtin", "exec", ".", "source", "eval")
+                        or (is_unquoted(cflag) and cw in cls._SHELL_KEYWORDS)
+                    )
+                )
+                cw_base = (
+                    ((_resolve_exec_base(cw) if _resolve_exec_base else None) or Path(cw).name)
+                    if not cw_is_shell_dispatch
+                    else Path(cw).name
+                )
+                if not cw_is_shell_dispatch and _analyzed_bases is not None:
+                    _analyzed_bases[cw] = cw_base
                 if cls._is_mux_wrapper(cw_base):
                     problems.append(
                         f"{cw!r} multiplexes or wraps inner commands whose targets cannot be statically fingerprinted"
                     )
                     wi = len(cmd_words)
                     break
-                if cw_base == "env":
+                if cw_base in ("env", "genv"):
                     executables.append(cw)
                     if _exec_tokens is not None:
                         _exec_tokens.add(cw)
@@ -2406,7 +2473,7 @@ class MergeQueue:
                             )
                         wi += 1
                     continue
-                if cw_base == "nice":
+                if cw_base in ("nice", "gnice"):
                     executables.append(cw)
                     if _exec_tokens is not None:
                         _exec_tokens.add(cw)
@@ -2436,7 +2503,7 @@ class MergeQueue:
                             wi = len(cmd_words)
                             break
                     continue
-                if cw_base == "timeout":
+                if cw_base in ("timeout", "gtimeout"):
                     executables.append(cw)
                     if _exec_tokens is not None:
                         _exec_tokens.add(cw)
@@ -2488,7 +2555,7 @@ class MergeQueue:
                                     "timeout: missing inner command operand cannot be statically fingerprinted"
                                 )
                     continue
-                if cw_base == "nohup":
+                if cw_base in ("nohup", "gnohup"):
                     executables.append(cw)
                     if _exec_tokens is not None:
                         _exec_tokens.add(cw)
@@ -2504,7 +2571,7 @@ class MergeQueue:
                         problems.append(f"nohup: unsupported option {nh_opt!r} cannot be statically fingerprinted")
                         wi += 1
                     continue
-                if cw_base in ("command", "builtin") and ("/" in cw or force_external):
+                if cw_base in ("command", "builtin") and ("/" in cw or force_external or cw not in ("command", "builtin")):
                     problems.append(f"external {cw!r} utility cannot be statically fingerprinted")
                     wi = len(cmd_words)
                     break
@@ -2754,7 +2821,13 @@ class MergeQueue:
                     if is_dynamic(t_flag):
                         problems.append("trap: dynamic action string cannot be statically fingerprinted")
                     elif t_act and t_act != "-" and not t_act.isdigit():
-                        e2, s2, p2 = cls._analyze_gate_command(t_act, _depth + 1, _exec_tokens=_exec_tokens)
+                        e2, s2, p2 = cls._analyze_gate_command(
+                            t_act,
+                            _depth + 1,
+                            _exec_tokens=_exec_tokens,
+                            _resolve_exec_base=_resolve_exec_base,
+                            _analyzed_bases=_analyzed_bases,
+                        )
                         executables.extend(e2)
                         sourced.extend(s2)
                         problems.extend(p2)
@@ -2798,11 +2871,13 @@ class MergeQueue:
                         else:
                             sourced.append(src_target)
                     continue
+            is_ext_exec = False
             if force_external:
                 if final_word:
                     executables.append(final_word)
                     if _exec_tokens is not None:
                         _exec_tokens.add(final_word)
+                    is_ext_exec = True
             elif final_word in defined_funcs and not skip_funcs:
                 executables.append(f"__func__:{final_word}")
             elif final_word and not (
@@ -2812,21 +2887,40 @@ class MergeQueue:
                 executables.append(final_word)
                 if _exec_tokens is not None:
                     _exec_tokens.add(final_word)
-            final_base = Path(final_word).name
-            if final_base == "find" and any(
+                is_ext_exec = True
+            final_base = (
+                ((_resolve_exec_base(final_word) if _resolve_exec_base else None) or Path(final_word).name)
+                if is_ext_exec and final_word
+                else Path(final_word).name
+            )
+            if is_ext_exec and final_word and _analyzed_bases is not None:
+                _analyzed_bases[final_word] = final_base
+            if cls._is_mux_wrapper(final_base):
+                problems.append(
+                    f"{final_word!r} multiplexes or wraps inner commands whose targets cannot be statically fingerprinted"
+                )
+            elif final_base in ("find", "gfind") and any(
                 fa in ("-exec", "-execdir", "-ok", "-okdir") or is_dynamic(ff)
                 for fa, ff in cmd_words[wi + 1:]
             ):
                 problems.append("find -exec/-ok or dynamic predicate dispatches commands that cannot be statically fingerprinted")
             elif cls._is_shell_name(final_base):
                 s_src, s_exe, s_prob = cls._analyze_shell_invocation(
-                    final_word, cmd_words[wi + 1:], _depth, _exec_tokens=_exec_tokens
+                    final_word,
+                    cmd_words[wi + 1:],
+                    _depth,
+                    _exec_tokens=_exec_tokens,
+                    _resolved_base=final_base,
+                    _resolve_exec_base=_resolve_exec_base,
+                    _analyzed_bases=_analyzed_bases,
                 )
                 executables.extend(s_exe)
                 sourced.extend(s_src)
                 problems.extend(s_prob)
             else:
-                i_exe, i_prob = cls._analyze_interpreter_invocation(final_word, cmd_words[wi + 1:])
+                i_exe, i_prob = cls._analyze_interpreter_invocation(
+                    final_word, cmd_words[wi + 1:], _resolved_base=final_base
+                )
                 executables.extend(i_exe)
                 problems.extend(i_prob)
         if paren_depth != 0:
@@ -2844,13 +2938,18 @@ class MergeQueue:
         args: list[tuple[str, Any]],
         _depth: int,
         _exec_tokens: set[str] | None = None,
+        *,
+        _resolved_base: str | None = None,
+        _resolve_exec_base: Callable[[str], str | None] | None = None,
+        _analyzed_bases: dict[str, str] | None = None,
     ) -> tuple[list[str], list[str], list[str]]:
         """Analyze `sh`/`bash`/etc. invocations (`-c <cmd>` or `<script>` operand), failing closed on
         stdin/interactive/login modes or ambiguous flags."""
         sourced: list[str] = []
         executables: list[str] = []
         problems: list[str] = []
-        if re.fullmatch(r"(?:csh|tcsh)(?:[-.]?\d+(?:\.\d+)*)?", Path(shell_word).name):
+        shell_base = _resolved_base or Path(shell_word).name
+        if re.fullmatch(r"(?:csh|tcsh)(?:[-.]?\d+(?:\.\d+)*)?", shell_base):
             return [], [], [f"{shell_word}: non-POSIX shell cannot be statically fingerprinted"]
 
         def is_dynamic(flag: Any) -> bool:
@@ -2915,7 +3014,13 @@ class MergeQueue:
                     if is_dynamic(sub_flag):
                         problems.append(f"{shell_word} -c: dynamic script cannot be fingerprinted")
                     else:
-                        e2, s2, p2 = cls._analyze_gate_command(sub_script, _depth + 1, _exec_tokens=_exec_tokens)
+                        e2, s2, p2 = cls._analyze_gate_command(
+                            sub_script,
+                            _depth + 1,
+                            _exec_tokens=_exec_tokens,
+                            _resolve_exec_base=_resolve_exec_base,
+                            _analyzed_bases=_analyzed_bases,
+                        )
                         executables.extend(e2)
                         sourced.extend(s2)
                         problems.extend(p2)
@@ -2941,11 +3046,15 @@ class MergeQueue:
 
     @classmethod
     def _analyze_interpreter_invocation(
-        cls, exe_word: str, args: list[tuple[str, Any]]
+        cls,
+        exe_word: str,
+        args: list[tuple[str, Any]],
+        *,
+        _resolved_base: str | None = None,
     ) -> tuple[list[str], list[str]]:
         """Extract direct script file operands for non-shell interpreters (`python*`, `perl`, `ruby`, `node`, etc.)
         so replacing an external script after `plan` invalidates the saved fingerprint."""
-        base = Path(exe_word).name
+        base = _resolved_base or Path(exe_word).name
 
         def is_dynamic(flag: Any) -> bool:
             return bool(isinstance(flag, dict) and flag.get("dynamic"))
@@ -3348,11 +3457,23 @@ class MergeQueue:
         )
         chain.extend(sub_chain)
         probs.extend(sub_probs)
-        interp_names = {Path(interp).name, Path(i_real).name}
-        if self._is_mux_wrapper(Path(interp).name):
+        i_base = Path(interp).name
+        i_real_base = Path(i_real).name
+        eff_i_real_base = (
+            i_base
+            if (self._MULTICALL_BOX_RE.fullmatch(i_real_base) and not self._MULTICALL_BOX_RE.fullmatch(i_base))
+            else i_real_base
+        )
+        interp_names = {i_base, eff_i_real_base}
+        if (
+            self._is_mux_wrapper(i_base)
+            or self._is_mux_wrapper(eff_i_real_base)
+            or (interp_names & {"nice", "gnice", "timeout", "gtimeout", "nohup", "gnohup", "command", "builtin"})
+            or any(re.fullmatch(r"(?:csh|tcsh)(?:[-.]?\d+(?:\.\d+)*)?", n) for n in interp_names)
+        ):
             probs.append(f"{label}: shebang multiplexer or wrapper {interp!r} cannot be statically fingerprinted")
             return chain, probs
-        if "env" in interp_names:
+        if interp_names & {"env", "genv"}:
             if not interp_arg or interp_arg.startswith("-") or "=" in interp_arg or any(c in interp_arg for c in " \t"):
                 probs.append(
                     f"{label}: shebang env argument {interp_arg!r} alters lookup or splits options and cannot be statically fingerprinted"
@@ -3367,6 +3488,24 @@ class MergeQueue:
                 e_real = self._sandbox_which(interp_arg, clean_path, ro_binds)
             if not e_real:
                 probs.append(f"{label}: shebang env target {interp_arg!r} could not be resolved on gate sandbox PATH")
+                return chain, probs
+            e_base = Path(interp_arg).name
+            e_real_base = Path(e_real).name
+            eff_e_real_base = (
+                e_base
+                if (self._MULTICALL_BOX_RE.fullmatch(e_real_base) and not self._MULTICALL_BOX_RE.fullmatch(e_base))
+                else e_real_base
+            )
+            e_names = {e_base, eff_e_real_base}
+            if (
+                self._is_mux_wrapper(e_base)
+                or self._is_mux_wrapper(eff_e_real_base)
+                or (e_names & {"env", "genv", "nice", "gnice", "timeout", "gtimeout", "nohup", "gnohup", "command", "builtin"})
+                or any(re.fullmatch(r"(?:csh|tcsh)(?:[-.]?\d+(?:\.\d+)*)?", n) for n in e_names)
+            ):
+                probs.append(
+                    f"{label}: shebang env target {interp_arg!r} resolves to multiplexer or wrapper and cannot be statically fingerprinted"
+                )
                 return chain, probs
             try:
                 e_st = os.stat(e_real)
@@ -3427,7 +3566,30 @@ class MergeQueue:
         ro_binds = _ro_binds if _has_ro_binds else self._bwrap_ro_binds()
         items: list[dict[str, Any]] = []
         exec_tokens: set[str] = {"/bin/sh"}
-        exes, sourced, problems = self._analyze_gate_command(gate_cmd, _exec_tokens=exec_tokens)
+
+        def _resolve_exec_base(word: str) -> str | None:
+            if not word or ("/" in word and not os.path.isabs(word)):
+                return None
+            r_target = (
+                self._sandbox_resolve_path(word, ro_binds)
+                if os.path.isabs(word)
+                else self._sandbox_which(word, clean_path, ro_binds)
+            )
+            if not r_target:
+                return None
+            r_base = Path(r_target).name
+            w_base = Path(word).name
+            if self._MULTICALL_BOX_RE.fullmatch(r_base) and not self._MULTICALL_BOX_RE.fullmatch(w_base):
+                return w_base
+            return r_base
+
+        analyzed_bases: dict[str, str] = {}
+        exes, sourced, problems = self._analyze_gate_command(
+            gate_cmd,
+            _exec_tokens=exec_tokens,
+            _resolve_exec_base=_resolve_exec_base,
+            _analyzed_bases=analyzed_bases,
+        )
         custom_sbx = (
             self.env.get("MQ_GATE_SANDBOX_CMD")
             or self.env.get("OPEN_FLEET_GATE_SANDBOX_CMD")
@@ -3499,6 +3661,18 @@ class MergeQueue:
                 if not s_real:
                     items.append({"tok": tok, "shadowed": None})
                     continue
+                if tok.startswith("__opt_builtin__:"):
+                    s_real_base = Path(s_real).name
+                    eff_s_base = (
+                        fn_name
+                        if (self._MULTICALL_BOX_RE.fullmatch(s_real_base) and not self._MULTICALL_BOX_RE.fullmatch(fn_name))
+                        else s_real_base
+                    )
+                    s_fam = self._exec_family(eff_s_base)
+                    if s_fam is not None:
+                        problems.append(
+                            f"{fn_name}: optional builtin shadows external {s_real!r} ({s_fam}) on gate PATH"
+                        )
                 try:
                     s_st = os.stat(s_real)
                     s_bytes = Path(s_real).read_bytes()
@@ -3589,19 +3763,18 @@ class MergeQueue:
                 if tok in exec_tokens:
                     tok_base = Path(tok).name
                     real_base = Path(real_target).name
-                    if tok != "/bin/sh" and real_base != tok_base:
-                        if self._is_mux_wrapper(real_base) and not self._MULTICALL_BOX_RE.fullmatch(real_base):
-                            problems.append(
-                                f"{tok}: resolves to wrapper or multiplexer {real_target!r} via alias"
-                            )
-                        elif real_base in ("env", "nice", "timeout", "nohup"):
-                            problems.append(
-                                f"{tok}: resolves to command wrapper {real_target!r} via alias"
-                            )
-                        elif self._is_shell_name(real_base) and not self._is_shell_name(tok_base):
-                            problems.append(
-                                f"{tok}: resolves to shell {real_target!r} via non-shell alias"
-                            )
+                    eff_real_base = (
+                        tok_base
+                        if (self._MULTICALL_BOX_RE.fullmatch(real_base) and not self._MULTICALL_BOX_RE.fullmatch(tok_base))
+                        else real_base
+                    )
+                    analyzed_base = analyzed_bases.get(tok, tok_base)
+                    real_fam = self._exec_family(eff_real_base)
+                    analyzed_fam = self._exec_family(analyzed_base)
+                    if tok != "/bin/sh" and real_fam is not None and real_fam != analyzed_fam:
+                        problems.append(
+                            f"{tok}: resolves to {real_target!r} ({real_fam}) without matching operand analysis"
+                        )
                     ext_sb, ext_sb_probs = self._fingerprint_shebang_chain(
                         raw_bytes, tok, clean_path, ro_binds=ro_binds
                     )
