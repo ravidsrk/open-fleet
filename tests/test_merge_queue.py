@@ -1111,6 +1111,15 @@ class GateRunsIsolated(QueueCase):
             fp_nb_noent, probs_nb_noent = q._gate_fingerprint(f"{mounted_dir}/no_such_dir/../shadow-gate")
             self.assertEqual(fp_nb_noent, "")
             self.assertTrue(probs_nb_noent)
+            fake_checkout = fake_home / "checkout-with-dash"
+            fake_checkout.mkdir(parents=True, exist_ok=True)
+            (fake_checkout / "-").write_text("q\n", encoding="utf-8")
+            good_sed = fake_checkout / "good.sed"
+            good_sed.write_text("q\n", encoding="utf-8")
+            stdin_link = mounted_dir / "stdin-link.sed"
+            stdin_link.symlink_to("/dev/stdin")
+            proc_fd_link = mounted_dir / "proc-fd0.sed"
+            proc_fd_link.symlink_to("/proc/self/fd/0")
             for unsafe_gate in (
                 'bash -c \'a=1; x="a[\\$(/opt/gates/probe)]"; exit "$[x]"\'',
                 'bash -c \'exit $[1 + 0]\'',
@@ -1128,8 +1137,23 @@ class GateRunsIsolated(QueueCase):
                 "env -- -bash -c true",
                 "/opt/gates/-bash -c true",
                 "zsh -c true",
+                f"sed -f - /etc/hostname < {good_sed}",
+                "sed -f- /etc/hostname",
+                "sed -nf- /etc/hostname",
+                "sed --file=- /etc/hostname",
+                "sed -f ./- /etc/hostname",
+                f"sed -f {good_sed} /etc/hostname -e '1p'",
+                f"sed -f {good_sed} /etc/hostname -f {stdin_link}",
+                f"sed -f {stdin_link} /etc/hostname",
+                f"sed -f {proc_fd_link} /etc/hostname",
+                f"awk -f - /etc/hostname < {good_sed}",
+                "awk -f- /etc/hostname",
+                "awk --file=- /etc/hostname",
+                "awk -f ./- /etc/hostname",
+                "python3 /dev/stdin",
+                "sh /dev/fd/0",
             ):
-                fp_u, probs_u = q._gate_fingerprint(unsafe_gate)
+                fp_u, probs_u = q._gate_fingerprint(unsafe_gate, cwd=fake_checkout)
                 self.assertEqual(fp_u, "", unsafe_gate)
                 self.assertTrue(probs_u, unsafe_gate)
 

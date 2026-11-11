@@ -86,6 +86,7 @@ import shutil
 import signal
 import socket
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1437,6 +1438,13 @@ class MergeQueue:
     def _is_mux_wrapper(cls, name: str) -> bool:
         return name in cls._MUX_WRAPPERS or bool(cls._MUX_WRAPPER_RE.fullmatch(name))
 
+    @staticmethod
+    def _is_stdin_or_special_script(p: str) -> bool:
+        if not p or p in ("-", "./-"):
+            return True
+        norm = os.path.normpath(p)
+        return norm in ("-", "/dev/stdin") or norm.startswith(("/dev/", "/proc/", "/sys/"))
+
     @classmethod
     def _exec_family(cls, name: str) -> str | None:
         if cls._MULTICALL_BOX_RE.fullmatch(name):
@@ -1469,8 +1477,8 @@ class MergeQueue:
             ("Rscript", r"Rscript(?:[-.]?\d+(?:\.\d+)*)?"),
             ("deno", r"deno(?:[-.]?\d+(?:\.\d+)*)?"),
             ("bun", r"bun(?:[-.]?\d+(?:\.\d+)*)?"),
-            ("sed", r"(?:g?sed|gnused)(?:[-.]?\d+(?:\.\d+)*)?"),
-            ("awk", r"(?:[gmn]?awk)(?:[-.]?\d+(?:\.\d+)*)?"),
+            ("sed", r"(?:[gs]?sed|gnused)(?:[-.]?\d+(?:\.\d+)*)?"),
+            ("awk", r"(?:[gmnb]?awk)(?:[-.]?\d+(?:\.\d+)*)?"),
         ):
             if re.fullmatch(pat, name):
                 return f"interp:{k}"
@@ -2304,7 +2312,11 @@ class MergeQueue:
             scan = idx + 1
             while scan < total and lex_tokens[scan][0] != "op":
                 if lex_tokens[scan][0] == "redir":
-                    scan += 2 if (scan + 1 < total and lex_tokens[scan + 1][0] == "word") else 1
+                    if scan + 1 >= total or lex_tokens[scan + 1][0] != "word":
+                        problems.append("redirection missing target word in gate command")
+                        scan += 1
+                    else:
+                        scan += 2
                     continue
                 cmd_words.append((lex_tokens[scan][1], lex_tokens[scan][2]))
                 scan += 1
@@ -2860,7 +2872,11 @@ class MergeQueue:
                         problems.append(f"{final_word}: dynamic or missing script target cannot be fingerprinted")
                     else:
                         src_target = cmd_words[wi + 1][0]
-                        if "/" not in src_target and not os.path.isabs(src_target):
+                        if cls._is_stdin_or_special_script(src_target):
+                            problems.append(
+                                f"{final_word}: stdin or special script target {src_target!r} cannot be statically fingerprinted"
+                            )
+                        elif "/" not in src_target and not os.path.isabs(src_target):
                             problems.append(
                                 f"{final_word}: script target {src_target!r} without '/' searches PATH and cannot be statically fingerprinted"
                             )
@@ -3035,6 +3051,8 @@ class MergeQueue:
                 script_arg, script_flag = args[j]
                 if is_dynamic(script_flag):
                     problems.append(f"{shell_word}: dynamic script operand {script_arg!r} cannot be fingerprinted")
+                elif cls._is_stdin_or_special_script(script_arg):
+                    problems.append(f"{shell_word}: stdin or special script operand {script_arg!r} cannot be fingerprinted")
                 elif "/" not in script_arg and not os.path.isabs(script_arg):
                     problems.append(
                         f"{shell_word}: script operand {script_arg!r} without '/' has shell-dependent lookup; use ./{script_arg} or an explicit path"
@@ -3135,9 +3153,9 @@ class MergeQueue:
                     for ma, mf in args[j + 2:]:
                         if ma == "--":
                             continue
-                        if is_dynamic(mf) or ma.startswith("-"):
+                        if is_dynamic(mf) or ma.startswith("-") or cls._is_stdin_or_special_script(ma):
                             return [], [
-                                f"{exe_word} -m {mod_name}: dynamic or option argument {ma!r} cannot be statically fingerprinted"
+                                f"{exe_word} -m {mod_name}: dynamic, stdin/special, or option argument {ma!r} cannot be statically fingerprinted"
                             ]
                         mod_files.append(norm_script(ma))
                     return mod_files, []
@@ -3148,8 +3166,8 @@ class MergeQueue:
             if j >= len(args):
                 return [], [f"{exe_word}: interpreter invoked without script or repo '-m' module cannot be fingerprinted"]
             script_arg, script_flag = args[j]
-            if script_arg == "-" or is_dynamic(script_flag):
-                return [], [f"{exe_word}: stdin or dynamic script operand cannot be statically fingerprinted"]
+            if cls._is_stdin_or_special_script(script_arg) or is_dynamic(script_flag):
+                return [], [f"{exe_word}: stdin, special, or dynamic script operand cannot be statically fingerprinted"]
             return [norm_script(script_arg)], []
 
         if re.fullmatch(r"(?:perl|ruby|node(?:js)?|php|lua(?:jit)?|Rscript)(?:[-.]?\d+(?:\.\d+)*)?", base):
@@ -3159,15 +3177,15 @@ class MergeQueue:
             if len(args) == 1 and not is_dynamic(f0) and a0 in ("-v", "-V", "--version", "-h", "--help"):
                 return [], []
             if a0 == "--":
-                if len(args) < 2 or args[1][0] == "-" or is_dynamic(args[1][1]):
-                    return [], [f"{exe_word}: missing or dynamic script operand cannot be fingerprinted"]
+                if len(args) < 2 or cls._is_stdin_or_special_script(args[1][0]) or is_dynamic(args[1][1]):
+                    return [], [f"{exe_word}: missing, stdin/special, or dynamic script operand cannot be fingerprinted"]
                 return [norm_script(args[1][0])], []
             if a0.startswith("-"):
                 return [], [f"{exe_word}: inline code or option {a0!r} cannot statically fingerprint external targets"]
             if re.fullmatch(r"node(?:js)?(?:[-.]?\d+(?:\.\d+)*)?", base) and a0 in ("inspect", "debug"):
                 return [], [f"{exe_word} {a0}: subcommand cannot statically fingerprint external targets"]
-            if is_dynamic(f0):
-                return [], [f"{exe_word}: dynamic script operand {a0!r} cannot be fingerprinted"]
+            if is_dynamic(f0) or cls._is_stdin_or_special_script(a0):
+                return [], [f"{exe_word}: stdin, special, or dynamic script operand {a0!r} cannot be fingerprinted"]
             return [norm_script(a0)], []
 
         if re.fullmatch(r"(?:deno|bun)(?:[-.]?\d+(?:\.\d+)*)?", base):
@@ -3178,23 +3196,28 @@ class MergeQueue:
                 return [], []
             if a0 == "run" and len(args) >= 2 and not args[1][0].startswith("-") and not is_dynamic(args[1][1]):
                 s_target = args[1][0]
-                if base.startswith("deno") or s_target.endswith((".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx")):
+                if not cls._is_stdin_or_special_script(s_target) and (
+                    base.startswith("deno") or s_target.endswith((".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"))
+                ):
                     return [norm_script(s_target)], []
             if (
                 base.startswith("bun")
                 and not a0.startswith("-")
                 and not is_dynamic(f0)
+                and not cls._is_stdin_or_special_script(a0)
                 and a0.endswith((".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"))
             ):
                 return [norm_script(a0)], []
             return [], [f"{exe_word}: subcommand, task, or option {a0!r} cannot statically fingerprint external targets"]
 
-        if re.fullmatch(r"(?:g?sed|gnused)(?:[-.]?\d+(?:\.\d+)*)?", base):
+        if re.fullmatch(r"(?:[gs]?sed|gnused)(?:[-.]?\d+(?:\.\d+)*)?", base):
             files: list[str] = []
             j = 0
+            saw_ddash = False
             while j < len(args):
                 a, a_flag = args[j]
                 if a == "--":
+                    saw_ddash = True
                     j += 1
                     break
                 if not a.startswith("-") or a == "-":
@@ -3223,15 +3246,15 @@ class MergeQueue:
                     j += 1
                     continue
                 if a in ("-f", "--file"):
-                    if j + 1 >= len(args) or is_dynamic(args[j + 1][1]) or not args[j + 1][0]:
-                        return [], [f"{exe_word} {a}: missing or dynamic script file cannot be fingerprinted"]
+                    if j + 1 >= len(args) or is_dynamic(args[j + 1][1]) or cls._is_stdin_or_special_script(args[j + 1][0]):
+                        return [], [f"{exe_word} {a}: missing, stdin/special, or dynamic script file cannot be fingerprinted"]
                     files.append(norm_script(args[j + 1][0]))
                     j += 2
                     continue
                 if a.startswith("--file="):
                     f_val = a.split("=", 1)[1]
-                    if not f_val:
-                        return [], [f"{exe_word} {a}: missing script file cannot be fingerprinted"]
+                    if cls._is_stdin_or_special_script(f_val):
+                        return [], [f"{exe_word} {a}: missing or stdin/special script file cannot be fingerprinted"]
                     files.append(norm_script(f_val))
                     j += 1
                     continue
@@ -3260,28 +3283,38 @@ class MergeQueue:
                         f"{exe_word} {a}: non-empty inline sed expression cannot statically fingerprint external command/file targets; use -f <script>"
                     ]
                 if rem == "f":
-                    if j + 1 >= len(args) or is_dynamic(args[j + 1][1]) or not args[j + 1][0]:
-                        return [], [f"{exe_word} {a}: missing or dynamic script file cannot be fingerprinted"]
+                    if j + 1 >= len(args) or is_dynamic(args[j + 1][1]) or cls._is_stdin_or_special_script(args[j + 1][0]):
+                        return [], [f"{exe_word} {a}: missing, stdin/special, or dynamic script file cannot be fingerprinted"]
                     files.append(norm_script(args[j + 1][0]))
                     j += 2
                     continue
                 if rem.startswith("f"):
+                    if cls._is_stdin_or_special_script(rem[1:]):
+                        return [], [f"{exe_word} {a}: stdin or special script file cannot be fingerprinted"]
                     files.append(norm_script(rem[1:]))
                     j += 1
                     continue
                 return [], [f"{exe_word} {a}: unsupported option cannot be statically fingerprinted"]
+            if not saw_ddash:
+                for pa, pf in args[j:]:
+                    if pa == "--":
+                        break
+                    if is_dynamic(pf) or (pa.startswith("-") and pa != "-"):
+                        return [], [f"{exe_word}: post-operand or dynamic option {pa!r} cannot be statically fingerprinted"]
             if not files:
                 return [], [
                     f"{exe_word}: inline sed script without -f cannot statically fingerprint external command/file targets"
                 ]
             return files, []
 
-        if re.fullmatch(r"(?:[gmn]?awk)(?:[-.]?\d+(?:\.\d+)*)?", base):
+        if re.fullmatch(r"(?:[gmnb]?awk)(?:[-.]?\d+(?:\.\d+)*)?", base):
             awk_files: list[str] = []
             j = 0
+            saw_ddash = False
             while j < len(args):
                 a, a_flag = args[j]
                 if a == "--":
+                    saw_ddash = True
                     j += 1
                     break
                 if not a.startswith("-") or a == "-":
@@ -3306,19 +3339,21 @@ class MergeQueue:
                         f"{exe_word} {a}: inline awk program cannot statically fingerprint external command/file targets; use -f <script>"
                     ]
                 if a in ("-f", "--file"):
-                    if j + 1 >= len(args) or is_dynamic(args[j + 1][1]) or not args[j + 1][0]:
-                        return [], [f"{exe_word} {a}: missing or dynamic script file cannot be fingerprinted"]
+                    if j + 1 >= len(args) or is_dynamic(args[j + 1][1]) or cls._is_stdin_or_special_script(args[j + 1][0]):
+                        return [], [f"{exe_word} {a}: missing, stdin/special, or dynamic script file cannot be fingerprinted"]
                     awk_files.append(norm_script(args[j + 1][0]))
                     j += 2
                     continue
                 if a.startswith("-f") and len(a) > 2:
+                    if cls._is_stdin_or_special_script(a[2:]):
+                        return [], [f"{exe_word} {a}: stdin or special script file cannot be fingerprinted"]
                     awk_files.append(norm_script(a[2:]))
                     j += 1
                     continue
                 if a.startswith("--file="):
                     f_val = a.split("=", 1)[1]
-                    if not f_val:
-                        return [], [f"{exe_word} {a}: missing script file cannot be fingerprinted"]
+                    if cls._is_stdin_or_special_script(f_val):
+                        return [], [f"{exe_word} {a}: missing or stdin/special script file cannot be fingerprinted"]
                     awk_files.append(norm_script(f_val))
                     j += 1
                     continue
@@ -3326,6 +3361,12 @@ class MergeQueue:
                     j += 1
                     continue
                 return [], [f"{exe_word} {a}: unsupported option cannot be statically fingerprinted"]
+            if not saw_ddash:
+                for pa, pf in args[j:]:
+                    if pa == "--":
+                        break
+                    if is_dynamic(pf) or (pa.startswith("-") and pa != "-"):
+                        return [], [f"{exe_word}: post-operand or dynamic option {pa!r} cannot be statically fingerprinted"]
             if not awk_files:
                 return [], [
                     f"{exe_word}: inline awk program without -f cannot statically fingerprint external command/file targets"
@@ -3446,6 +3487,8 @@ class MergeQueue:
             return [], [f"{label}: shebang interpreter {interp!r} is not accessible inside gate sandbox"]
         try:
             i_st = os.stat(i_real)
+            if not stat.S_ISREG(i_st.st_mode):
+                return [], [f"{label}: shebang interpreter {interp!r} ({i_real!r}) is not a regular file"]
             i_bytes = Path(i_real).read_bytes()
             i_sha = hashlib.sha256(i_bytes).hexdigest()
         except OSError as exc:
@@ -3510,6 +3553,9 @@ class MergeQueue:
                 return chain, probs
             try:
                 e_st = os.stat(e_real)
+                if not stat.S_ISREG(e_st.st_mode):
+                    probs.append(f"{label}: shebang env target {interp_arg!r} ({e_real!r}) is not a regular file")
+                    return chain, probs
                 e_bytes = Path(e_real).read_bytes()
                 e_sha = hashlib.sha256(e_bytes).hexdigest()
             except OSError as exc:
@@ -3618,21 +3664,24 @@ class MergeQueue:
                 else:
                     try:
                         sbx_st = os.stat(sbx_real)
-                        sbx_bytes = Path(sbx_real).read_bytes()
-                        sbx_sha = hashlib.sha256(sbx_bytes).hexdigest()
-                        sbx_sb, sbx_sb_probs = self._fingerprint_shebang_chain(
-                            sbx_bytes, "MQ_GATE_SANDBOX_CMD", clean_path, ro_binds=None
-                        )
-                        problems.extend(sbx_sb_probs)
-                        items.append({
-                            "tok": "__sandbox_cmd__",
-                            "argv": sbx_argv,
-                            "real": sbx_real,
-                            "dev": sbx_st.st_dev,
-                            "ino": sbx_st.st_ino,
-                            "sha256": sbx_sha,
-                            "shebang": sbx_sb,
-                        })
+                        if not stat.S_ISREG(sbx_st.st_mode):
+                            problems.append(f"MQ_GATE_SANDBOX_CMD: {sbx_real!r} is not a regular file")
+                        else:
+                            sbx_bytes = Path(sbx_real).read_bytes()
+                            sbx_sha = hashlib.sha256(sbx_bytes).hexdigest()
+                            sbx_sb, sbx_sb_probs = self._fingerprint_shebang_chain(
+                                sbx_bytes, "MQ_GATE_SANDBOX_CMD", clean_path, ro_binds=None
+                            )
+                            problems.extend(sbx_sb_probs)
+                            items.append({
+                                "tok": "__sandbox_cmd__",
+                                "argv": sbx_argv,
+                                "real": sbx_real,
+                                "dev": sbx_st.st_dev,
+                                "ino": sbx_st.st_ino,
+                                "sha256": sbx_sha,
+                                "shebang": sbx_sb,
+                            })
                     except OSError as exc:
                         problems.append(f"MQ_GATE_SANDBOX_CMD: {exc}")
         for src in sourced:
@@ -3676,6 +3725,9 @@ class MergeQueue:
                         )
                 try:
                     s_st = os.stat(s_real)
+                    if not stat.S_ISREG(s_st.st_mode):
+                        problems.append(f"{fn_name}: shadowed target {s_real!r} is not a regular file")
+                        continue
                     s_bytes = Path(s_real).read_bytes()
                     s_digest = hashlib.sha256(s_bytes).hexdigest()
                     s_sb, s_sb_probs = self._fingerprint_shebang_chain(
@@ -3752,6 +3804,10 @@ class MergeQueue:
                 continue
             try:
                 st = os.stat(real_target)
+                if not stat.S_ISREG(st.st_mode):
+                    problems.append(f"{tok}: resolved target {real_target!r} is not a regular file")
+                    items.append({"tok": tok, "resolved": None})
+                    continue
                 raw_bytes = Path(real_target).read_bytes()
                 digest = hashlib.sha256(raw_bytes).hexdigest()
                 ext_item: dict[str, Any] = {
@@ -4051,33 +4107,28 @@ class MergeQueue:
         if not path_str or not os.path.isabs(path_str):
             return None
         requires_dir = path_str != "/" and path_str.endswith("/")
-        if ro_binds is None:
-            try:
-                real = os.path.realpath(path_str, strict=True)
-                if requires_dir and not os.path.isdir(real):
-                    return None
-                return real if os.path.exists(real) else None
-            except OSError:
-                return None
         bind_map: dict[str, str] = {}
         ancestors: set[str] = {"/"}
-        for b in ro_binds:
-            nb = os.path.normpath(b)
-            try:
-                real_nb = os.path.realpath(nb)
-            except OSError:
-                continue
-            nb_prefix = nb.rstrip("/") + "/"
-            for prev in [k for k in bind_map if k != nb and (nb == "/" or k.startswith(nb_prefix))]:
-                del bind_map[prev]
-            bind_map[nb] = real_nb
-            parent = os.path.dirname(nb)
-            while parent and parent not in ancestors:
-                ancestors.add(parent)
-                nparent = os.path.dirname(parent)
-                if nparent == parent:
-                    break
-                parent = nparent
+        if ro_binds is None:
+            bind_map["/"] = "/"
+        else:
+            for b in ro_binds:
+                nb = os.path.normpath(b)
+                try:
+                    real_nb = os.path.realpath(nb)
+                except OSError:
+                    continue
+                nb_prefix = nb.rstrip("/") + "/"
+                for prev in [k for k in bind_map if k != nb and (nb == "/" or k.startswith(nb_prefix))]:
+                    del bind_map[prev]
+                bind_map[nb] = real_nb
+                parent = os.path.dirname(nb)
+                while parent and parent not in ancestors:
+                    ancestors.add(parent)
+                    nparent = os.path.dirname(parent)
+                    if nparent == parent:
+                        break
+                    parent = nparent
         if not bind_map:
             return None
 
@@ -4100,6 +4151,8 @@ class MergeQueue:
                 cur = os.path.dirname(cur.rstrip("/")) or "/"
                 continue
             nxt = "/" + seg if cur == "/" else f"{cur}/{seg}"
+            if nxt in ("/proc", "/dev", "/sys") or nxt.startswith(("/proc/", "/dev/", "/sys/")):
+                return None
             mnt = _active_mount(nxt)
             if mnt is None:
                 if nxt in ancestors:
@@ -4156,7 +4209,7 @@ class MergeQueue:
             return None
         if ro_binds is None:
             found = shutil.which(cmd_name, path=clean_path)
-            return os.path.realpath(found) if found else None
+            return cls._sandbox_resolve_path(found, None) if found else None
         for raw_dir in clean_path.split(os.pathsep):
             if not raw_dir or not os.path.isabs(raw_dir):
                 continue

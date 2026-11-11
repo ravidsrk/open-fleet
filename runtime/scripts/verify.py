@@ -1234,7 +1234,7 @@ class _Authority:
 
     @classmethod
     def _check_rel_operand(cls, tok, op, label="script"):
-        if not op or os.path.isabs(op) or ".." in Path(op).parts:
+        if not op or op == "-" or os.path.normpath(op) == "-" or os.path.isabs(op) or ".." in Path(op).parts:
             return f"proof executable {tok!r} targets external {label} {op!r} outside the staged commit; fail-closed (#750 C19)"
         return None
 
