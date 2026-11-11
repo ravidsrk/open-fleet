@@ -1070,6 +1070,21 @@ class GateRunsIsolated(QueueCase):
             fp_nb_noent, probs_nb_noent = q._gate_fingerprint(f"{mounted_dir}/no_such_dir/../shadow-gate")
             self.assertEqual(fp_nb_noent, "")
             self.assertTrue(probs_nb_noent)
+            for unsafe_gate in (
+                'bash -c \'a=1; x="a[\\$(/opt/gates/probe)]"; exit "$[x]"\'',
+                'bash -c \'exit $[1 + 0]\'',
+                'bash -c \'echo "${foo:-$[x]}"\'',
+                'bash -c \'echo "$(exit "$[x]")"\'',
+                f"/usr/bin/toybox env {real_v1_gate}",
+                f"busybox.static sh -c {real_v1_gate}",
+                f"find . -exec {real_v1_gate} \\;",
+                f"/lib64/ld-linux-x86-64.so.2 {real_v1_gate}",
+                "bash -c 'readonly -i y=1; exit 0'",
+                "bash -c 'export -f f; exit 0'",
+            ):
+                fp_u, probs_u = q._gate_fingerprint(unsafe_gate)
+                self.assertEqual(fp_u, "", unsafe_gate)
+                self.assertTrue(probs_u, unsafe_gate)
 
 
 class GitLaneFreshness(Freshness):

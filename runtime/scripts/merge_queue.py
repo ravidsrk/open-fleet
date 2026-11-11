@@ -1389,9 +1389,11 @@ class MergeQueue:
     )
     GATE_ENV_FORBID_SUFFIX = ("_TOKEN", "_SECRET", "_KEY", "_PASSWORD", "_CREDENTIAL", "_CREDENTIALS")
     GATE_ENV_ISOLATED_KEYS = ("HOME", "TMPDIR", "TMP", "TEMP", "XDG_CONFIG_HOME", "GH_CONFIG_DIR")
-    _SHELL_NAMES = frozenset({"sh", "bash", "dash", "zsh", "ksh", "ash", "csh", "tcsh"})
+    _SHELL_NAMES = frozenset({
+        "sh", "bash", "rbash", "dash", "zsh", "rzsh", "ksh", "rksh", "ash", "hush", "csh", "tcsh",
+    })
     _SHELL_RE = re.compile(
-        r"(?:sh|bash|dash|zsh|ksh|mksh|pdksh|yash|posh|ash|csh|tcsh)(?:[-.]?\d+(?:\.\d+)*)?"
+        r"(?:sh|bash|rbash|dash|zsh|rzsh|ksh|rksh|mksh|pdksh|yash|posh|ash|hush|csh|tcsh)(?:[-.]?\d+(?:\.\d+)*)?"
     )
 
     @classmethod
@@ -1414,10 +1416,26 @@ class MergeQueue:
         "verbose", "xtrace",
     })
     _MUX_WRAPPERS = frozenset({
-        "busybox", "xargs", "stdbuf", "setsid", "flock", "chrt", "ionice",
-        "taskset", "parallel", "watch", "time", "script", "su", "sudo",
-        "chroot", "nsenter", "unshare", "bwrap", "strace", "ltrace",
+        "busybox", "toybox", "sbase-box", "ubase-box",
+        "xargs", "find", "stdbuf", "setsid", "flock", "chrt", "ionice",
+        "taskset", "prlimit", "choom", "uclampset", "numactl", "eatmydata", "chronic",
+        "parallel", "watch", "time", "script", "expect", "screen", "tmux", "ssh",
+        "su", "sudo", "doas", "pkexec", "runuser", "dzdo", "pfexec",
+        "chroot", "arch-chroot", "fakeroot", "fakechroot", "nsenter", "unshare",
+        "bwrap", "firejail", "proot", "strace", "ltrace", "gdb", "lldb", "perf", "valgrind",
+        "torsocks", "tsocks", "proxychains", "proxychains4", "catchsegv",
+        "fish", "elvish", "nu", "nushell", "xonsh", "pwsh", "powershell", "rc", "es",
     })
+    _MULTICALL_BOX_RE = re.compile(r"(?:busybox|toybox|sbase-box|ubase-box)(?:[.-][A-Za-z0-9_.-]+)?")
+    _MUX_WRAPPER_RE = re.compile(
+        r"(?:(?:busybox|toybox|sbase-box|ubase-box)(?:[.-][A-Za-z0-9_.-]+)?"
+        r"|ld\.so(?:\.[0-9]+)?|ld-linux[A-Za-z0-9_.-]*|ld-musl[A-Za-z0-9_.-]*"
+        r"|proxychains[0-9]*)"
+    )
+
+    @classmethod
+    def _is_mux_wrapper(cls, name: str) -> bool:
+        return name in cls._MUX_WRAPPERS or bool(cls._MUX_WRAPPER_RE.fullmatch(name))
     _COMPOUND_PREFIX_KEYWORDS = frozenset({
         "!", "{", "}", "if", "then", "elif", "else", "while", "until", "do",
     })
@@ -1631,6 +1649,8 @@ class MergeQueue:
                 ]
             if ch == "$" and j + 1 < n and cmd[j + 1] in ("'", '"'):
                 return -1, subs, ["ANSI-C or locale $'...' / $\"...\" quoting cannot be statically fingerprinted"]
+            if ch == "$" and j + 1 < n and cmd[j + 1] == "[":
+                return -1, subs, problems + ["legacy $[...] arithmetic expansion cannot be statically fingerprinted"]
             if ch == "$" and j + 1 < n and cmd[j + 1] == "{":
                 nj, nsubs, nprobs = cls._consume_param_expansion(cmd, j)
                 subs.extend(nsubs)
@@ -1702,6 +1722,8 @@ class MergeQueue:
                 continue
             if c == "$" and j + 1 < n and cmd[j + 1] in ("'", '"'):
                 return -1, ["ANSI-C or locale $'...' / $\"...\" quoting cannot be statically fingerprinted"]
+            if c == "$" and j + 1 < n and cmd[j + 1] == "[":
+                return -1, ["legacy $[...] arithmetic expansion cannot be statically fingerprinted"]
             if c == "'":
                 j += 1
                 while j < n and cmd[j] != "'":
@@ -1717,6 +1739,8 @@ class MergeQueue:
                     if cmd[j] == "\\":
                         j += 2
                         continue
+                    if cmd[j] == "$" and j + 1 < n and cmd[j + 1] == "[":
+                        return -1, ["legacy $[...] arithmetic expansion cannot be statically fingerprinted"]
                     if cmd[j] == "$" and j + 1 < n and cmd[j + 1] == "{":
                         nj, _ns, np = cls._consume_param_expansion(cmd, j)
                         if nj < 0:
@@ -1858,6 +1882,9 @@ class MergeQueue:
                 i = nj
                 at_tok = False
                 continue
+            if ch == "$" and i + 1 < n and cmd[i + 1] == "[":
+                problems.append("legacy $[...] arithmetic expansion cannot be statically fingerprinted")
+                break
             if ch == "$" and i + 1 < n and cmd[i + 1] == "(":
                 if i + 2 < n and cmd[i + 2] == "(":
                     # Distinguish `$(( arith ))` from `$( (subshell); cmd )` by matching the second `(`.
@@ -2252,7 +2279,7 @@ class MergeQueue:
                     wi = len(cmd_words)
                     break
                 cw_base = Path(cw).name
-                if cw_base in cls._MUX_WRAPPERS:
+                if cls._is_mux_wrapper(cw_base):
                     problems.append(
                         f"{cw!r} multiplexes or wraps inner commands whose targets cannot be statically fingerprinted"
                     )
@@ -2617,11 +2644,11 @@ class MergeQueue:
                             if is_dynamic(arg_f):
                                 problems.append(f"{final_word}: dynamic option cannot be statically fingerprinted")
                                 break
-                            if final_word in ("declare", "typeset", "local") and any(
-                                ch_d in arg_w[1:] for ch_d in ("n", "i", "a", "A")
+                            if final_word in ("declare", "typeset", "local", "export", "readonly") and any(
+                                ch_d in arg_w[1:] for ch_d in ("n", "i", "a", "A", "f")
                             ):
                                 problems.append(
-                                    f"{final_word} {arg_w} nameref/integer/array attribute cannot be statically fingerprinted"
+                                    f"{final_word} {arg_w} nameref/integer/array/function attribute cannot be statically fingerprinted"
                                 )
                                 break
                             if final_word == "unset" and "f" in arg_w[1:]:
@@ -3322,6 +3349,9 @@ class MergeQueue:
         chain.extend(sub_chain)
         probs.extend(sub_probs)
         interp_names = {Path(interp).name, Path(i_real).name}
+        if self._is_mux_wrapper(Path(interp).name):
+            probs.append(f"{label}: shebang multiplexer or wrapper {interp!r} cannot be statically fingerprinted")
+            return chain, probs
         if "env" in interp_names:
             if not interp_arg or interp_arg.startswith("-") or "=" in interp_arg or any(c in interp_arg for c in " \t"):
                 probs.append(
@@ -3557,6 +3587,21 @@ class MergeQueue:
                     "sha256": digest,
                 }
                 if tok in exec_tokens:
+                    tok_base = Path(tok).name
+                    real_base = Path(real_target).name
+                    if tok != "/bin/sh" and real_base != tok_base:
+                        if self._is_mux_wrapper(real_base) and not self._MULTICALL_BOX_RE.fullmatch(real_base):
+                            problems.append(
+                                f"{tok}: resolves to wrapper or multiplexer {real_target!r} via alias"
+                            )
+                        elif real_base in ("env", "nice", "timeout", "nohup"):
+                            problems.append(
+                                f"{tok}: resolves to command wrapper {real_target!r} via alias"
+                            )
+                        elif self._is_shell_name(real_base) and not self._is_shell_name(tok_base):
+                            problems.append(
+                                f"{tok}: resolves to shell {real_target!r} via non-shell alias"
+                            )
                     ext_sb, ext_sb_probs = self._fingerprint_shebang_chain(
                         raw_bytes, tok, clean_path, ro_binds=ro_binds
                     )

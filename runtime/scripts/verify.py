@@ -1063,11 +1063,18 @@ class _Authority:
             return True
         return not bool(_extract_diff(raw.decode("utf-8", "replace")))
 
-    _SHELL_NAMES = frozenset({"sh", "bash", "dash", "zsh", "ksh", "ash", "csh", "tcsh"})
+    _SHELL_NAMES = frozenset({
+        "sh", "bash", "rbash", "dash", "zsh", "rzsh", "ksh", "rksh", "ash", "hush", "csh", "tcsh",
+    })
     _SHELL_RE = re.compile(
-        r"(?:sh|bash|dash|zsh|ksh|mksh|pdksh|yash|posh|ash|csh|tcsh)(?:[-.]?\d+(?:\.\d+)*)?"
+        r"(?:sh|bash|rbash|dash|zsh|rzsh|ksh|rksh|mksh|pdksh|yash|posh|ash|hush|csh|tcsh)(?:[-.]?\d+(?:\.\d+)*)?"
     )
-    _MUX_RE = re.compile(r"(?:g?sed|gnused|[gmn]?awk|deno|bun)(?:[-.]?\d+(?:\.\d+)*)?")
+    _MUX_RE = re.compile(
+        r"(?:(?:g?sed|gnused|[gmn]?awk|deno|bun)(?:[-.]?\d+(?:\.\d+)*)?"
+        r"|(?:busybox|toybox|sbase-box|ubase-box)(?:[.-][A-Za-z0-9_.-]+)?"
+        r"|ld\.so(?:\.[0-9]+)?|ld-linux[A-Za-z0-9_.-]*|ld-musl[A-Za-z0-9_.-]*"
+        r"|proxychains[0-9]*)"
+    )
 
     @classmethod
     def _is_shell_name(cls, name):
@@ -1111,9 +1118,16 @@ class _Authority:
         "DENO_", "BUN_", "AWK", "PHP", "R_",
     )
     _NC_FORBID_MUX_EXES = frozenset({
-        "busybox", "xargs", "find", "stdbuf", "setsid", "flock", "chrt", "ionice",
-        "taskset", "script", "su", "sudo", "chroot", "nsenter", "unshare", "bwrap",
-        "time", "parallel", "watch", "strace", "ltrace",
+        "busybox", "toybox", "sbase-box", "ubase-box",
+        "xargs", "find", "stdbuf", "setsid", "flock", "chrt", "ionice",
+        "taskset", "prlimit", "choom", "uclampset", "numactl", "eatmydata", "chronic",
+        "script", "expect", "screen", "tmux", "ssh",
+        "su", "sudo", "doas", "pkexec", "runuser", "dzdo", "pfexec",
+        "chroot", "arch-chroot", "fakeroot", "fakechroot", "nsenter", "unshare",
+        "bwrap", "firejail", "proot", "time", "parallel", "watch",
+        "strace", "ltrace", "gdb", "lldb", "perf", "valgrind",
+        "torsocks", "tsocks", "proxychains", "proxychains4", "catchsegv",
+        "fish", "elvish", "nu", "nushell", "xonsh", "pwsh", "powershell", "rc", "es",
         "sed", "awk", "gawk", "mawk", "nawk", "deno", "bun",
     })
 
