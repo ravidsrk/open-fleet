@@ -2305,6 +2305,8 @@ def _command_oracle_paths(command):
                 or mod_root in {"pip", "setuptools", "wheel", "virtualenv", "nox", "tox", "coverage", "ipython", "IPython"}
             ):
                 return None
+            if name not in ("pytest", "unittest") and "-I" in argv[1:i]:
+                return None
             module = name.replace(".", "/")
             scan_from = i + 2 if arg == "-m" else i + 1
             # -c is pytest's config option, not the interpreter's. Leaving program
@@ -2381,7 +2383,11 @@ def _command_oracle_paths(command):
                 continue
         paths.add(candidate.as_posix())
     if module:
-        paths.update((module + ".py", module + "/__main__.py", module + "/__init__.py"))
+        mod_parts = module.split("/")
+        for k in range(1, len(mod_parts) + 1):
+            prefix = "/".join(mod_parts[:k])
+            paths.update((prefix + ".py", prefix + "/__init__.py"))
+        paths.add(module + "/__main__.py")
     return paths
 
 
@@ -3443,11 +3449,14 @@ def execute_negative_control(m, nc_command=None):
         if not any(ec in tracked_mods for ec in entry_cands):
             return False, [f"--execute-nc: unsupported proof command: module '-m {py_mod}' is not a tracked "
                            "regular file in head_sha; fail-closed (#750 C19)"]
+        if f"{mod_rel}/__main__.py" not in tracked_mods and f"{mod_rel}/__init__.py" in tracked_mods:
+            return False, [f"--execute-nc: unsupported proof command: package '{mod_rel}/__init__.py' "
+                           f"shadows '{mod_rel}.py' without __main__.py; fail-closed (#750 C19)"]
         req_pkgs = [
             f"{'/'.join(mod_parts[:k])}/__init__.py"
             for k in range(
                 1,
-                len(mod_parts) + (1 if f"{mod_rel}/__main__.py" in tracked_mods and f"{mod_rel}.py" not in tracked_mods else 0),
+                len(mod_parts) + (1 if f"{mod_rel}/__main__.py" in tracked_mods else 0),
             )
         ]
         if any(rp not in tracked_mods for rp in req_pkgs):

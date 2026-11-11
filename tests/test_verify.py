@@ -3777,6 +3777,25 @@ class ProofOracleProtection(RepoCase):
         ok, errors = verify.execute_negative_control(m, self.cmd)
         self.assertFalse(ok, errors)
         self.assertTrue(any('self_mutating_runner.py' in e and 'changed during' in e for e in errors), errors)
+        # Parent package initializers (`harness/__init__.py`) are oracle inputs, never mutable production files.
+        self.write('harness/__init__.py', 'assert False, "broken startup"\n')
+        self.write(
+            'harness/probe.py',
+            'import app\n'
+            'assert app.VALUE == 2\n',
+        )
+        self.write('app.py', 'VALUE = 2\n')
+        self.base = self.commit()
+        self.write('harness/__init__.py', 'pass\n')
+        self.head = self.commit()
+        self.cmd = f'{py} -m harness.probe'
+        m_pkg = self.manifest('revert')
+        m_pkg['negative_control']['paths'] = ['harness/__init__.py']
+        self.assertIs(verify._is_oracle_path('harness/__init__.py', self.cmd, self.head), True)
+        ok_pkg, err_pkg = verify.execute_negative_control(m_pkg, self.cmd)
+        self.assertFalse(ok_pkg, err_pkg)
+        static_pkg_errs, _ = verify.check_negative_control(m_pkg, True, execute=False, nc_command=self.cmd)
+        self.assertTrue(static_pkg_errs, static_pkg_errs)
 
 
 
