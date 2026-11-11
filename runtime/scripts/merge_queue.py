@@ -2344,7 +2344,7 @@ class MergeQueue:
                     while wi < len(cmd_words) and "=" in cmd_words[wi][0]:
                         ea, eaflag = cmd_words[wi]
                         lhs = ea.split("=", 1)[0]
-                        if is_dynamic(eaflag) and ("$" in lhs or "__MQ_CMDSUB__" in lhs):
+                        if is_dynamic(eaflag):
                             problems.append("env: dynamic variable assignment cannot be statically fingerprinted")
                         elif cls._touches_lookup_var(lhs):
                             problems.append(
@@ -2360,43 +2360,75 @@ class MergeQueue:
                         n_opt, n_flag = cmd_words[wi]
                         if is_dynamic(n_flag):
                             problems.append("nice: dynamic option cannot be statically fingerprinted")
+                            wi = len(cmd_words)
+                            break
                         if n_opt == "--":
                             wi += 1
                             break
                         if n_opt in ("-n", "--adjustment"):
+                            if wi + 1 >= len(cmd_words) or is_dynamic(cmd_words[wi + 1][1]):
+                                problems.append(
+                                    f"nice {n_opt}: missing or dynamic adjustment operand cannot be statically fingerprinted"
+                                )
+                                wi = len(cmd_words)
+                                break
                             wi += 2
                         elif n_opt.startswith(("-n", "--adjustment=")) or re.match(r"^--?\d+$", n_opt):
                             wi += 1
                         else:
                             problems.append(f"nice: unsupported option {n_opt!r} cannot be statically fingerprinted")
-                            wi += 1
+                            wi = len(cmd_words)
+                            break
                     continue
                 if cw_base == "timeout":
                     executables.append(cw)
                     force_external = True
                     wi += 1
+                    timeout_bad = False
                     while wi < len(cmd_words) and cmd_words[wi][0].startswith("-") and len(cmd_words[wi][0]) > 1:
                         t_opt, t_flag = cmd_words[wi]
                         if is_dynamic(t_flag):
                             problems.append("timeout: dynamic option cannot be statically fingerprinted")
+                            timeout_bad = True
+                            wi = len(cmd_words)
+                            break
                         if t_opt == "--":
                             wi += 1
                             break
-                        if t_opt in ("-k", "--kill-after", "-s", "--signal"):
+                        if t_opt in ("-k", "--kill-after", "-s", "--signal") or (
+                            not t_opt.startswith("--")
+                            and t_opt[1:].endswith(("k", "s"))
+                            and all(c == "v" for c in t_opt[1:-1])
+                        ):
+                            if wi + 1 >= len(cmd_words) or is_dynamic(cmd_words[wi + 1][1]):
+                                problems.append(
+                                    f"timeout {t_opt}: missing or dynamic option operand cannot be statically fingerprinted"
+                                )
+                                timeout_bad = True
+                                wi = len(cmd_words)
+                                break
                             wi += 2
                         elif t_opt in ("-v", "--verbose", "--foreground", "--preserve-status") or t_opt.startswith(
                             ("-k", "--kill-after=", "-s", "--signal=")
                         ):
                             wi += 1
-                        elif not t_opt.startswith("--") and t_opt[1:].endswith(("k", "s")) and all(
-                            c == "v" for c in t_opt[1:-1]
-                        ):
-                            wi += 2
                         else:
                             problems.append(f"timeout: unsupported option {t_opt!r} cannot be statically fingerprinted")
-                            wi += 1
-                    if wi < len(cmd_words):
-                        wi += 1  # duration
+                            timeout_bad = True
+                            wi = len(cmd_words)
+                            break
+                    if not timeout_bad:
+                        if wi >= len(cmd_words) or is_dynamic(cmd_words[wi][1]):
+                            problems.append(
+                                "timeout: missing or dynamic duration operand cannot be statically fingerprinted"
+                            )
+                            wi = len(cmd_words)
+                        else:
+                            wi += 1  # static single-word duration
+                            if wi >= len(cmd_words):
+                                problems.append(
+                                    "timeout: missing inner command operand cannot be statically fingerprinted"
+                                )
                     continue
                 if cw_base == "nohup":
                     executables.append(cw)
@@ -2454,17 +2486,24 @@ class MergeQueue:
                             break
                         if is_dynamic(opt_flag):
                             problems.append("exec: dynamic option cannot be statically fingerprinted")
-                            wi += 1
-                            continue
+                            wi = len(cmd_words)
+                            break
                         if "c" in opt[1:]:
                             problems.append("exec -c clears environment and alters PATH lookup context")
                         if opt == "-a":
+                            if wi + 1 >= len(cmd_words) or is_dynamic(cmd_words[wi + 1][1]):
+                                problems.append(
+                                    "exec -a: missing or dynamic name operand cannot be statically fingerprinted"
+                                )
+                                wi = len(cmd_words)
+                                break
                             wi += 2
                         elif opt == "-l":
                             wi += 1
                         else:
                             problems.append(f"exec: unsupported option {opt!r} cannot be statically fingerprinted")
-                            wi += 1
+                            wi = len(cmd_words)
+                            break
                     if wi < len(cmd_words):
                         force_external = True
                     continue

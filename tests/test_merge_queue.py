@@ -710,6 +710,11 @@ class GateRunsIsolated(QueueCase):
             "sh -s",
             ". bare_script.sh",
             "[g]ate-check",
+            "D='1 /opt/tools/proof'; timeout $D true",
+            "K='5 /opt/tools/proof'; timeout -k $K 10 true",
+            "N='0 /opt/tools/proof'; nice -n $N true",
+            "A='name /opt/tools/proof'; exec -a $A true",
+            "X='1 /opt/tools/proof'; env FOO=$X true",
         ):
             _, _, dyn_probs = mq_mod.MergeQueue._analyze_gate_command(unsafe_gate)
             self.assertTrue(dyn_probs, f"expected fail-closed problem on {unsafe_gate!r}")
