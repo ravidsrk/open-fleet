@@ -793,6 +793,7 @@ class GateRunsIsolated(QueueCase):
             f"echo $(({probe}); true)",
             f"true # '\necho $({probe}) # '",
             f"echo $(case x in (x) {probe} ;; esac)",
+            f'echo "${{FOO:-$({probe})}}"',
         ):
             sub_exes, _, sub_probs = mq_mod.MergeQueue._analyze_gate_command(sub_form)
             self.assertEqual(sub_probs, [], sub_form)
@@ -802,6 +803,15 @@ class GateRunsIsolated(QueueCase):
             f"echo $'\\'' $({probe}) $'\\''",
             ': "${PYTHONPATH:=/tmp}"',
             ': "${PATH[0]:=/opt/proofs/bin}"',
+            "bash -c 'test \"${1@P}\" = 0' _ '$(/opt/proofs/check)'",
+            "bash -c 'x=\"BASH_VERSINFO[\\$(/opt/probe)]\"; : \"${#BASH_VERSINFO[x]}\"'",
+            "bash -c ': \"${| /opt/probe; }\"'",
+            ': "${x:-"\'"}" ; /opt/probe ; : "\'"',
+            "echo $( : ${x:-)} ; /opt/probe )",
+            "bash -c 'x=\"a[\\$(/opt/probe)]\"; test -v \"$x\"'",
+            "bash -c 'x=\"a[\\$(/opt/probe)]\"; [ -v \"$x\" ]'",
+            "bash -c 'x=\"a[\\$(/opt/probe)]\"; [[ -v $x ]]'",
+            "bash -c 'op=-v; x=\"a[\\$(/opt/probe)]\"; test \"$op\" \"$x\"'",
             f"echo $(case x in x) {probe} ;; esac)",
             'bash -c \'printf -v "PATH[0]" /opt/proofs/bin; proof\'',
             "bash -c 'printf -vPATH[0] /opt/proofs/bin; proof'",

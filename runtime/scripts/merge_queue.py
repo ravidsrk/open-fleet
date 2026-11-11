@@ -1555,6 +1555,109 @@ class MergeQueue:
             i += 1
         return "".join(out)
 
+    _ALLOWED_PARAM_OPS = (":-", "-", ":+", "+", ":=", "=", ":?", "?", "##", "#", "%%", "%")
+
+    @classmethod
+    def _consume_param_expansion(cls, cmd: str, start: int) -> tuple[int, list[str], list[str]]:
+        """Parse `${...}` starting at `start` (`cmd[start:start+2] == "${"`), allowing only safe scalar
+        POSIX forms and extracting inner command substitutions while failing closed on indirect,
+        subscripted, transformation (`@P`), substring (`:offset`), or quote-ambiguous forms."""
+        n = len(cmd)
+        if start + 2 >= n:
+            return -1, [], ["unterminated ${...} parameter expansion"]
+        if cmd[start + 2] == "#":
+            if start + 3 < n and cmd[start + 3] == "}":
+                return start + 4, [], []
+            m_len = re.match(r"^(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|[?$*@-])", cmd[start + 3:])
+            if not m_len:
+                return -1, [], ["unsupported ${#...} parameter expansion cannot be statically fingerprinted"]
+            end_len = start + 3 + len(m_len.group(0))
+            if end_len >= n or cmd[end_len] != "}":
+                return -1, [], ["subscripted or complex ${#...} parameter expansion cannot be statically fingerprinted"]
+            return end_len + 1, [], []
+        m_param = re.match(r"^(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|[?$*@-])", cmd[start + 2:])
+        if not m_param:
+            return -1, [], ["unsupported ${...} parameter expansion cannot be statically fingerprinted"]
+        param = m_param.group(0)
+        k = start + 2 + len(param)
+        if k >= n:
+            return -1, [], ["unterminated ${...} parameter expansion"]
+        if cmd[k] == "}":
+            return k + 1, [], []
+        op = next((cand for cand in cls._ALLOWED_PARAM_OPS if cmd.startswith(cand, k)), None)
+        if op is None:
+            return -1, [], ["unsupported ${...} parameter expansion operator cannot be statically fingerprinted"]
+        if op in (":=", "="):
+            if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", param) or cls._touches_lookup_var(param):
+                return -1, [], [
+                    f"parameter expansion assigning to {param!r} alters executable lookup context or is invalid"
+                ]
+        subs: list[str] = []
+        problems: list[str] = []
+        j = k + len(op)
+        while j < n:
+            ch = cmd[j]
+            if ch == "}":
+                return j + 1, subs, problems
+            if ch in ("'", '"', "\\", "{", "(", ")"):
+                return -1, subs, [
+                    "quotes, escapes, or bare braces/parens inside ${...} parameter expansion cannot be portably fingerprinted"
+                ]
+            if ch == "$" and j + 1 < n and cmd[j + 1] in ("'", '"'):
+                return -1, subs, ["ANSI-C or locale $'...' / $\"...\" quoting cannot be statically fingerprinted"]
+            if ch == "$" and j + 1 < n and cmd[j + 1] == "{":
+                nj, nsubs, nprobs = cls._consume_param_expansion(cmd, j)
+                subs.extend(nsubs)
+                problems.extend(nprobs)
+                if nj < 0:
+                    return -1, subs, problems
+                j = nj
+                continue
+            if ch == "$" and j + 1 < n and cmd[j + 1] == "(":
+                if j + 2 < n and cmd[j + 2] == "(":
+                    ic, ip = cls._find_matching_paren(cmd, j + 3)
+                    if ic < 0:
+                        return -1, subs, problems + ip
+                    if ic + 1 < n and cmd[ic + 1] == ")":
+                        arith_body = cmd[j + 3:ic]
+                        arith_san, arith_subs, arith_probs = cls._strip_cmd_substitutions(arith_body)
+                        subs.extend(arith_subs)
+                        problems.extend(arith_probs)
+                        arith_check = arith_san.replace("__MQ_CMDSUB__", " 0 ")
+                        if (
+                            any(ch_a in arith_check for ch_a in ("$", "'", '"', "[", "]"))
+                            or re.search(r"(?<![=!<>])=(?!=)", arith_check)
+                            or re.search(r"(?<![0-9A-Za-z_#@])[A-Za-z_][A-Za-z0-9_]*", arith_check)
+                        ):
+                            return -1, subs, problems + [
+                                "variable, indirect, or mutating expression inside arithmetic expansion cannot be statically fingerprinted"
+                            ]
+                        j = ic + 2
+                        continue
+                ec, ep = cls._find_matching_paren(cmd, j + 2)
+                if ec < 0:
+                    return -1, subs, problems + ep
+                subs.append(cmd[j + 2:ec])
+                j = ec + 1
+                continue
+            if ch == "`":
+                bt = j + 1
+                buf: list[str] = []
+                while bt < n and cmd[bt] != "`":
+                    if cmd[bt] == "\\" and bt + 1 < n and cmd[bt + 1] in ("\\", "`", "$", '"'):
+                        buf.append(cmd[bt + 1])
+                        bt += 2
+                        continue
+                    buf.append(cmd[bt])
+                    bt += 1
+                if bt >= n:
+                    return -1, subs, problems + ["unterminated backtick command substitution"]
+                subs.append("".join(buf))
+                j = bt + 1
+                continue
+            j += 1
+        return -1, subs, problems + ["unterminated ${...} parameter expansion"]
+
     @classmethod
     def _find_matching_paren(cls, cmd: str, start: int) -> tuple[int, list[str]]:
         """Find the index of `)` matching the `(` at `start - 1`, respecting shell quotes, comments, and nesting."""
@@ -1588,6 +1691,12 @@ class MergeQueue:
                     if cmd[j] == "\\":
                         j += 2
                         continue
+                    if cmd[j] == "$" and j + 1 < n and cmd[j + 1] == "{":
+                        nj, _ns, np = cls._consume_param_expansion(cmd, j)
+                        if nj < 0:
+                            return -1, np
+                        j = nj
+                        continue
                     if cmd[j] == "$" and j + 1 < n and cmd[j + 1] == "(":
                         ec, ep = cls._find_matching_paren(cmd, j + 2)
                         if ec < 0:
@@ -1615,6 +1724,13 @@ class MergeQueue:
                 if j >= n:
                     return -1, ["unterminated backtick command substitution"]
                 j += 1
+                at_tok = False
+                continue
+            if c == "$" and j + 1 < n and cmd[j + 1] == "{":
+                nj, _ns, np = cls._consume_param_expansion(cmd, j)
+                if nj < 0:
+                    return -1, np
+                j = nj
                 at_tok = False
                 continue
             if c == "$" and j + 1 < n and cmd[j + 1] == "(":
@@ -1707,23 +1823,15 @@ class MergeQueue:
                 at_tok = False
                 continue
             if ch == "$" and i + 1 < n and cmd[i + 1] == "{":
-                if cmd[i + 2:i + 3] == "!":
-                    problems.append(
-                        "indirect ${!...} parameter expansion cannot be statically fingerprinted"
-                    )
-                if re.match(r"^\$\{!?[A-Za-z_0-9@*]+\[", cmd[i:]):
-                    problems.append(
-                        "array subscript parameter expansion cannot be statically fingerprinted"
-                    )
-                if re.match(r"^\$\{[A-Za-z_0-9@*]+:(?![-=+?])", cmd[i:]):
-                    problems.append(
-                        "substring ${var:offset} arithmetic parameter expansion cannot be statically fingerprinted"
-                    )
-                m_pe = re.match(r"^\$\{([A-Za-z_][A-Za-z0-9_]*):?=", cmd[i:])
-                if m_pe and cls._touches_lookup_var(m_pe.group(1)):
-                    problems.append(
-                        f"parameter expansion assigning to {m_pe.group(1)!r} alters executable lookup context"
-                    )
+                nj, p_subs, p_probs = cls._consume_param_expansion(cmd, i)
+                subs.extend(p_subs)
+                problems.extend(p_probs)
+                if nj < 0:
+                    break
+                out.append("__MQ_CMDSUB__")
+                i = nj
+                at_tok = False
+                continue
             if ch == "$" and i + 1 < n and cmd[i + 1] == "(":
                 if i + 2 < n and cmd[i + 2] == "(":
                     # Distinguish `$(( arith ))` from `$( (subshell); cmd )` by matching the second `(`.
@@ -1942,7 +2050,7 @@ class MergeQueue:
                 if kind == "word" and is_unquoted(flag) and tok == "]]":
                     in_double_bracket = False
                 elif kind == "word" and (
-                    tok in ("-eq", "-ne", "-lt", "-le", "-gt", "-ge", "=~")
+                    tok in ("-eq", "-ne", "-lt", "-le", "-gt", "-ge", "=~", "-v", "-R")
                     or "[" in tok
                     or "]" in tok
                     or any(
@@ -2521,6 +2629,31 @@ class MergeQueue:
                         sourced.extend(s2)
                         problems.extend(p2)
                     continue
+                if final_word in ("test", "["):
+                    t_args = cmd_words[wi + 1:]
+                    if final_word == "[" and t_args and t_args[-1][0] == "]":
+                        t_args = t_args[:-1]
+                    bin_ops = {
+                        "=", "==", "!=", "<", ">",
+                        "-eq", "-ne", "-lt", "-le", "-gt", "-ge",
+                        "-nt", "-ot", "-ef", "-a", "-o", ")",
+                    }
+                    for ti, (tw, tf) in enumerate(t_args):
+                        if tw in ("-v", "-R"):
+                            problems.append(
+                                f"{final_word} {tw} variable-reference operator evaluates array subscripts and cannot be statically fingerprinted"
+                            )
+                            break
+                        prev_is_prefix = ti == 0 or is_dynamic(t_args[ti - 1][1]) or (
+                            t_args[ti - 1][0] in ("!", "(", "-a", "-o")
+                        )
+                        if prev_is_prefix and is_dynamic(tf) and ti + 1 < len(t_args):
+                            nw, nf = t_args[ti + 1]
+                            if is_dynamic(nf) or nw not in bin_ops:
+                                problems.append(
+                                    f"{final_word}: dynamic unary operator cannot be statically fingerprinted"
+                                )
+                                break
                 if final_word in (".", "source"):
                     if final_word == "source":
                         executables.append("__opt_builtin__:source")
