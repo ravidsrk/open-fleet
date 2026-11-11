@@ -2753,6 +2753,9 @@ class EndToEndMutationGreen(MutationFixture):
             ['sh', 'proof.sh'],
             ['sh', '/tmp/external_proof.sh'],
             [sys.executable, '/tmp/external_proof.py'],
+            [sys.executable, '-W', 'ignore', '/tmp/external_proof.py'],
+            ['node', '--no-warnings', '/tmp/external_proof.js'],
+            ['pytest', '-c', '/tmp/external_pytest.ini'],
         ):
             recs_bad, err_bad = verify._Authority.nc_exec_identity(bad_env_argv, str(self.repo))
             self.assertIsNone(recs_bad, bad_env_argv)
@@ -2773,6 +2776,23 @@ class EndToEndMutationGreen(MutationFixture):
         self.assertFalse(ok_ush, msgs_ush)
         self.assertTrue(any('not a tracked regular file in head_sha' in x for x in msgs_ush), msgs_ush)
         untracked_sh.unlink()
+        # Tracked regular shell proof script `sh ./proof.sh` succeeds across clean -> control -> clean:
+        self.write('proof.sh', f'#!/bin/sh\nexec {shlex.quote(sys.executable)} check.py\n')
+        sh_head = self.commit('add tracked proof.sh')
+        try:
+            m_tracked_sh = {
+                'base_sha': self.base_sha,
+                'head_sha': sh_head,
+                'negative_control': {
+                    'tool': 'revert',
+                    'paths': ['app.py'],
+                    'command': 'sh ./proof.sh',
+                },
+            }
+            ok_tsh, msgs_tsh = verify.execute_negative_control(m_tracked_sh, 'sh ./proof.sh')
+            self.assertTrue(ok_tsh, msgs_tsh)
+        finally:
+            self.git('reset', '--hard', self.head_sha)
         with tempfile.TemporaryDirectory() as ext_dir:
             os.chmod(ext_dir, 0o755)
             writable_bin = Path(ext_dir) / 'runner'

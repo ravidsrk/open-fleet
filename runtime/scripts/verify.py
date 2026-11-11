@@ -1077,6 +1077,7 @@ class _Authority:
         "busybox", "xargs", "find", "stdbuf", "setsid", "flock", "chrt", "ionice",
         "taskset", "script", "su", "sudo", "chroot", "nsenter", "unshare", "bwrap",
         "time", "parallel", "watch", "strace", "ltrace",
+        "sed", "awk", "gawk", "mawk", "nawk",
     })
 
     @classmethod
@@ -1133,6 +1134,194 @@ class _Authority:
                           f"{script_op!r}; require a staged repo-relative path containing '/'; "
                           "fail-closed (#750 C19)")
         return script_op, None
+
+    @classmethod
+    def _check_rel_operand(cls, tok, op, label="script"):
+        if not op or os.path.isabs(op) or ".." in Path(op).parts:
+            return f"proof executable {tok!r} targets external {label} {op!r} outside the staged commit; fail-closed (#750 C19)"
+        return None
+
+    @classmethod
+    def _parse_target_operands(cls, tok, rest):
+        """Validate non-shell interpreter/runner options in `rest` and return `(staged_rel_files, err)`."""
+        name = Path(tok).name
+        staged = []
+        program = name
+        scan_idx = 0
+        if re.fullmatch(r"(?:python(?:[0-9.]+)?|pypy[0-9]*)", name):
+            pi = 0
+            while pi < len(rest) and rest[pi] in {
+                "-B", "-E", "-I", "-O", "-OO", "-s", "-S", "-u", "-q",
+            }:
+                pi += 1
+            if pi >= len(rest):
+                return None, f"proof executable {tok!r} missing module or script target; fail-closed (#750 C19)"
+            if rest[pi].startswith("-m"):
+                mod = (rest[pi + 1] if pi + 1 < len(rest) else "") if rest[pi] == "-m" else rest[pi][2:]
+                if not re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", mod):
+                    return None, f"proof executable {tok!r} uses invalid -m module {mod!r}; fail-closed (#750 C19)"
+                scan_idx = pi + 2 if rest[pi] == "-m" else pi + 1
+                if mod == "pytest":
+                    program = "pytest"
+            else:
+                if rest[pi] == "--":
+                    pi += 1
+                if pi >= len(rest) or rest[pi].startswith("-"):
+                    bad_opt = rest[pi] if pi < len(rest) else "--"
+                    return None, (f"proof executable {tok!r} uses unsupported interpreter option "
+                                  f"{bad_opt!r} or missing script; fail-closed (#750 C19)")
+                err = cls._check_rel_operand(tok, rest[pi], "script")
+                if err:
+                    return None, err
+                staged.append(rest[pi])
+                scan_idx = pi + 1
+        elif re.fullmatch(r"(?:node(?:js)?|deno|bun|ruby|perl|php|lua|Rscript)(?:[0-9.]+)?", name):
+            pi = 1 if rest[:1] == ["--"] else 0
+            if pi >= len(rest) or rest[pi].startswith("-"):
+                bad_opt = rest[pi] if pi < len(rest) else ""
+                return None, (f"proof executable {tok!r} uses unsupported interpreter option "
+                              f"{bad_opt!r} or missing script; fail-closed (#750 C19)")
+            err = cls._check_rel_operand(tok, rest[pi], "script")
+            if err:
+                return None, err
+            staged.append(rest[pi])
+            scan_idx = pi + 1
+        elif name in {"make", "gmake"}:
+            mi = 0
+            while mi < len(rest):
+                a = rest[mi]
+                if a in ("-f", "--file", "--makefile"):
+                    if mi + 1 >= len(rest):
+                        return None, f"proof executable {tok!r} {a} missing makefile operand; fail-closed (#750 C19)"
+                    err = cls._check_rel_operand(tok, rest[mi + 1], "makefile")
+                    if err:
+                        return None, err
+                    staged.append(rest[mi + 1])
+                    mi += 2
+                elif a.startswith(("--file=", "--makefile=")):
+                    val = a.split("=", 1)[1]
+                    err = cls._check_rel_operand(tok, val, "makefile")
+                    if err:
+                        return None, err
+                    staged.append(val)
+                    mi += 1
+                elif a.startswith("-f") and len(a) > 2:
+                    val = a[2:]
+                    err = cls._check_rel_operand(tok, val, "makefile")
+                    if err:
+                        return None, err
+                    staged.append(val)
+                    mi += 1
+                elif a.startswith("-") or "=" in a:
+                    return None, f"proof executable {tok!r} uses unsupported make argument {a!r}; fail-closed (#750 C19)"
+                else:
+                    mi += 1
+            return staged, None
+
+        value_opts = ("-f",) + (("-c",) if program == "pytest" else ())
+        long_opts = ("--config", "--config-file", "--file")
+        i = scan_idx
+        while i < len(rest):
+            a = rest[i]
+            if a == "--":
+                break
+            if program == "pytest" and (
+                a in ("-o", "--override-ini", "--rootdir", "--confcutdir")
+                or a.startswith(("--override-ini=", "--rootdir=", "--confcutdir="))
+            ):
+                return None, f"proof executable {tok!r} uses dynamic pytest config option {a!r}; fail-closed (#750 C19)"
+            if a.startswith(tuple(opt + "=" for opt in long_opts)):
+                val = a.split("=", 1)[1]
+                err = cls._check_rel_operand(tok, val, "config")
+                if err:
+                    return None, err
+                staged.append(val)
+            elif a in long_opts:
+                if i + 1 >= len(rest):
+                    return None, f"proof executable {tok!r} {a} missing operand; fail-closed (#750 C19)"
+                err = cls._check_rel_operand(tok, rest[i + 1], "config")
+                if err:
+                    return None, err
+                staged.append(rest[i + 1])
+                i += 1
+            elif a in value_opts:
+                if i + 1 >= len(rest):
+                    return None, f"proof executable {tok!r} {a} missing operand; fail-closed (#750 C19)"
+                err = cls._check_rel_operand(tok, rest[i + 1], "config")
+                if err:
+                    return None, err
+                staged.append(rest[i + 1])
+                i += 1
+            elif a.startswith(value_opts) and len(a) > 2:
+                val = a[2:]
+                err = cls._check_rel_operand(tok, val, "config")
+                if err:
+                    return None, err
+                staged.append(val)
+            elif len(a) > 1 and a[0] == "-" and a[1] != "-" and any(opt[1] in a[1:] for opt in value_opts):
+                return None, f"proof executable {tok!r} uses ambiguous option cluster {a!r}; fail-closed (#750 C19)"
+            elif program == "pytest" and not a.startswith("-"):
+                p_part = a.split("::", 1)[0]
+                err = cls._check_rel_operand(tok, p_part, "test path")
+                if err:
+                    return None, err
+            i += 1
+        if program == "pytest" and i < len(rest) and rest[i] == "--":
+            for post_a in rest[i + 1:]:
+                p_part = post_a.split("::", 1)[0]
+                err = cls._check_rel_operand(tok, p_part, "test path")
+                if err:
+                    return None, err
+        return staged, None
+
+    @classmethod
+    def _staged_script_operands(cls, argv):
+        """Return repo-relative script/config operands that must exist and remain invariant in each phase."""
+        indexed, err = cls._unwrap_nc_indexed(argv)
+        if err or not indexed:
+            return []
+        target_idx, target_tok = indexed[-1]
+        tail = argv[target_idx + 1:]
+        if Path(target_tok).name in cls._SHELL_NAMES:
+            sh_op, s_err = cls._parse_shell_script_operand(target_tok, tail)
+            return [] if (s_err or sh_op is None) else [sh_op]
+        ops, t_err = cls._parse_target_operands(target_tok, tail)
+        return [] if (t_err or not ops) else ops
+
+    @classmethod
+    def _verify_staged_rel_file(cls, repo_dir, rel_path):
+        """Verify `rel_path` stays strictly inside `repo_dir` across relative hops (never checking
+        host ancestors above `repo_dir`) and is a non-group/world-writable regular file."""
+        try:
+            repo_real = Path(repo_dir).resolve(strict=True)
+            norm_rel = os.path.normpath(rel_path)
+            if os.path.isabs(rel_path) or norm_rel in ("", ".") or ".." in Path(norm_rel).parts:
+                return None, f"proof input {rel_path!r} escapes the staged commit; fail-closed (#750 C19)"
+            cur = repo_real
+            for part in Path(norm_rel).parts:
+                if part in ("", "."):
+                    continue
+                cur = cur / part
+                lst = os.lstat(cur)
+                if stat.S_ISLNK(lst.st_mode):
+                    cur = cur.resolve(strict=True)
+                    if cur != repo_real and repo_real not in cur.parents:
+                        return None, (f"proof input {rel_path!r} resolves via symlink outside "
+                                      "the staged commit; fail-closed (#750 C19)")
+            final_real = cur.resolve(strict=True)
+            st = os.stat(final_real)
+            if (
+                final_real == repo_real
+                or repo_real not in final_real.parents
+                or not stat.S_ISREG(st.st_mode)
+                or (st.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
+            ):
+                return None, (f"proof input {rel_path!r} is missing, writable, or escapes "
+                              "the staged commit; fail-closed (#750 C19)")
+            return hashlib.sha256(final_real.read_bytes()).hexdigest(), None
+        except (OSError, RuntimeError) as exc:
+            return None, (f"proof input {rel_path!r} does not exist in staged commit ({exc}); "
+                          "fail-closed (#750 C19)")
 
     @classmethod
     def _shell_script_operand(cls, argv):
@@ -1291,27 +1480,9 @@ class _Authority:
                     return None, "timeout wrapper missing duration or target proof command; fail-closed (#750 C19)"
                 idx += 1  # duration operand
             else:
-                if re.fullmatch(r"(?:python(?:[0-9.]+)?|pypy[0-9]*)", name):
-                    pi = 0
-                    while pi < len(rest) and rest[pi] in {
-                        "-B", "-E", "-I", "-O", "-OO", "-s", "-S", "-u", "-q",
-                    }:
-                        pi += 1
-                    if pi < len(rest) and not rest[pi].startswith("-m"):
-                        if rest[pi] == "--":
-                            pi += 1
-                        if pi < len(rest) and not rest[pi].startswith("-"):
-                            py_op = rest[pi]
-                            if os.path.isabs(py_op) or ".." in Path(py_op).parts:
-                                return None, (f"proof executable {tok!r} targets external script "
-                                              f"{py_op!r} outside the staged commit; fail-closed (#750 C19)")
-                elif name in {"node", "nodejs", "ruby", "perl"}:
-                    pi = 1 if rest[:1] == ["--"] else 0
-                    if pi < len(rest) and not rest[pi].startswith("-"):
-                        interp_op = rest[pi]
-                        if os.path.isabs(interp_op) or ".." in Path(interp_op).parts:
-                            return None, (f"proof executable {tok!r} targets external script "
-                                          f"{interp_op!r} outside the staged commit; fail-closed (#750 C19)")
+                _, t_err = cls._parse_target_operands(tok, rest)
+                if t_err:
+                    return None, t_err
                 break
         return indexed, None
 
@@ -3027,28 +3198,13 @@ def execute_negative_control(m, nc_command=None):
             err = _stage_phase_repo(top, head, commit, repo, phase)
             if err:
                 return None, None, err
-            sh_op = _Authority._shell_script_operand(argv)
-            pre_sh_digest = None
-            if sh_op is not None:
-                try:
-                    repo_real = Path(repo).resolve()
-                    raw_sh = os.path.abspath(os.path.join(repo, sh_op))
-                    sh_nodes = list(_Authority._nodes(raw_sh))
-                    sh_real = Path(raw_sh).resolve(strict=True)
-                    sh_st = os.stat(sh_real)
-                    if (
-                        sh_real == repo_real
-                        or repo_real not in sh_real.parents
-                        or any(n != repo_real and repo_real not in n.parents for n, _ in sh_nodes)
-                        or not stat.S_ISREG(sh_st.st_mode)
-                        or (sh_st.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
-                    ):
-                        return None, None, (f"proof shell script {sh_op!r} is missing, writable, or "
-                                            "escapes the staged commit; fail-closed (#750 C19)")
-                    pre_sh_digest = hashlib.sha256(sh_real.read_bytes()).hexdigest()
-                except (OSError, RuntimeError) as sh_exc:
-                    return None, None, (f"proof shell script {sh_op!r} does not exist in staged "
-                                        f"{phase} commit ({sh_exc}); fail-closed (#750 C19)")
+            staged_ops = _Authority._staged_script_operands(argv)
+            pre_op_digests = {}
+            for s_op in staged_ops:
+                s_digest, s_err = _Authority._verify_staged_rel_file(repo, s_op)
+                if s_err:
+                    return None, None, s_err
+                pre_op_digests[s_op] = s_digest
             exec_argv = list(argv)
             if pinned_exec is not None:
                 _, exec_err = _Authority.nc_exec_identity(
@@ -3060,19 +3216,13 @@ def execute_negative_control(m, nc_command=None):
                     if 0 <= slot_idx < len(exec_argv) and not os.path.isabs(exec_argv[slot_idx]):
                         exec_argv[slot_idx] = pinned_abs
             rc, out, errout = _run_at(repo, exec_argv, timeout=NC_TIMEOUT_S, env=env)
-            if pre_sh_digest is not None:
-                try:
-                    post_sh_real = Path(os.path.abspath(os.path.join(repo, sh_op))).resolve(strict=True)
-                    if (
-                        post_sh_real == repo_real
-                        or repo_real not in post_sh_real.parents
-                        or hashlib.sha256(post_sh_real.read_bytes()).hexdigest() != pre_sh_digest
-                    ):
-                        return None, None, (f"proof shell script {sh_op!r} changed during {phase}; "
-                                            "fail-closed (#750 C19)")
-                except (OSError, RuntimeError) as sh_post_exc:
-                    return None, None, (f"proof shell script {sh_op!r} disappeared during {phase} "
-                                        f"({sh_post_exc}); fail-closed (#750 C19)")
+            for s_op, want_digest in pre_op_digests.items():
+                post_digest, post_s_err = _Authority._verify_staged_rel_file(repo, s_op)
+                if post_s_err:
+                    return None, None, post_s_err
+                if post_digest != want_digest:
+                    return None, None, (f"proof input {s_op!r} changed during {phase}; "
+                                        "fail-closed (#750 C19)")
             if pinned_exec is not None:
                 _, post_err = _Authority.nc_exec_identity(
                     argv, top, env.get("PATH", ""), pinned_exec, f"during {phase}")
@@ -3105,14 +3255,13 @@ def execute_negative_control(m, nc_command=None):
     pinned_exec, exec_err = _Authority.nc_exec_identity(argv, top)
     if exec_err:
         return False, [f"--execute-nc: {exec_err}"]
-    sh_head_op = _Authority._shell_script_operand(argv)
-    if sh_head_op is not None:
-        norm_sh_op = Path(os.path.normpath(sh_head_op)).as_posix().lstrip("./")
+    for st_op in _Authority._staged_script_operands(argv):
+        norm_st_op = Path(os.path.normpath(st_op)).as_posix().lstrip("./")
         ls_rc, ls_out, _ = _run(
-            [_Authority.git_bin(), "-C", top, "--literal-pathspecs", "ls-tree", head, "--", norm_sh_op],
+            [_Authority.git_bin(), "-C", top, "--literal-pathspecs", "ls-tree", head, "--", norm_st_op],
             timeout=10, env=_Authority.git_env())
         if ls_rc != 0 or not ls_out.strip() or ls_out.strip().split(None, 1)[0] not in ("100644", "100755"):
-            return False, [f"--execute-nc: shell proof script {sh_head_op!r} is not a tracked "
+            return False, [f"--execute-nc: proof input {st_op!r} is not a tracked "
                            "regular file in head_sha; fail-closed (#750 C19)"]
     try:
         mutant, err = _prepare_control(top, head, m, nc, tool, nc_command)
