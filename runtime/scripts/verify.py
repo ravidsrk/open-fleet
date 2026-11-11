@@ -1067,11 +1067,11 @@ class _Authority:
         "sh", "bash", "rbash", "dash", "zsh", "rzsh", "ksh", "rksh", "ash", "hush", "csh", "tcsh",
     })
     _SHELL_RE = re.compile(
-        r"(?:sh|bash|rbash|dash|zsh|rzsh|ksh|rksh|mksh|pdksh|yash|posh|ash|hush|csh|tcsh)(?:[-.]?\d+(?:\.\d+)*)?"
+        r"(?:sh|bash|rbash|dash|zsh|rzsh|ksh|rksh|mksh|pdksh|yash|posh|ash|hush|csh|tcsh)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"
     )
     _MULTICALL_BOX_RE = re.compile(r"(?:busybox|toybox|sbase-box|ubase-box)(?:[.-][A-Za-z0-9_.-]+)?")
     _MUX_RE = re.compile(
-        r"(?:(?:g?sed|gnused|[gmn]?awk|deno|bun)(?:[-.]?\d+(?:\.\d+)*)?"
+        r"(?:(?:g?sed|gnused|[gmn]?awk|deno|bun)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"
         r"|(?:busybox|toybox|sbase-box|ubase-box)(?:[.-][A-Za-z0-9_.-]+)?"
         r"|ld\.so(?:\.[0-9]+)?|ld-linux[A-Za-z0-9_.-]*|ld-musl[A-Za-z0-9_.-]*"
         r"|proxychains[0-9]*)"
@@ -1101,22 +1101,22 @@ class _Authority:
             return "wrap:nohup"
         if name in ("command", "builtin"):
             return f"wrap:{name}"
-        if re.fullmatch(r"(?:csh|tcsh|r?zsh)(?:[-.]?\d+(?:\.\d+)*)?", name):
+        if re.fullmatch(r"(?:csh|tcsh|r?zsh)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", name):
             return "shell:non_posix"
         if cls._is_shell_name(name):
             return "shell:posix"
         for k, pat in (
-            ("interp:python", r"(?:python|pypy)(?:[-.]?\d+(?:\.\d+)*)?"),
-            ("interp:node", r"node(?:js)?(?:[-.]?\d+(?:\.\d+)*)?"),
-            ("interp:perl", r"perl(?:[-.]?\d+(?:\.\d+)*)?"),
-            ("interp:ruby", r"ruby(?:[-.]?\d+(?:\.\d+)*)?"),
-            ("interp:php", r"php(?:[-.]?\d+(?:\.\d+)*)?"),
-            ("interp:lua", r"lua(?:jit)?(?:[-.]?\d+(?:\.\d+)*)?"),
-            ("interp:Rscript", r"Rscript(?:[-.]?\d+(?:\.\d+)*)?"),
-            ("runner:pytest", r"(?:pytest|py\.test)(?:[-.]?\d+(?:\.\d+)*)?"),
-            ("runner:make", r"g?make(?:[-.]?\d+(?:\.\d+)*)?"),
-            ("runner:grep", r"(?:[efg]?grep)(?:[-.]?\d+(?:\.\d+)*)?"),
-            ("runner:rg", r"(?:rg|ripgrep)(?:[-.]?\d+(?:\.\d+)*)?"),
+            ("interp:python", r"(?:python|pypy)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"),
+            ("interp:node", r"node(?:js)?(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"),
+            ("interp:perl", r"perl(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"),
+            ("interp:ruby", r"ruby(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"),
+            ("interp:php", r"php(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"),
+            ("interp:lua", r"lua(?:jit)?(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"),
+            ("interp:Rscript", r"Rscript(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"),
+            ("runner:pytest", r"(?:pytest|py\.test)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"),
+            ("runner:make", r"g?make(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"),
+            ("runner:grep", r"(?:[efg]?grep)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"),
+            ("runner:rg", r"(?:rg|ripgrep)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"),
         ):
             if re.fullmatch(pat, name):
                 return k
@@ -1183,7 +1183,7 @@ class _Authority:
     @classmethod
     def _parse_shell_script_operand(cls, tok, rest):
         """Parse shell argv tail `rest` and return `(script_op, err)` enforcing staged repo-relative path."""
-        if re.fullmatch(r"(?:csh|tcsh|r?zsh)(?:[-.]?\d+(?:\.\d+)*)?", Path(tok).name):
+        if re.fullmatch(r"(?:csh|tcsh|r?zsh)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", Path(tok).name):
             return None, f"proof executable {tok!r} invokes non-POSIX shell or zsh startup files; fail-closed (#750 C19)"
         si = 0
         while si < len(rest):
@@ -1247,7 +1247,7 @@ class _Authority:
         staged = []
         program = name
         scan_idx = 0
-        if re.fullmatch(r"(?:python|pypy)(?:[-.]?\d+(?:\.\d+)*)?", name):
+        if re.fullmatch(r"(?:python|pypy)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", name):
             pi = 0
             while pi < len(rest) and rest[pi] in {
                 "-B", "-E", "-I", "-O", "-OO", "-s", "-S", "-u", "-q",
@@ -1257,7 +1257,7 @@ class _Authority:
                 return None, f"proof executable {tok!r} missing module or script target; fail-closed (#750 C19)"
             if rest[pi].startswith("-m"):
                 mod = (rest[pi + 1] if pi + 1 < len(rest) else "") if rest[pi] == "-m" else rest[pi][2:]
-                if not re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", mod):
+                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", mod):
                     return None, f"proof executable {tok!r} uses invalid -m module {mod!r}; fail-closed (#750 C19)"
                 scan_idx = pi + 2 if rest[pi] == "-m" else pi + 1
                 if mod in ("pytest", "unittest"):
@@ -1290,7 +1290,7 @@ class _Authority:
                     return None, err
                 staged.append(rest[pi])
                 scan_idx = pi + 1
-        elif re.fullmatch(r"(?:node(?:js)?|ruby|perl|php|lua(?:jit)?|Rscript)(?:[-.]?\d+(?:\.\d+)*)?", name):
+        elif re.fullmatch(r"(?:node(?:js)?|ruby|perl|php|lua(?:jit)?|Rscript)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", name):
             pi = 1 if rest[:1] == ["--"] else 0
             if pi >= len(rest) or rest[pi].startswith("-"):
                 bad_opt = rest[pi] if pi < len(rest) else ""
@@ -1303,7 +1303,7 @@ class _Authority:
                 return None, err
             staged.append(rest[pi])
             scan_idx = pi + 1
-        elif re.fullmatch(r"g?make(?:[-.]?\d+(?:\.\d+)*)?", name):
+        elif re.fullmatch(r"g?make(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", name):
             mi = 0
             while mi < len(rest):
                 a = rest[mi]
@@ -1334,9 +1334,9 @@ class _Authority:
                 else:
                     mi += 1
             return staged, None
-        elif re.fullmatch(r"(?:pytest|py\.test)(?:[-.]?\d+(?:\.\d+)*)?", name):
+        elif re.fullmatch(r"(?:pytest|py\.test)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", name):
             program = "pytest"
-        elif re.fullmatch(r"(?:[efg]?grep)(?:[-.]?\d+(?:\.\d+)*)?", name):
+        elif re.fullmatch(r"(?:[efg]?grep)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", name):
             program = "grep"
 
         if program == "unittest":
@@ -1389,7 +1389,7 @@ class _Authority:
                         return None, err
             else:
                 for u_op in u_pos:
-                    if not re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", u_op):
+                    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", u_op):
                         err = cls._check_rel_operand(tok, u_op, "unittest target")
                         if err:
                             return None, err
@@ -1519,7 +1519,7 @@ class _Authority:
             return None
         target_idx, target_tok = indexed[-1]
         tail = argv[target_idx + 1:]
-        if not re.fullmatch(r"(?:python|pypy)(?:[-.]?\d+(?:\.\d+)*)?", Path(target_tok).name):
+        if not re.fullmatch(r"(?:python|pypy)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", Path(target_tok).name):
             return None
         pi = 0
         while pi < len(tail) and tail[pi] in {"-B", "-E", "-I", "-O", "-OO", "-s", "-S", "-u", "-q"}:
@@ -1706,7 +1706,7 @@ class _Authority:
                         if idx + 1 >= len(argv):
                             return None, f"nice {opt} missing adjustment value; fail-closed (#750 C19)"
                         idx += 2
-                    elif opt.startswith(("-n", "--adjustment=")) or re.match(r"^--?\d+$", opt):
+                    elif opt.startswith(("-n", "--adjustment=")) or re.match(r"^--?[0-9]+$", opt):
                         idx += 1
                     else:
                         return None, f"nice option {opt!r} is unsupported; fail-closed (#750 C19)"
@@ -1814,8 +1814,8 @@ class _Authority:
             cls._is_mux_exe(i_base)
             or cls._is_mux_exe(eff_i_real_base)
             or (interp_names & {"nice", "gnice", "timeout", "gtimeout", "nohup", "gnohup", "command", "builtin"})
-            or any(re.fullmatch(r"(?:csh|tcsh)(?:[-.]?\d+(?:\.\d+)*)?", n) for n in interp_names)
-            or (i_base != "sh" and any(re.fullmatch(r"r?zsh(?:[-.]?\d+(?:\.\d+)*)?", n) for n in interp_names))
+            or any(re.fullmatch(r"(?:csh|tcsh)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", n) for n in interp_names)
+            or (i_base != "sh" and any(re.fullmatch(r"r?zsh(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", n) for n in interp_names))
         ):
             return None, (f"proof executable {label!r} uses multiplexer or wrapper shebang {interp!r}; "
                           "fail-closed (#750 C19)")
@@ -1847,8 +1847,8 @@ class _Authority:
                 cls._is_mux_exe(e_base)
                 or cls._is_mux_exe(eff_e_real_base)
                 or (e_names & {"env", "genv", "nice", "gnice", "timeout", "gtimeout", "nohup", "gnohup", "command", "builtin"})
-                or any(re.fullmatch(r"(?:csh|tcsh)(?:[-.]?\d+(?:\.\d+)*)?", n) for n in e_names)
-                or (e_base != "sh" and any(re.fullmatch(r"r?zsh(?:[-.]?\d+(?:\.\d+)*)?", n) for n in e_names))
+                or any(re.fullmatch(r"(?:csh|tcsh)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", n) for n in e_names)
+                or (e_base != "sh" and any(re.fullmatch(r"r?zsh(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", n) for n in e_names))
             ):
                 return None, (f"proof executable {label!r} shebang env target {interp_arg!r} "
                               "resolves to multiplexer or wrapper; fail-closed (#750 C19)")
@@ -1862,13 +1862,13 @@ class _Authority:
     def _shebang_arg_allowed(interp_names, interp_arg):
         if not interp_arg:
             return True
-        if any(re.fullmatch(r"(?:python|pypy)(?:[-.]?\d+(?:\.\d+)*)?", n) for n in interp_names):
+        if any(re.fullmatch(r"(?:python|pypy)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", n) for n in interp_names):
             return bool(re.fullmatch(r"-[BEIOPSsuq]+", interp_arg))
-        if any(re.fullmatch(r"(?:sh|bash|dash|ash|ksh|mksh|yash)(?:[-.]?\d+(?:\.\d+)*)?", n) for n in interp_names):
+        if any(re.fullmatch(r"(?:sh|bash|dash|ash|ksh|mksh|yash)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", n) for n in interp_names):
             return bool(re.fullmatch(r"-[abefhmnuvxBCEHP]+", interp_arg))
-        if any(re.fullmatch(r"perl(?:[-.]?\d+(?:\.\d+)*)?", n) for n in interp_names):
+        if any(re.fullmatch(r"perl(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", n) for n in interp_names):
             return bool(re.fullmatch(r"-[wTt]+", interp_arg))
-        if any(re.fullmatch(r"(?:[gmnb]?awk|sed|[gs]sed)(?:[-.]?\d+(?:\.\d+)*)?", n) for n in interp_names):
+        if any(re.fullmatch(r"(?:[gmnb]?awk|sed|[gs]sed)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", n) for n in interp_names):
             return interp_arg == "-f"
         return False
 
@@ -1916,7 +1916,7 @@ class _Authority:
             sh_emulated_zsh = (
                 tok_base == "sh"
                 and real_fam == "shell:non_posix"
-                and bool(re.fullmatch(r"r?zsh(?:[-.]?\d+(?:\.\d+)*)?", eff_real_base))
+                and bool(re.fullmatch(r"r?zsh(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", eff_real_base))
             )
             if real_fam is not None and real_fam != tok_fam and not sh_emulated_zsh:
                 return None, (f"proof executable {tok!r} resolves to {chain[0][1]!r} ({real_fam}) "
@@ -2504,10 +2504,10 @@ def _command_oracle_paths(command):
             return None
         inputs.append(argv[0])
     program = Path(argv[0]).name
-    python = re.fullmatch(r"(?:python|pypy)(?:[-.]?\d+(?:\.\d+)*)?", program)
+    python = re.fullmatch(r"(?:python|pypy)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", program)
     interpreter = python or bool(
         re.fullmatch(
-            r"(?:sh|bash|dash|zsh|ksh|mksh|pdksh|yash|posh|ash|node(?:js)?|ruby|perl|php|lua(?:jit)?|Rscript)(?:[-.]?\d+(?:\.\d+)*)?",
+            r"(?:sh|bash|dash|zsh|ksh|mksh|pdksh|yash|posh|ash|node(?:js)?|ruby|perl|php|lua(?:jit)?|Rscript)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?",
             program,
         )
     )
@@ -2525,7 +2525,7 @@ def _command_oracle_paths(command):
         arg = argv[i]
         if python and arg.startswith("-m"):
             name = (argv[i + 1] if i + 1 < len(argv) else "") if arg == "-m" else arg[2:]
-            if not re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", name):
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", name):
                 return None
             mod_root = name.split(".", 1)[0]
             if mod_root != "unittest" and (
@@ -2763,7 +2763,7 @@ def _is_oracle_path(path, nc_command=None, head=None):
             argv = argv[2:] if argv[1:2] == ["--"] else argv[1:]
         prog = Path(argv[0]).name if argv else ""
         runner, rest = ("pytest", argv[1:]) if prog == "pytest" else (None, [])
-        if re.fullmatch(r"(?:python|pypy)(?:[-.]?\d+(?:\.\d+)*)?", prog):
+        if re.fullmatch(r"(?:python|pypy)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", prog):
             i = 1
             while i < len(argv) and argv[i] in {"-B", "-E", "-I", "-O", "-OO", "-s", "-S", "-u", "-q"}:
                 i += 1
@@ -2804,7 +2804,7 @@ def _is_oracle_path(path, nc_command=None, head=None):
             opt.setdefault("p", []).extend(ops[2:3])
         elif runner == "unittest":
             for op in ops:
-                if re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", op):
+                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", op):
                     # A dotted operand names a module, a class or a method
                     # (`checks.add_check.TestAdd.test_add`): the oracle is the deepest prefix that
                     # is a module at head_sha, not the whole dotted path read as a file. With no

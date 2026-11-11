@@ -799,6 +799,20 @@ class TestCoordinatorTakeoverAndWorkerBindingFence(Base):
             run="run-d",
             attrs={"taskId": "task-unmatched"},
         )
+        # Hintless delayed terminal mail (both env-bound and handle-only) must ALSO refuse to rebind to `disp-inj-2`:
+        w_shared.send_message(
+            subject="late-first-done-no-hint-env",
+            msg_type="worker_done",
+            outcome="succeeded",
+            run="run-d",
+        )
+        self.store.send_message(
+            subject="late-first-done-no-hint-handle",
+            msg_type="worker_done",
+            outcome="succeeded",
+            sender="term-shared",
+            run="run-d",
+        )
         by_id_mid = {t["id"]: t["status"] for t in self.store.task_list(run="run-d")["tasks"]}
         self.assertEqual(by_id_mid[t_inj_2], "dispatched")
         self.assertEqual(by_id_mid[t_inj_2_child], "pending")
@@ -811,7 +825,7 @@ class TestCoordinatorTakeoverAndWorkerBindingFence(Base):
         self.assertEqual(by_id_inj[t_inj_1], "completed")
         self.assertEqual(by_id_inj[t_inj_2], "dispatched")
         self.assertEqual(by_id_inj[t_inj_2_child], "pending")
-        # Positive `dispatch_inject` completion on the same reused handle attributes to the active injected dispatch:
+        # Positive `dispatch_inject` completion on the same reused handle WITH explicit `taskId` attributes to the active injected dispatch:
         t_inj_3 = self.store.task_create(spec="inj-third", run="run-d")["task"]["id"]
         self.store.task_update(task_id=t_inj_3, status="dispatched", run="run-d")
         with self.store._connect() as conn:
@@ -825,7 +839,7 @@ class TestCoordinatorTakeoverAndWorkerBindingFence(Base):
             msg_type="worker_done",
             outcome="succeeded",
             run="run-d",
-            attrs={"dispatch_id": "disp-inj-2"},  # forged snake_case key is stripped in favor of disp-inj-3
+            attrs={"taskId": t_inj_3, "dispatch_id": "disp-inj-2"},  # forged snake_case key is stripped in favor of disp-inj-3
         )
         inj_ok = self.store.ensure_terminal_or_died(
             dispatch_id="disp-inj-3", worker_handle="term-shared", exit_code=0, run_id="run-d"
@@ -836,6 +850,27 @@ class TestCoordinatorTakeoverAndWorkerBindingFence(Base):
             next(t["status"] for t in self.store.task_list(run="run-d")["tasks"] if t["id"] == t_inj_3),
             "completed",
         )
+        t_inj_4 = self.store.task_create(spec="inj-fourth", run="run-d")["task"]["id"]
+        self.store.task_update(task_id=t_inj_4, status="dispatched", run="run-d")
+        with self.store._connect() as conn:
+            conn.execute(
+                "INSERT INTO dispatches(dispatch_id, task_id, run_id, worktree, agent, terminal_handle, state, created_at, updated_at) "
+                "VALUES ('disp-inj-4', ?, 'run-d', '/w', 'custom', 'term-shared', 'running', 35, 35)",
+                (t_inj_4,),
+            )
+        self.store.send_message(
+            subject="fourth-done-handle",
+            msg_type="worker_done",
+            outcome="succeeded",
+            sender="term-shared",
+            run="run-d",
+            attrs={"taskId": t_inj_4},
+        )
+        inj_ok_4 = self.store.ensure_terminal_or_died(
+            dispatch_id="disp-inj-4", worker_handle="term-shared", exit_code=0, run_id="run-d"
+        )
+        self.assertFalse(inj_ok_4["syntheticDied"])
+        self.assertEqual(self.store.dispatch_state("disp-inj-4"), "completed")
 
         # Bound worker A spoofing sender="disp-spoof-b" / "w-spoof-b" (or tampering with
         # OPEN_FLEET_TERMINAL_HANDLE), or unresolved terminal mail, cannot suppress B's crash recovery:

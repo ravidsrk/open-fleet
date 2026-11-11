@@ -1410,7 +1410,11 @@ class LocalStateStore:
             ).fetchone()
             if disp_row is None:
                 return None
-            if disp_row["terminal_handle"] and self._is_dispatch_settled(conn, run_id, disp_row):
+            if hint_task_id is None:
+                return disp_row
+            if disp_row["task_id"] == hint_task_id and not self._is_dispatch_settled(conn, run_id, disp_row):
+                return disp_row
+            if disp_row["terminal_handle"]:
                 siblings = conn.execute(
                     "SELECT rowid AS rid, dispatch_id, state, task_id, terminal_handle FROM dispatches "
                     "WHERE run_id = ? AND terminal_handle = ? AND rowid > ? "
@@ -1424,19 +1428,18 @@ class LocalStateStore:
                     and (disp_row["task_id"] is None or s["task_id"] != disp_row["task_id"])
                     and not self._is_dispatch_settled(conn, run_id, s)
                 ]
-                if hint_task_id is not None:
-                    for s in unsettled:
-                        if s["task_id"] == hint_task_id:
-                            return s
-                    if disp_row["task_id"] == hint_task_id:
-                        return disp_row
-                    for s in reversed(siblings):
-                        if s["task_id"] == hint_task_id:
-                            return s
+                matching_unsettled = [s for s in unsettled if s["task_id"] == hint_task_id]
+                if len(matching_unsettled) == 1:
+                    return matching_unsettled[0]
+                if len(matching_unsettled) > 1:
                     return None
-                if unsettled:
-                    return unsettled[0]
-            if hint_task_id is not None and disp_row["task_id"] != hint_task_id:
+                if disp_row["task_id"] == hint_task_id:
+                    return disp_row
+                matching_siblings = [s for s in siblings if s["task_id"] == hint_task_id]
+                if len(matching_siblings) == 1:
+                    return matching_siblings[0]
+                return None
+            if disp_row["task_id"] != hint_task_id:
                 return None
             return disp_row
         if sender_id not in ("worker", COORDINATOR_ALIAS):
@@ -1455,20 +1458,27 @@ class LocalStateStore:
                 "ORDER BY CASE WHEN state IN ('ready', 'running') THEN 0 ELSE 1 END, rowid ASC",
                 (run_id, sender_id),
             ).fetchall()
+            if not by_handle:
+                return None
+            if len(by_handle) == 1:
+                only = by_handle[0]
+                if hint_task_id is not None and only["task_id"] != hint_task_id:
+                    return None
+                return only
+            if hint_task_id is None:
+                return None
             unsettled_h = [
                 r for r in by_handle if r["state"] in ("ready", "running") and not self._is_dispatch_settled(conn, run_id, r)
             ]
-            if hint_task_id is not None:
-                for r in unsettled_h:
-                    if r["task_id"] == hint_task_id:
-                        return r
-                for r in reversed(by_handle):
-                    if r["task_id"] == hint_task_id:
-                        return r
+            matching_unsettled_h = [r for r in unsettled_h if r["task_id"] == hint_task_id]
+            if len(matching_unsettled_h) == 1:
+                return matching_unsettled_h[0]
+            if len(matching_unsettled_h) > 1:
                 return None
-            if unsettled_h:
-                return unsettled_h[0]
-            return by_handle[-1] if by_handle else None
+            matching_all_h = [r for r in by_handle if r["task_id"] == hint_task_id]
+            if len(matching_all_h) == 1:
+                return matching_all_h[0]
+            return None
         return None
 
     _NO_UPSTREAM = object()

@@ -1115,6 +1115,38 @@ class GateRunsIsolated(QueueCase):
             self.assertEqual(fp_sbf, "")
             self.assertTrue(probs_sbf)
 
+        # 4. Unicode digits (`١>/dev/null`, `trap ١ EXIT`) fingerprint executable `١`, and `trap 999 EXIT` fails closed:
+        uni_cmd = "١"
+        uni_bin = tools_dir / uni_cmd
+        uni_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        uni_bin.chmod(0o755)
+        fp_t999, probs_t999 = q._gate_fingerprint("trap 999 EXIT")
+        self.assertEqual(fp_t999, "")
+        self.assertTrue(probs_t999)
+
+        saved_path = self.w.env.get("PATH")
+        self.w.env["PATH"] = f"{tools_dir}:{saved_path or '/usr/bin:/bin'}"
+        try:
+            for idx_u, g_cmd in enumerate((f"{uni_cmd}>/dev/null", f"trap {uni_cmd} EXIT")):
+                uni_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                self.board(tok, self.w.unit(f"uni-digit-{idx_u}"))
+                rc_up, out_up = self.w.cli("plan", "--token", tok, "--gate-cmd", g_cmd)
+                self.assertEqual(rc_up, 0, out_up)
+                self.assertEqual(out_up["planned"][0]["result"], "tested", out_up)
+                uni_bin.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+                rc_um, out_um = self.w.cli("merge", "--token", tok, "--require-gate", g_cmd)
+                self.assertNotEqual(rc_um, 0, out_um)
+                self.assertEqual(out_um.get("code"), "gate_not_run", out_um)
+                self.w.cli(
+                    "resolve", "--token", tok, "--entry", out_up["planned"][0]["entry"],
+                    "--action", "drop", "--reason", f"stale-uni-{idx_u}",
+                )
+        finally:
+            if saved_path is None:
+                self.w.env.pop("PATH", None)
+            else:
+                self.w.env["PATH"] = saved_path
+
     def test_bwrap_filtered_path_and_dangling_symlinks_fingerprint_sandbox_view(self):
         fake_home = self.w.tmp / "bw-fp-home"
         forbidden_dir = fake_home / ".ssh" / "tools"

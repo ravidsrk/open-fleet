@@ -1984,7 +1984,7 @@ class TestPosixAdversarialRemediation750(PosixRealProcessBase):
             self.prov.terminal_send(term_a, "cross-run", run="run-b")
         self.assertEqual(ctx.exception.code, "cross_run_access")
 
-        for bad in (-1, "-5", "abc", True):
+        for bad in (-1, "-5", "abc", "²", "١", True):
             with self.assertRaises(self.posix.ProviderError) as ctx:
                 self.prov.worker_read(ws_a["dispatchId"], cursor=bad)
             self.assertEqual(ctx.exception.code, "invalid_argument")

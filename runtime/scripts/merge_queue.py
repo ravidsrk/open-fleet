@@ -1394,7 +1394,7 @@ class MergeQueue:
         "sh", "bash", "rbash", "dash", "zsh", "rzsh", "ksh", "rksh", "ash", "hush", "csh", "tcsh",
     })
     _SHELL_RE = re.compile(
-        r"(?:sh|bash|rbash|dash|zsh|rzsh|ksh|rksh|mksh|pdksh|yash|posh|ash|hush|csh|tcsh)(?:[-.]?\d+(?:\.\d+)*)?"
+        r"(?:sh|bash|rbash|dash|zsh|rzsh|ksh|rksh|mksh|pdksh|yash|posh|ash|hush|csh|tcsh)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"
     )
 
     @classmethod
@@ -1451,7 +1451,7 @@ class MergeQueue:
         r"(?:(?:busybox|toybox|sbase-box|ubase-box)(?:[.-][A-Za-z0-9_.-]+)?"
         r"|ld\.so(?:\.[0-9]+)?|ld-linux[A-Za-z0-9_.-]*|ld-musl[A-Za-z0-9_.-]*"
         r"|proxychains[0-9]*"
-        r"|(?:gcc|g\+\+|clang|clang\+\+|pip)(?:[-.]?\d+(?:\.\d+)*)?)"
+        r"|(?:gcc|g\+\+|clang|clang\+\+|pip)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?)"
     )
 
     @classmethod
@@ -1481,28 +1481,28 @@ class MergeQueue:
             return "wrap:nohup"
         if name in ("command", "builtin"):
             return f"wrap:{name}"
-        if re.fullmatch(r"(?:csh|tcsh|r?zsh)(?:[-.]?\d+(?:\.\d+)*)?", name):
+        if re.fullmatch(r"(?:csh|tcsh|r?zsh)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", name):
             return "shell:non_posix"
         if cls._is_shell_name(name):
             return "shell:posix"
-        if re.fullmatch(r"(?:python|pypy)(?:[-.]?\d+(?:\.\d+)*)?", name):
+        if re.fullmatch(r"(?:python|pypy)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", name):
             return "interp:python"
-        if re.fullmatch(r"node(?:js)?(?:[-.]?\d+(?:\.\d+)*)?", name):
+        if re.fullmatch(r"node(?:js)?(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", name):
             return "interp:node"
         for k, pat in (
-            ("perl", r"perl(?:[-.]?\d+(?:\.\d+)*)?"),
-            ("ruby", r"ruby(?:[-.]?\d+(?:\.\d+)*)?"),
-            ("php", r"php(?:[-.]?\d+(?:\.\d+)*)?"),
-            ("lua", r"lua(?:jit)?(?:[-.]?\d+(?:\.\d+)*)?"),
-            ("Rscript", r"Rscript(?:[-.]?\d+(?:\.\d+)*)?"),
-            ("deno", r"deno(?:[-.]?\d+(?:\.\d+)*)?"),
-            ("bun", r"bun(?:[-.]?\d+(?:\.\d+)*)?"),
-            ("sed", r"(?:[gs]?sed|gnused)(?:[-.]?\d+(?:\.\d+)*)?"),
-            ("awk", r"(?:[gmnb]?awk)(?:[-.]?\d+(?:\.\d+)*)?"),
-            ("rg", r"(?:rg|ripgrep)(?:[-.]?\d+(?:\.\d+)*)?"),
-            ("grep", r"(?:g?[ef]?grep)(?:[-.]?\d+(?:\.\d+)*)?"),
-            ("git", r"git(?:[-.]?\d+(?:\.\d+)*)?"),
-            ("pytest", r"(?:pytest|py\.test)(?:[-.]?\d+(?:\.\d+)*)?"),
+            ("perl", r"perl(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"),
+            ("ruby", r"ruby(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"),
+            ("php", r"php(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"),
+            ("lua", r"lua(?:jit)?(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"),
+            ("Rscript", r"Rscript(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"),
+            ("deno", r"deno(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"),
+            ("bun", r"bun(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"),
+            ("sed", r"(?:[gs]?sed|gnused)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"),
+            ("awk", r"(?:[gmnb]?awk)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"),
+            ("rg", r"(?:rg|ripgrep)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"),
+            ("grep", r"(?:g?[ef]?grep)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"),
+            ("git", r"git(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"),
+            ("pytest", r"(?:pytest|py\.test)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"),
         ):
             if re.fullmatch(pat, name):
                 return f"interp:{k}"
@@ -2039,9 +2039,9 @@ class MergeQueue:
                 tokens.append(("op", ";", False))
                 i += 1
                 continue
-            # Optional fd digits before a redirection operator (e.g. `2>&1`, `0</dev/null`)
+            # Optional ASCII fd digits before a redirection operator (e.g. `2>&1`, `0</dev/null`)
             fd_end = i
-            while fd_end < n and cmd[fd_end].isdigit():
+            while fd_end < n and "0" <= cmd[fd_end] <= "9":
                 fd_end += 1
             if fd_end > i and fd_end < n and cmd[fd_end] in (">", "<"):
                 matched_redir = next((op for op in cls._REDIR_OPS if cmd.startswith(op, fd_end)), None)
@@ -2541,7 +2541,7 @@ class MergeQueue:
                                 wi = len(cmd_words)
                                 break
                             wi += 2
-                        elif n_opt.startswith(("-n", "--adjustment=")) or re.match(r"^--?\d+$", n_opt):
+                        elif n_opt.startswith(("-n", "--adjustment=")) or re.match(r"^--?[0-9]+$", n_opt):
                             wi += 1
                         else:
                             problems.append(f"nice: unsupported option {n_opt!r} cannot be statically fingerprinted")
@@ -2852,10 +2852,17 @@ class MergeQueue:
                         continue
                     if ti >= len(t_args):
                         continue
+                    if any(is_dynamic(cf) for _, cf in t_args[ti + 1:]):
+                        problems.append("trap: dynamic signal condition cannot be statically fingerprinted")
+                        continue
                     t_act, t_flag = t_args[ti]
                     if is_dynamic(t_flag):
                         problems.append("trap: dynamic action string cannot be statically fingerprinted")
-                    elif t_act and t_act != "-" and not t_act.isdigit():
+                    elif t_act and t_act.isascii() and t_act.isdigit():
+                        problems.append(
+                            "trap: numeric first operand is ambiguous across shells/signals; use 'trap - <sig>'"
+                        )
+                    elif t_act and t_act != "-":
                         e2, s2, p2 = cls._analyze_gate_command(
                             t_act,
                             _depth + 1,
@@ -2988,8 +2995,8 @@ class MergeQueue:
         executables: list[str] = []
         problems: list[str] = []
         shell_base = _resolved_base or Path(shell_word).name
-        if re.fullmatch(r"(?:csh|tcsh)(?:[-.]?\d+(?:\.\d+)*)?", shell_base) or (
-            re.fullmatch(r"r?zsh(?:[-.]?\d+(?:\.\d+)*)?", shell_base)
+        if re.fullmatch(r"(?:csh|tcsh)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", shell_base) or (
+            re.fullmatch(r"r?zsh(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", shell_base)
             and Path(shell_word).name != "sh"
         ):
             return [], [], [f"{shell_word}: non-POSIX shell or zsh startup files cannot be statically fingerprinted"]
@@ -3106,7 +3113,7 @@ class MergeQueue:
         def norm_script(p: str) -> str:
             return p if ("/" in p or os.path.isabs(p)) else f"./{p}"
 
-        if re.fullmatch(r"(?:python|pypy)(?:[-.]?\d+(?:\.\d+)*)?", base):
+        if re.fullmatch(r"(?:python|pypy)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", base):
             j = 0
             saw_isolated = False
             while j < len(args):
@@ -3164,7 +3171,7 @@ class MergeQueue:
                     if j + 1 >= len(args) or is_dynamic(args[j + 1][1]):
                         return [], [f"{exe_word} {a}: missing or dynamic '-m' target cannot be statically fingerprinted"]
                     mod_name = args[j + 1][0]
-                    if not re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", mod_name):
+                    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", mod_name):
                         return [], [f"{exe_word} -m {mod_name!r}: invalid module name cannot be fingerprinted"]
                     mod_root = mod_name.split(".", 1)[0]
                     forbid_mods = (
@@ -3197,7 +3204,7 @@ class MergeQueue:
                 return [], [f"{exe_word}: stdin, special, or dynamic script operand cannot be statically fingerprinted"]
             return [norm_script(script_arg)], []
 
-        if re.fullmatch(r"(?:perl|ruby|node(?:js)?|php|lua(?:jit)?|Rscript)(?:[-.]?\d+(?:\.\d+)*)?", base):
+        if re.fullmatch(r"(?:perl|ruby|node(?:js)?|php|lua(?:jit)?|Rscript)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", base):
             if not args:
                 return [], [f"{exe_word}: interpreter invoked without script operand cannot be fingerprinted"]
             a0, f0 = args[0]
@@ -3209,13 +3216,13 @@ class MergeQueue:
                 return [norm_script(args[1][0])], []
             if a0.startswith("-"):
                 return [], [f"{exe_word}: inline code or option {a0!r} cannot statically fingerprint external targets"]
-            if re.fullmatch(r"node(?:js)?(?:[-.]?\d+(?:\.\d+)*)?", base) and a0 in ("inspect", "debug"):
+            if re.fullmatch(r"node(?:js)?(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", base) and a0 in ("inspect", "debug"):
                 return [], [f"{exe_word} {a0}: subcommand cannot statically fingerprint external targets"]
             if is_dynamic(f0) or cls._is_stdin_or_special_script(a0):
                 return [], [f"{exe_word}: stdin, special, or dynamic script operand {a0!r} cannot be fingerprinted"]
             return [norm_script(a0)], []
 
-        if re.fullmatch(r"(?:deno|bun)(?:[-.]?\d+(?:\.\d+)*)?", base):
+        if re.fullmatch(r"(?:deno|bun)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", base):
             if not args:
                 return [], [f"{exe_word}: interpreter invoked without script operand cannot be fingerprinted"]
             a0, f0 = args[0]
@@ -3237,7 +3244,7 @@ class MergeQueue:
                 return [norm_script(a0)], []
             return [], [f"{exe_word}: subcommand, task, or option {a0!r} cannot statically fingerprint external targets"]
 
-        if re.fullmatch(r"(?:[gs]?sed|gnused)(?:[-.]?\d+(?:\.\d+)*)?", base):
+        if re.fullmatch(r"(?:[gs]?sed|gnused)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", base):
             files: list[str] = []
             j = 0
             saw_ddash = False
@@ -3334,7 +3341,7 @@ class MergeQueue:
                 ]
             return files, []
 
-        if re.fullmatch(r"(?:[gmnb]?awk)(?:[-.]?\d+(?:\.\d+)*)?", base):
+        if re.fullmatch(r"(?:[gmnb]?awk)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", base):
             awk_files: list[str] = []
             j = 0
             saw_ddash = False
@@ -3400,7 +3407,7 @@ class MergeQueue:
                 ]
             return awk_files, []
 
-        if re.fullmatch(r"(?:rg|ripgrep)(?:[-.]?\d+(?:\.\d+)*)?", base):
+        if re.fullmatch(r"(?:rg|ripgrep)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", base):
             rg_files: list[str] = []
             rg_zero_long = {
                 "--quiet", "--fixed-strings", "--invert-match", "--ignore-case", "--smart-case",
@@ -3505,7 +3512,7 @@ class MergeQueue:
                         return [], [f"{exe_word}: post-operand or dynamic option {pa!r} cannot be statically fingerprinted"]
             return rg_files, []
 
-        if re.fullmatch(r"(?:g?[ef]?grep)(?:[-.]?\d+(?:\.\d+)*)?", base):
+        if re.fullmatch(r"(?:g?[ef]?grep)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", base):
             grep_files: list[str] = []
             grep_zero_long = {
                 "--quiet", "--silent", "--fixed-strings", "--basic-regexp", "--extended-regexp",
@@ -3600,7 +3607,7 @@ class MergeQueue:
                         return [], [f"{exe_word}: post-operand or dynamic option {pa!r} cannot be statically fingerprinted"]
             return grep_files, []
 
-        if re.fullmatch(r"git(?:[-.]?\d+(?:\.\d+)*)?", base):
+        if re.fullmatch(r"git(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", base):
             if not args:
                 return [], [f"{exe_word}: git invoked without subcommand cannot be statically fingerprinted"]
             a0, f0 = args[0]
@@ -3625,7 +3632,7 @@ class MergeQueue:
                     return [], [f"{exe_word} {a0} {ga}: external helper or repo override cannot be statically fingerprinted"]
             return [], []
 
-        if re.fullmatch(r"(?:pytest|py\.test)(?:[-.]?\d+(?:\.\d+)*)?", base):
+        if re.fullmatch(r"(?:pytest|py\.test)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", base):
             pt_files: list[str] = []
             j = 0
             after_ddash = False
@@ -3780,8 +3787,8 @@ class MergeQueue:
         return (
             any(cls._is_mux_wrapper(n) for n in names)
             or bool(names & forbid_wrappers)
-            or any(re.fullmatch(r"(?:csh|tcsh)(?:[-.]?\d+(?:\.\d+)*)?", n) for n in names)
-            or (raw_base != "sh" and any(re.fullmatch(r"r?zsh(?:[-.]?\d+(?:\.\d+)*)?", n) for n in names))
+            or any(re.fullmatch(r"(?:csh|tcsh)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", n) for n in names)
+            or (raw_base != "sh" and any(re.fullmatch(r"r?zsh(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", n) for n in names))
             or any(cls._exec_family(n) in cls._DISALLOWED_SHEBANG_FAMILIES for n in names)
         )
 
@@ -3789,11 +3796,11 @@ class MergeQueue:
     def _shebang_arg_allowed(interp_names: set[str], interp_arg: str) -> bool:
         if not interp_arg:
             return True
-        if any(re.fullmatch(r"(?:python|pypy)(?:[-.]?\d+(?:\.\d+)*)?", n) for n in interp_names):
+        if any(re.fullmatch(r"(?:python|pypy)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", n) for n in interp_names):
             return bool(re.fullmatch(r"-[BEIOPSsuq]+", interp_arg))
-        if any(re.fullmatch(r"(?:sh|bash|dash|ash|ksh|mksh|yash)(?:[-.]?\d+(?:\.\d+)*)?", n) for n in interp_names):
+        if any(re.fullmatch(r"(?:sh|bash|dash|ash|ksh|mksh|yash)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", n) for n in interp_names):
             return bool(re.fullmatch(r"-[abefhmnuvxBCEHP]+", interp_arg))
-        if any(re.fullmatch(r"perl(?:[-.]?\d+(?:\.\d+)*)?", n) for n in interp_names):
+        if any(re.fullmatch(r"perl(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", n) for n in interp_names):
             return bool(re.fullmatch(r"-[wTt]+", interp_arg))
         return False
 

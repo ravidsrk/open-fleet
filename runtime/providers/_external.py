@@ -861,7 +861,7 @@ def local_worker_list(
     start_idx = 0
     if cursor is not None and str(cursor) != "":
         s_cur = str(cursor)
-        if s_cur.isdigit():
+        if s_cur.isascii() and s_cur.isdigit():
             start_idx = int(s_cur)
         else:
             for idx, r in enumerate(rows):

@@ -3344,7 +3344,7 @@ if {repr(self.backend)} == "cmux":
         start_idx = 0
         if cursor is not None and str(cursor) != "":
             s_cur = str(cursor)
-            if s_cur.isdigit():
+            if s_cur.isascii() and s_cur.isdigit():
                 start_idx = int(s_cur)
             else:
                 for idx, r in enumerate(rows):
@@ -3402,7 +3402,7 @@ if {repr(self.backend)} == "cmux":
             return val
         if isinstance(val, str):
             s = val.strip()
-            if s.isdigit():
+            if s.isascii() and s.isdigit():
                 return int(s)
         raise ProviderError("invalid_argument", f"{name} must be a non-negative integer, got {val!r}")
 
