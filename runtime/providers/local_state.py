@@ -1479,9 +1479,15 @@ class LocalStateStore:
                         attrs=stored_attrs,
                         reply_to=reply_to,
                     )
-                    if msg_type == "worker_done" and outcome in ("succeeded", "failed"):
-                        if disp_row and disp_row["state"] not in (*FENCED_DISPATCH_STATES, "died", "completed"):
-                            self._settle_dispatch_task(conn, disp_row["dispatch_id"], succeeded=(outcome == "succeeded"), now=now)
+                    if disp_row and disp_row["state"] not in (*FENCED_DISPATCH_STATES, "died", "completed"):
+                        if msg_type == "worker_done" and outcome in ("succeeded", "failed"):
+                            self._settle_dispatch_task(
+                                conn, disp_row["dispatch_id"], succeeded=(outcome == "succeeded"), now=now
+                            )
+                        elif msg_type == "merge_ready" and outcome in (None, "", "succeeded", "failed"):
+                            self._settle_dispatch_task(
+                                conn, disp_row["dispatch_id"], succeeded=(outcome != "failed"), now=now
+                            )
                     message = {
                         "id": msg_id,
                         "deliveryId": deliv_id,

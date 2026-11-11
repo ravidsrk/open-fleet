@@ -2888,6 +2888,7 @@ class MergeQueue:
 
         if re.match(r"^(?:python|pypy)(?:\d+(?:\.\d+)*)?$", base):
             j = 0
+            saw_isolated = False
             while j < len(args):
                 a, a_flag = args[j]
                 if a == "--":
@@ -2912,16 +2913,48 @@ class MergeQueue:
                 short = a[1:]
                 if "i" in short:
                     return [], [f"{exe_word} {a}: interactive mode cannot be statically fingerprinted"]
-                if short.endswith(("c", "m")) and all(c in "bBdEIOqsSuvx" for c in short[:-1]):
+                if "I" in short:
+                    saw_isolated = True
+                if short.endswith("c") and all(c in "bBdEIOqsSuvxP" for c in short[:-1]):
+                    return [], [
+                        f"{exe_word} {a}: inline '-c' code execution cannot statically fingerprint external targets"
+                    ]
+                if short.endswith("m") and all(c in "bBdEIOqsSuvxP" for c in short[:-1]):
+                    if saw_isolated or "P" in short:
+                        return [], [
+                            f"{exe_word} {a}: '-I'/'-P' omits checkout directory for '-m' module resolution"
+                        ]
                     if j + 1 >= len(args) or is_dynamic(args[j + 1][1]):
-                        return [], [f"{exe_word} {a}: missing or dynamic target cannot be statically fingerprinted"]
-                    return [], []
+                        return [], [f"{exe_word} {a}: missing or dynamic '-m' target cannot be statically fingerprinted"]
+                    mod_name = args[j + 1][0]
+                    if not re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", mod_name):
+                        return [], [f"{exe_word} -m {mod_name!r}: invalid module name cannot be fingerprinted"]
+                    mod_root = mod_name.split(".", 1)[0]
+                    forbid_mods = (
+                        set(getattr(sys, "stdlib_module_names", ()))
+                        | set(sys.builtin_module_names)
+                        | {"pip", "setuptools", "wheel", "virtualenv", "nox", "tox", "coverage", "pytest", "ipython", "IPython"}
+                    )
+                    if mod_root in forbid_mods:
+                        return [], [
+                            f"{exe_word} -m {mod_name}: stdlib/external module runner cannot statically fingerprint targets"
+                        ]
+                    mod_files = [f"__py_mod__:{mod_name}"]
+                    for ma, mf in args[j + 2:]:
+                        if ma == "--":
+                            continue
+                        if is_dynamic(mf) or ma.startswith("-"):
+                            return [], [
+                                f"{exe_word} -m {mod_name}: dynamic or option argument {ma!r} cannot be statically fingerprinted"
+                            ]
+                        mod_files.append(norm_script(ma))
+                    return mod_files, []
                 if all(c in "bBdEIOqsSuvxP" for c in short):
                     j += 1
                     continue
                 return [], [f"{exe_word} {a}: unsupported option cannot be statically fingerprinted"]
             if j >= len(args):
-                return [], [f"{exe_word}: interpreter invoked without script, -c, or -m cannot be fingerprinted"]
+                return [], [f"{exe_word}: interpreter invoked without script or repo '-m' module cannot be fingerprinted"]
             script_arg, script_flag = args[j]
             if script_arg == "-" or is_dynamic(script_flag):
                 return [], [f"{exe_word}: stdin or dynamic script operand cannot be statically fingerprinted"]
@@ -2933,16 +2966,12 @@ class MergeQueue:
             a0, f0 = args[0]
             if len(args) == 1 and not is_dynamic(f0) and a0 in ("-v", "-V", "--version", "-h", "--help"):
                 return [], []
-            if a0 == "-e":
-                if len(args) < 2 or is_dynamic(args[1][1]):
-                    return [], [f"{exe_word} -e: missing or dynamic inline script cannot be fingerprinted"]
-                return [], []
             if a0 == "--":
                 if len(args) < 2 or args[1][0] == "-" or is_dynamic(args[1][1]):
                     return [], [f"{exe_word}: missing or dynamic script operand cannot be fingerprinted"]
                 return [norm_script(args[1][0])], []
             if a0.startswith("-"):
-                return [], [f"{exe_word}: option {a0!r} cannot be statically fingerprinted"]
+                return [], [f"{exe_word}: inline code or option {a0!r} cannot statically fingerprint external targets"]
             if is_dynamic(f0):
                 return [], [f"{exe_word}: dynamic script operand {a0!r} cannot be fingerprinted"]
             return [norm_script(a0)], []
@@ -3091,7 +3120,40 @@ class MergeQueue:
     @classmethod
     def _extract_gate_executables(cls, gate_cmd: str, _depth: int = 0) -> list[str]:
         exes, sourced, _ = cls._analyze_gate_command(gate_cmd, _depth=_depth)
-        return [*[x for x in exes if not x.startswith(("__func__:", "__opt_builtin__:"))], *sourced]
+        return [
+            *[x for x in exes if not x.startswith(("__func__:", "__opt_builtin__:", "__py_mod__:"))],
+            *sourced,
+        ]
+
+    def _hash_rel_gate_file(self, rel_tok: str, cwd: Path | None, commit: str | None) -> tuple[str | None, str | None]:
+        """Return `(sha256_hex, err)` for a repo-relative file in `cwd` (plan) or `commit` (plan_passed)."""
+        norm_tok = Path(os.path.normpath(rel_tok)).as_posix()
+        if os.path.isabs(rel_tok) or norm_tok in ("", ".") or ".." in Path(norm_tok).parts:
+            return None, f"{rel_tok}: escapes gate checkout"
+        if cwd is not None:
+            cand = (cwd / norm_tok).resolve()
+            cwd_real = cwd.resolve()
+            if cand != cwd_real and cwd_real not in cand.parents:
+                return None, f"{rel_tok}: escapes gate checkout"
+            if not cand.is_file():
+                return None, f"{rel_tok}: relative executable or script not found in gate checkout"
+            try:
+                return hashlib.sha256(cand.read_bytes()).hexdigest(), None
+            except OSError as exc:
+                return None, f"{rel_tok}: {exc}"
+        if commit:
+            try:
+                proc = subprocess.run(
+                    [self.git.bin, *self.git.HARDENED_CONFIG, "-C", self.git.repo_dir,
+                     "cat-file", "blob", f"{commit}:{norm_tok}"],
+                    capture_output=True, env=self.git.env, timeout=30,
+                )
+                if proc.returncode == 0:
+                    return hashlib.sha256(proc.stdout).hexdigest(), None
+            except (OSError, subprocess.SubprocessError) as exc:
+                return None, f"{rel_tok}@{commit}: {exc}"
+            return None, f"{rel_tok}: relative executable or script not found in commit {commit}"
+        return None, f"{rel_tok}: relative executable or script requires gate checkout or commit context"
 
     def _read_sourced_gate_script(self, tok: str, cwd: Path | None, commit: str | None) -> str | None:
         if os.path.isabs(tok):
@@ -3162,46 +3224,41 @@ class MergeQueue:
                 except OSError as exc:
                     problems.append(f"{fn_name}: {exc}")
                 continue
+            if tok.startswith("__py_mod__:"):
+                mod_name = tok.split(":", 1)[1]
+                mod_parts = mod_name.split(".")
+                mod_rel = "/".join(mod_parts)
+                py_digest, _ = self._hash_rel_gate_file(f"{mod_rel}.py", cwd, commit)
+                main_digest, _ = self._hash_rel_gate_file(f"{mod_rel}/__main__.py", cwd, commit)
+                if py_digest is None and main_digest is None:
+                    problems.append(f"-m {mod_name}: module is not a regular file in gate checkout/commit")
+                    items.append({"tok": tok, "resolved": None})
+                    continue
+                pkg_depth = len(mod_parts) if (main_digest is not None and py_digest is None) else len(mod_parts) - 1
+                mod_digests: dict[str, str] = {}
+                if py_digest is not None:
+                    mod_digests[f"{mod_rel}.py"] = py_digest
+                if main_digest is not None:
+                    mod_digests[f"{mod_rel}/__main__.py"] = main_digest
+                pkg_missing = False
+                for pk in range(1, pkg_depth + 1):
+                    init_rel = f"{'/'.join(mod_parts[:pk])}/__init__.py"
+                    init_digest, _ = self._hash_rel_gate_file(init_rel, cwd, commit)
+                    if init_digest is None:
+                        problems.append(f"-m {mod_name}: missing package {init_rel} in gate checkout/commit")
+                        pkg_missing = True
+                        break
+                    mod_digests[init_rel] = init_digest
+                if not pkg_missing:
+                    items.append({"tok": tok, "kind": "py_mod", "files": mod_digests})
+                continue
             resolved: str | None
             if "/" in tok and not os.path.isabs(tok):
                 norm_tok = Path(os.path.normpath(tok)).as_posix()
-                if cwd is not None:
-                    cand = (cwd / tok).resolve()
-                    cwd_real = cwd.resolve()
-                    if cand != cwd_real and cwd_real not in cand.parents:
-                        problems.append(f"{tok}: escapes gate checkout")
-                        items.append({"tok": tok, "kind": "relative", "error": "escapes"})
-                        continue
-                    if cand.is_file():
-                        try:
-                            st = os.stat(cand)
-                            digest = hashlib.sha256(cand.read_bytes()).hexdigest()
-                            items.append({
-                                "tok": tok, "kind": "relative", "dev": st.st_dev,
-                                "ino": st.st_ino, "sha256": digest,
-                            })
-                        except OSError as exc:
-                            problems.append(f"{tok}: {exc}")
-                            items.append({"tok": tok, "kind": "relative", "error": str(exc)})
-                    else:
-                        problems.append(f"{tok}: relative executable or script not found in gate checkout")
-                        items.append({"tok": tok, "kind": "relative", "resolved": None})
-                else:
-                    blob_sha: str | None = None
-                    if commit and norm_tok not in ("", ".") and ".." not in Path(norm_tok).parts:
-                        try:
-                            proc = subprocess.run(
-                                [self.git.bin, *self.git.HARDENED_CONFIG, "-C", self.git.repo_dir,
-                                 "cat-file", "blob", f"{commit}:{norm_tok}"],
-                                capture_output=True, env=self.git.env, timeout=30,
-                            )
-                            if proc.returncode == 0:
-                                blob_sha = hashlib.sha256(proc.stdout).hexdigest()
-                        except (OSError, subprocess.SubprocessError) as exc:
-                            problems.append(f"{tok}@{commit}: {exc}")
-                    if blob_sha is None:
-                        problems.append(f"{tok}: relative executable or script not found in commit {commit}")
-                    items.append({"tok": tok, "kind": "relative", "commit_sha256": blob_sha})
+                rel_digest, rel_err = self._hash_rel_gate_file(tok, cwd, commit)
+                if rel_err:
+                    problems.append(rel_err)
+                items.append({"tok": norm_tok, "kind": "relative", "sha256": rel_digest})
                 continue
             resolved = tok if os.path.isabs(tok) else shutil.which(tok, path=clean_path)
             if not resolved:

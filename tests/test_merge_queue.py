@@ -722,6 +722,12 @@ class GateRunsIsolated(QueueCase):
             "sed --file=~/evil.sed input.txt",
             "F=-exec; find . $F /opt/gate/proof \\;",
             "ruby -v /tmp/evil.rb",
+            "python3 -c 'import os'",
+            "python3 -uc 'open(\"/opt/gates/check.py\").read()'",
+            "python3 -m timeit -n 1 pass",
+            "python3 -I -m gate_mod",
+            "node -e 'process.exit(0)'",
+            "perl -e '1'",
         ):
             _, _, dyn_probs = mq_mod.MergeQueue._analyze_gate_command(unsafe_gate)
             self.assertTrue(dyn_probs, f"expected fail-closed problem on {unsafe_gate!r}")

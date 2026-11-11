@@ -682,6 +682,24 @@ class TestCoordinatorTakeoverAndWorkerBindingFence(Base):
         self.assertEqual(by_id[t_mr], "failed")
         self.assertEqual(by_id[t_mr_child], "blocked")
 
+        # External-provider merge_ready (no ensure_terminal_or_died call) settles task and unblocks child immediately:
+        t_ext = self.store.task_create(spec="ext-mr-parent", run="run-d")["task"]["id"]
+        t_ext_child = self.store.task_create(spec="ext-mr-child", deps=[t_ext], run="run-d")["task"]["id"]
+        self.store.task_update(task_id=t_ext, status="dispatched", run="run-d")
+        with self.store._connect() as conn:
+            conn.execute(
+                "INSERT INTO dispatches(dispatch_id, task_id, run_id, worktree, agent, terminal_handle, state, created_at, updated_at) "
+                "VALUES ('disp-ext-mr', ?, 'run-d', '/w', 'claude', 'w-ext-mr', 'running', 1, 1)",
+                (t_ext,),
+            )
+        self.store.send_message(
+            subject="ready", msg_type="merge_ready", payload="sha123",
+            sender="w-ext-mr", run="run-d",
+        )
+        ext_by_id = {t["id"]: t["status"] for t in self.store.task_list(run="run-d")["tasks"]}
+        self.assertEqual(ext_by_id[t_ext], "completed")
+        self.assertEqual(ext_by_id[t_ext_child], "ready")
+
         # Superseded dispatch cannot clobber a newer active or crashed retry dispatch's task
         tr = self.store.task_create(spec="retried", run="run-d")["task"]["id"]
         tr_child = self.store.task_create(spec="retried-child", deps=[tr], run="run-d")["task"]["id"]
