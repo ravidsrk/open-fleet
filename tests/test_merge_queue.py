@@ -726,8 +726,19 @@ class GateRunsIsolated(QueueCase):
             "python3 -uc 'open(\"/opt/gates/check.py\").read()'",
             "python3 -m timeit -n 1 pass",
             "python3 -I -m gate_mod",
+            "python3 -P -m gate_mod",
+            "python3 -X safe_path -m gate_mod",
+            "python3 -Xsafe_path=1 -m gate_mod",
+            "python3 -X pycache_prefix=/opt/gates -m gate_mod",
+            "python3 -W ignore::ext_pkg.Warn script.py",
             "node -e 'process.exit(0)'",
+            "deno eval 'Deno.exit(0)'",
+            "bun exec 'exit 0'",
             "perl -e '1'",
+            "awk 'BEGIN {exit system(\"/opt/gates/check\")}'",
+            "gawk -e 'BEGIN {exit system(\"/opt/gates/check\")}'",
+            "sed 'e /opt/gates/check' /dev/null",
+            "sed -e 's/.*/x/e' /dev/null",
         ):
             _, _, dyn_probs = mq_mod.MergeQueue._analyze_gate_command(unsafe_gate)
             self.assertTrue(dyn_probs, f"expected fail-closed problem on {unsafe_gate!r}")

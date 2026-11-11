@@ -2903,9 +2903,26 @@ class MergeQueue:
                 if a in ("-W", "-X", "--check-hash-based-pycs"):
                     if j + 1 >= len(args) or is_dynamic(args[j + 1][1]):
                         return [], [f"{exe_word} {a}: missing or dynamic option value cannot be fingerprinted"]
+                    opt_val = args[j + 1][0]
+                    if a == "-W" and len(opt_val.split(":")) >= 3 and "." in opt_val.split(":")[2]:
+                        return [], [f"{exe_word} -W {opt_val!r}: dotted warning category imports external module"]
+                    if a == "-X":
+                        x_name = opt_val.split("=", 1)[0]
+                        if x_name == "pycache_prefix":
+                            return [], [f"{exe_word} -X pycache_prefix: external bytecode cache cannot be fingerprinted"]
+                        if x_name == "safe_path":
+                            saw_isolated = True
                     j += 2
                     continue
                 if a.startswith(("-W", "-X", "--check-hash-based-pycs=")):
+                    if a.startswith("-W") and len(a[2:].split(":")) >= 3 and "." in a[2:].split(":")[2]:
+                        return [], [f"{exe_word} {a}: dotted warning category imports external module"]
+                    if a.startswith("-X"):
+                        x_name = a[2:].split("=", 1)[0]
+                        if x_name == "pycache_prefix":
+                            return [], [f"{exe_word} {a}: external bytecode cache cannot be fingerprinted"]
+                        if x_name == "safe_path":
+                            saw_isolated = True
                     j += 1
                     continue
                 if a.startswith("--"):
@@ -2913,16 +2930,16 @@ class MergeQueue:
                 short = a[1:]
                 if "i" in short:
                     return [], [f"{exe_word} {a}: interactive mode cannot be statically fingerprinted"]
-                if "I" in short:
+                if "I" in short or "P" in short:
                     saw_isolated = True
                 if short.endswith("c") and all(c in "bBdEIOqsSuvxP" for c in short[:-1]):
                     return [], [
                         f"{exe_word} {a}: inline '-c' code execution cannot statically fingerprint external targets"
                     ]
                 if short.endswith("m") and all(c in "bBdEIOqsSuvxP" for c in short[:-1]):
-                    if saw_isolated or "P" in short:
+                    if saw_isolated:
                         return [], [
-                            f"{exe_word} {a}: '-I'/'-P' omits checkout directory for '-m' module resolution"
+                            f"{exe_word} {a}: '-I'/'-P'/'-X safe_path' omits checkout directory for '-m' module resolution"
                         ]
                     if j + 1 >= len(args) or is_dynamic(args[j + 1][1]):
                         return [], [f"{exe_word} {a}: missing or dynamic '-m' target cannot be statically fingerprinted"]
@@ -2960,7 +2977,7 @@ class MergeQueue:
                 return [], [f"{exe_word}: stdin or dynamic script operand cannot be statically fingerprinted"]
             return [norm_script(script_arg)], []
 
-        if base in ("perl", "ruby", "node", "nodejs", "deno", "bun", "php", "lua", "Rscript"):
+        if base in ("perl", "ruby", "node", "nodejs", "php", "lua", "Rscript"):
             if not args:
                 return [], [f"{exe_word}: interpreter invoked without script operand cannot be fingerprinted"]
             a0, f0 = args[0]
@@ -2972,13 +2989,33 @@ class MergeQueue:
                 return [norm_script(args[1][0])], []
             if a0.startswith("-"):
                 return [], [f"{exe_word}: inline code or option {a0!r} cannot statically fingerprint external targets"]
+            if base in ("node", "nodejs") and a0 in ("inspect", "debug"):
+                return [], [f"{exe_word} {a0}: subcommand cannot statically fingerprint external targets"]
             if is_dynamic(f0):
                 return [], [f"{exe_word}: dynamic script operand {a0!r} cannot be fingerprinted"]
             return [norm_script(a0)], []
 
+        if base in ("deno", "bun"):
+            if not args:
+                return [], [f"{exe_word}: interpreter invoked without script operand cannot be fingerprinted"]
+            a0, f0 = args[0]
+            if len(args) == 1 and not is_dynamic(f0) and a0 in ("-v", "-V", "--version", "-h", "--help"):
+                return [], []
+            if a0 == "run" and len(args) >= 2 and not args[1][0].startswith("-") and not is_dynamic(args[1][1]):
+                s_target = args[1][0]
+                if base == "deno" or s_target.endswith((".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx")):
+                    return [norm_script(s_target)], []
+            if (
+                base == "bun"
+                and not a0.startswith("-")
+                and not is_dynamic(f0)
+                and a0.endswith((".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"))
+            ):
+                return [norm_script(a0)], []
+            return [], [f"{exe_word}: subcommand, task, or option {a0!r} cannot statically fingerprint external targets"]
+
         if base == "sed":
             files: list[str] = []
-            saw_script = False
             j = 0
             while j < len(args):
                 a, a_flag = args[j]
@@ -2997,23 +3034,30 @@ class MergeQueue:
                 if a in ("-e", "--expression"):
                     if j + 1 >= len(args) or is_dynamic(args[j + 1][1]):
                         return [], [f"{exe_word} {a}: missing or dynamic expression cannot be fingerprinted"]
-                    saw_script = True
+                    if args[j + 1][0] != "":
+                        return [], [
+                            f"{exe_word} {a}: non-empty inline sed expression cannot statically fingerprint external command/file targets; use -f <script>"
+                        ]
                     j += 2
                     continue
                 if a.startswith("--expression="):
-                    saw_script = True
+                    if a.split("=", 1)[1] != "":
+                        return [], [
+                            f"{exe_word} {a}: non-empty inline sed expression cannot statically fingerprint external command/file targets; use -f <script>"
+                        ]
                     j += 1
                     continue
                 if a in ("-f", "--file"):
-                    if j + 1 >= len(args) or is_dynamic(args[j + 1][1]):
+                    if j + 1 >= len(args) or is_dynamic(args[j + 1][1]) or not args[j + 1][0]:
                         return [], [f"{exe_word} {a}: missing or dynamic script file cannot be fingerprinted"]
                     files.append(norm_script(args[j + 1][0]))
-                    saw_script = True
                     j += 2
                     continue
                 if a.startswith("--file="):
-                    files.append(norm_script(a.split("=", 1)[1]))
-                    saw_script = True
+                    f_val = a.split("=", 1)[1]
+                    if not f_val:
+                        return [], [f"{exe_word} {a}: missing script file cannot be fingerprinted"]
+                    files.append(norm_script(f_val))
                     j += 1
                     continue
                 if a.startswith("--"):
@@ -3030,33 +3074,35 @@ class MergeQueue:
                 if rem == "e":
                     if j + 1 >= len(args) or is_dynamic(args[j + 1][1]):
                         return [], [f"{exe_word} {a}: missing or dynamic expression cannot be fingerprinted"]
-                    saw_script = True
+                    if args[j + 1][0] != "":
+                        return [], [
+                            f"{exe_word} {a}: non-empty inline sed expression cannot statically fingerprint external command/file targets; use -f <script>"
+                        ]
                     j += 2
                     continue
                 if rem.startswith("e"):
-                    saw_script = True
-                    j += 1
-                    continue
+                    return [], [
+                        f"{exe_word} {a}: non-empty inline sed expression cannot statically fingerprint external command/file targets; use -f <script>"
+                    ]
                 if rem == "f":
-                    if j + 1 >= len(args) or is_dynamic(args[j + 1][1]):
+                    if j + 1 >= len(args) or is_dynamic(args[j + 1][1]) or not args[j + 1][0]:
                         return [], [f"{exe_word} {a}: missing or dynamic script file cannot be fingerprinted"]
                     files.append(norm_script(args[j + 1][0]))
-                    saw_script = True
                     j += 2
                     continue
                 if rem.startswith("f"):
                     files.append(norm_script(rem[1:]))
-                    saw_script = True
                     j += 1
                     continue
                 return [], [f"{exe_word} {a}: unsupported option cannot be statically fingerprinted"]
-            if not saw_script and j < len(args) and is_dynamic(args[j][1]):
-                return [], [f"{exe_word}: dynamic inline script cannot be statically fingerprinted"]
+            if not files:
+                return [], [
+                    f"{exe_word}: inline sed script without -f cannot statically fingerprint external command/file targets"
+                ]
             return files, []
 
         if base in ("awk", "gawk", "mawk", "nawk"):
             awk_files: list[str] = []
-            saw_prog = False
             j = 0
             while j < len(args):
                 a, a_flag = args[j]
@@ -3080,39 +3126,35 @@ class MergeQueue:
                 if a.startswith(("-F", "-v", "--field-separator=", "--assign=")):
                     j += 1
                     continue
-                if a in ("-e", "--source"):
-                    if j + 1 >= len(args) or is_dynamic(args[j + 1][1]):
-                        return [], [f"{exe_word} {a}: missing or dynamic program cannot be fingerprinted"]
-                    saw_prog = True
-                    j += 2
-                    continue
-                if a.startswith(("-e", "--source=")):
-                    saw_prog = True
-                    j += 1
-                    continue
+                if a in ("-e", "--source") or a.startswith(("-e", "--source=")):
+                    return [], [
+                        f"{exe_word} {a}: inline awk program cannot statically fingerprint external command/file targets; use -f <script>"
+                    ]
                 if a in ("-f", "--file"):
-                    if j + 1 >= len(args) or is_dynamic(args[j + 1][1]):
+                    if j + 1 >= len(args) or is_dynamic(args[j + 1][1]) or not args[j + 1][0]:
                         return [], [f"{exe_word} {a}: missing or dynamic script file cannot be fingerprinted"]
                     awk_files.append(norm_script(args[j + 1][0]))
-                    saw_prog = True
                     j += 2
                     continue
                 if a.startswith("-f") and len(a) > 2:
                     awk_files.append(norm_script(a[2:]))
-                    saw_prog = True
                     j += 1
                     continue
                 if a.startswith("--file="):
-                    awk_files.append(norm_script(a.split("=", 1)[1]))
-                    saw_prog = True
+                    f_val = a.split("=", 1)[1]
+                    if not f_val:
+                        return [], [f"{exe_word} {a}: missing script file cannot be fingerprinted"]
+                    awk_files.append(norm_script(f_val))
                     j += 1
                     continue
                 if not a.startswith("--") and all(c in "bcCdDgNnoOPrSt" for c in a[1:]):
                     j += 1
                     continue
                 return [], [f"{exe_word} {a}: unsupported option cannot be statically fingerprinted"]
-            if not saw_prog and j < len(args) and is_dynamic(args[j][1]):
-                return [], [f"{exe_word}: dynamic inline program cannot be statically fingerprinted"]
+            if not awk_files:
+                return [], [
+                    f"{exe_word}: inline awk program without -f cannot statically fingerprint external command/file targets"
+                ]
             return awk_files, []
 
         return [], []
@@ -3230,11 +3272,16 @@ class MergeQueue:
                 mod_rel = "/".join(mod_parts)
                 py_digest, _ = self._hash_rel_gate_file(f"{mod_rel}.py", cwd, commit)
                 main_digest, _ = self._hash_rel_gate_file(f"{mod_rel}/__main__.py", cwd, commit)
+                self_init_digest, _ = self._hash_rel_gate_file(f"{mod_rel}/__init__.py", cwd, commit)
                 if py_digest is None and main_digest is None:
                     problems.append(f"-m {mod_name}: module is not a regular file in gate checkout/commit")
                     items.append({"tok": tok, "resolved": None})
                     continue
-                pkg_depth = len(mod_parts) if (main_digest is not None and py_digest is None) else len(mod_parts) - 1
+                if main_digest is None and self_init_digest is not None:
+                    problems.append(f"-m {mod_name}: package {mod_rel}/__init__.py shadows {mod_rel}.py without __main__.py")
+                    items.append({"tok": tok, "resolved": None})
+                    continue
+                pkg_depth = len(mod_parts) if main_digest is not None else len(mod_parts) - 1
                 mod_digests: dict[str, str] = {}
                 if py_digest is not None:
                     mod_digests[f"{mod_rel}.py"] = py_digest
