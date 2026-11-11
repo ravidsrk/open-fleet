@@ -711,6 +711,41 @@ class TestCoordinatorTakeoverAndWorkerBindingFence(Base):
                 "VALUES ('disp-inj-2', ?, 'run-d', '/w', 'custom', 'term-shared', 'ready', 20, 20)",
                 (t_inj_2,),
             )
+        # Delayed terminal mail arriving while `disp-inj-2` is active that explicitly names `t_inj_1`
+        # (or an unmatched task) must NOT rebind to `disp-inj-2`, complete `t_inj_2`, or release `t_inj_2_child`:
+        w_shared.send_message(
+            subject="late-first-done-env",
+            msg_type="worker_done",
+            outcome="succeeded",
+            run="run-d",
+            attrs={"taskId": t_inj_1},
+        )
+        w_shared.send_message(
+            subject="unmatched-task-env",
+            msg_type="worker_done",
+            outcome="succeeded",
+            run="run-d",
+            attrs={"taskId": "task-unmatched"},
+        )
+        self.store.send_message(
+            subject="late-first-done-handle",
+            msg_type="worker_done",
+            outcome="succeeded",
+            sender="term-shared",
+            run="run-d",
+            attrs={"taskId": t_inj_1},
+        )
+        self.store.send_message(
+            subject="unmatched-task-handle",
+            msg_type="worker_done",
+            outcome="succeeded",
+            sender="term-shared",
+            run="run-d",
+            attrs={"taskId": "task-unmatched"},
+        )
+        by_id_mid = {t["id"]: t["status"] for t in self.store.task_list(run="run-d")["tasks"]}
+        self.assertEqual(by_id_mid[t_inj_2], "dispatched")
+        self.assertEqual(by_id_mid[t_inj_2_child], "pending")
         inj_crash = self.store.ensure_terminal_or_died(
             dispatch_id="disp-inj-2", worker_handle="term-shared", exit_code=137, run_id="run-d"
         )

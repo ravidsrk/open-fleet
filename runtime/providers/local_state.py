@@ -1077,6 +1077,16 @@ class LocalStateStore:
         )
         return self._recompute_dependents(conn, task_id)
 
+    @staticmethod
+    def _extract_task_hint(attrs: dict[str, Any]) -> tuple[bool, str | None]:
+        for k in ("taskId", "task_id", "task-id"):
+            if k in attrs and attrs[k] is not None:
+                val = attrs[k]
+                if isinstance(val, str) and val:
+                    return True, val
+                return True, None
+        return False, None
+
     def _is_dispatch_settled(self, conn: sqlite3.Connection, run_id: str, row: Any) -> bool:
         if row["state"] in (*FENCED_DISPATCH_STATES, "died", "completed"):
             return True
@@ -1093,8 +1103,11 @@ class LocalStateStore:
         run_id: str,
         sender_id: str,
         *,
+        has_task_hint: bool = False,
         hint_task_id: str | None = None,
     ) -> Any:
+        if has_task_hint and hint_task_id is None:
+            return None
         env_disp = env_get("OPEN_FLEET_DISPATCH_ID", "ORCA_DISPATCH_ID", self.env, "")
         if env_disp:
             disp_row = conn.execute(
@@ -1102,25 +1115,36 @@ class LocalStateStore:
                 "WHERE run_id = ? AND dispatch_id = ? LIMIT 1",
                 (run_id, env_disp),
             ).fetchone()
-            if disp_row and disp_row["terminal_handle"] and self._is_dispatch_settled(conn, run_id, disp_row):
+            if disp_row is None:
+                return None
+            if disp_row["terminal_handle"] and self._is_dispatch_settled(conn, run_id, disp_row):
                 siblings = conn.execute(
                     "SELECT rowid AS rid, dispatch_id, state, task_id, terminal_handle FROM dispatches "
-                    "WHERE run_id = ? AND terminal_handle = ? AND rowid > ? AND state IN ('ready', 'running') "
+                    "WHERE run_id = ? AND terminal_handle = ? AND rowid > ? "
                     "ORDER BY rowid ASC",
                     (run_id, disp_row["terminal_handle"], disp_row["rid"]),
                 ).fetchall()
                 unsettled = [
                     s
                     for s in siblings
-                    if (disp_row["task_id"] is None or s["task_id"] != disp_row["task_id"])
+                    if s["state"] in ("ready", "running")
+                    and (disp_row["task_id"] is None or s["task_id"] != disp_row["task_id"])
                     and not self._is_dispatch_settled(conn, run_id, s)
                 ]
-                if hint_task_id:
+                if hint_task_id is not None:
                     for s in unsettled:
                         if s["task_id"] == hint_task_id:
                             return s
+                    if disp_row["task_id"] == hint_task_id:
+                        return disp_row
+                    for s in reversed(siblings):
+                        if s["task_id"] == hint_task_id:
+                            return s
+                    return None
                 if unsettled:
                     return unsettled[0]
+            if hint_task_id is not None and disp_row["task_id"] != hint_task_id:
+                return None
             return disp_row
         if sender_id not in ("worker", COORDINATOR_ALIAS):
             exact = conn.execute(
@@ -1129,6 +1153,8 @@ class LocalStateStore:
                 (run_id, sender_id),
             ).fetchone()
             if exact is not None:
+                if hint_task_id is not None and exact["task_id"] != hint_task_id:
+                    return None
                 return exact
             by_handle = conn.execute(
                 "SELECT rowid AS rid, dispatch_id, state, task_id, terminal_handle FROM dispatches "
@@ -1139,10 +1165,14 @@ class LocalStateStore:
             unsettled_h = [
                 r for r in by_handle if r["state"] in ("ready", "running") and not self._is_dispatch_settled(conn, run_id, r)
             ]
-            if hint_task_id:
+            if hint_task_id is not None:
                 for r in unsettled_h:
                     if r["task_id"] == hint_task_id:
                         return r
+                for r in reversed(by_handle):
+                    if r["task_id"] == hint_task_id:
+                        return r
+                return None
             if unsettled_h:
                 return unsettled_h[0]
             return by_handle[-1] if by_handle else None
@@ -1192,16 +1222,15 @@ class LocalStateStore:
             with self._connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 is_term_mail = msg_type in TERMINAL_MESSAGE_TYPES and "fileTouchConflict" not in clean_attrs
-                hint_task = next(
-                    (
-                        clean_attrs[k]
-                        for k in ("taskId", "task_id", "task-id")
-                        if isinstance(clean_attrs.get(k), str) and clean_attrs[k]
-                    ),
-                    None,
-                )
+                has_hint_task, hint_task = self._extract_task_hint(clean_attrs)
                 disp_row = (
-                    self._resolve_sender_dispatch(conn, run_id, sender_id, hint_task_id=hint_task)
+                    self._resolve_sender_dispatch(
+                        conn,
+                        run_id,
+                        sender_id,
+                        has_task_hint=has_hint_task,
+                        hint_task_id=hint_task,
+                    )
                     if is_term_mail
                     else None
                 )
@@ -1980,23 +2009,16 @@ class LocalStateStore:
                 ),
                 None,
             )
+            has_msg_task, msg_task = LocalStateStore._extract_task_hint(attrs)
+            if has_msg_task and disp is not None and msg_task != disp["task_id"]:
+                continue
+            if disp and m["created_at"] < disp["created_at"]:
+                continue
             if msg_disp is not None:
                 if msg_disp != dispatch_id:
                     continue
                 return m
             if m["sender"] in other_disp_ids:
-                continue
-            msg_task = next(
-                (
-                    attrs[k]
-                    for k in ("taskId", "task_id", "task-id")
-                    if isinstance(attrs.get(k), str) and attrs[k]
-                ),
-                None,
-            )
-            if msg_task is not None and disp and disp["task_id"] and msg_task != disp["task_id"]:
-                continue
-            if disp and m["created_at"] < disp["created_at"]:
                 continue
             if m["sender"] != dispatch_id and sibling_count > 0:
                 continue
