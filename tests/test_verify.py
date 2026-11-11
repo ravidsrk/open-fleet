@@ -2739,11 +2739,21 @@ class EndToEndMutationGreen(MutationFixture):
         recs, err = verify._Authority.nc_exec_identity([str(wt_bin)], str(self.repo))
         self.assertIsNone(recs)
         self.assertIn('resolves inside the repository worktree', err)
-        # Shell -c and group/world-writable binaries also fail closed:
+        # Shell -c, env lookup/split bypasses, and group/world-writable binaries also fail closed:
         recs_sh, err_sh = verify._Authority.nc_exec_identity(
             ['env', 'FOO=1', 'sh', '-c', 'exit 1'], str(self.repo))
         self.assertIsNone(recs_sh)
         self.assertIn('shell -c', err_sh)
+        for bad_env_argv in (
+            ['env', 'PATH=./bin:/usr/bin:/bin', 'python3', 'test.py'],
+            ['env', '-S', 'sh -c true'],
+            ['env', '-i', 'python3', 'test.py'],
+            ['env', '-C', '/tmp', 'python3', 'test.py'],
+            ['env', '-u', 'PATH', 'python3', 'test.py'],
+        ):
+            recs_bad, err_bad = verify._Authority.nc_exec_identity(bad_env_argv, str(self.repo))
+            self.assertIsNone(recs_bad, bad_env_argv)
+            self.assertIn('fail-closed', err_bad)
         with tempfile.TemporaryDirectory() as ext_dir:
             os.chmod(ext_dir, 0o755)
             writable_bin = Path(ext_dir) / 'runner'

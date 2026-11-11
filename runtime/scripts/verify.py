@@ -1064,26 +1064,83 @@ class _Authority:
         return not bool(_extract_diff(raw.decode("utf-8", "replace")))
 
     _SHELL_NAMES = frozenset({"sh", "bash", "dash", "zsh", "ksh", "ash", "csh", "tcsh"})
+    _NC_FORBID_ENV_VARS = frozenset({
+        "PATH", "IFS", "CDPATH", "ENV", "BASH_ENV",
+        "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH",
+        "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP",
+        "NODE_OPTIONS", "RUBYOPT", "PERL5OPT", "PERL5LIB",
+        "HOME", "TMPDIR", "TMP", "TEMP",
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+    })
+    _NC_FORBID_MUX_EXES = frozenset({
+        "busybox", "xargs", "find", "stdbuf", "setsid", "flock", "chrt", "ionice",
+        "taskset", "script", "su", "sudo", "chroot", "nsenter", "unshare", "bwrap",
+    })
 
     @classmethod
-    def _unwrap_nc_tokens(cls, argv):
-        """Extract all wrapper and target executable tokens from `argv`, refusing shell `-c`."""
-        tokens = []
+    def _env_var_forbidden(cls, var_name):
+        up = var_name.upper()
+        if up in cls._NC_FORBID_ENV_VARS:
+            return True
+        return up.startswith(("GIT_", "ORCA_", "OPEN_FLEET_", "GH_", "GITHUB_"))
+
+    @classmethod
+    def _unwrap_nc_indexed(cls, argv):
+        """Extract `[(argv_idx, tok), ...]` across wrappers, failing closed on lookup/env/shell bypasses."""
+        indexed = []
         idx = 0
         while idx < len(argv):
             tok = argv[idx]
-            tokens.append(tok)
             name = Path(tok).name
+            if name in cls._NC_FORBID_MUX_EXES:
+                return None, (f"proof executable {tok!r} multiplexes inner commands whose targets "
+                              "cannot be statically pinned; fail-closed (#750 C19)")
+            indexed.append((idx, tok))
             rest = argv[idx + 1:]
-            if name == "busybox" and rest and Path(rest[0]).name in cls._SHELL_NAMES:
-                name, rest = Path(rest[0]).name, rest[1:]
             if name in cls._SHELL_NAMES:
-                for arg in rest:
-                    if arg == "--":
+                si = 0
+                while si < len(rest):
+                    arg = rest[si]
+                    if arg in ("--", "-"):
+                        si += 1
+                        break
+                    if not arg.startswith(("-", "+")) or arg == "+":
                         break
                     if arg == "-c" or (arg.startswith("-") and not arg.startswith("--") and "c" in arg[1:]):
                         return None, (f"proof executable {tok!r} invokes a shell -c command string, "
                                       "whose inner commands are unverified (#750 C19)")
+                    if arg.startswith("--"):
+                        if arg in ("--posix", "--norc", "--noprofile"):
+                            si += 1
+                            continue
+                        return None, (f"proof executable {tok!r} uses unsupported shell option {arg!r}; "
+                                      "fail-closed (#750 C19)")
+                    if arg in ("-o", "+o", "-O", "+O"):
+                        if si + 1 >= len(rest):
+                            return None, f"proof executable {tok!r} {arg} missing option argument (#750 C19)"
+                        si += 2
+                        continue
+                    short = arg[1:]
+                    if arg.startswith("-") and any(ch in short for ch in ("l", "i", "s", "r")):
+                        return None, (f"proof executable {tok!r} invokes interactive/login/stdin shell mode; "
+                                      "fail-closed (#750 C19)")
+                    if any(ch not in "abefhmnuvxBCHPoO" for ch in short):
+                        return None, (f"proof executable {tok!r} uses unsupported shell option {arg!r}; "
+                                      "fail-closed (#750 C19)")
+                    if "o" in short or "O" in short:
+                        if not (short.endswith(("o", "O")) and (short.count("o") + short.count("O") == 1)) or si + 1 >= len(rest):
+                            return None, f"proof executable {tok!r} uses ambiguous -o option cluster (#750 C19)"
+                        si += 2
+                        continue
+                    si += 1
+                if si >= len(rest):
+                    return None, (f"proof executable {tok!r} invokes shell without a script operand; "
+                                  "fail-closed (#750 C19)")
+                script_op = rest[si]
+                if os.path.isabs(script_op) or ".." in Path(script_op).parts:
+                    return None, (f"proof executable {tok!r} targets external script {script_op!r} outside "
+                                  "the staged commit; fail-closed (#750 C19)")
                 break
             idx += 1
             if name == "env":
@@ -1092,49 +1149,136 @@ class _Authority:
                     if a == "--":
                         idx += 1
                         break
-                    if a in ("-u", "--unset", "-C", "--chdir", "-S"):
-                        idx += 2
+                    if a in ("-", "-i", "--ignore-environment"):
+                        return None, "env -i/--ignore-environment alters PATH lookup context; fail-closed (#750 C19)"
+                    if not a.startswith("-"):
+                        break
+                    if a in ("-S", "--split-string") or a.startswith("--split-string="):
+                        return None, "env -S/--split-string performs runtime word splitting; fail-closed (#750 C19)"
+                    if a in ("-C", "--chdir") or a.startswith("--chdir="):
+                        return None, "env -C/--chdir alters working-directory lookup context; fail-closed (#750 C19)"
+                    if a in ("-P", "--default-path") or a.startswith("--default-path="):
+                        return None, "env -P/--default-path alters PATH lookup context; fail-closed (#750 C19)"
+                    if a in ("-u", "--unset") or a.startswith("--unset="):
+                        if a.startswith("--unset="):
+                            uvar = a.split("=", 1)[1]
+                            idx += 1
+                        elif idx + 1 < len(argv):
+                            uvar = argv[idx + 1]
+                            idx += 2
+                        else:
+                            return None, "env -u/--unset missing variable name; fail-closed (#750 C19)"
+                        if not uvar or cls._env_var_forbidden(uvar):
+                            return None, f"env unset {uvar!r} alters executable lookup context; fail-closed (#750 C19)"
                         continue
-                    if a.startswith("-") or "=" in a:
-                        idx += 1
-                        continue
-                    break
+                    if a.startswith("--"):
+                        if a in ("--null", "--debug", "--list-signal-handling") or a.startswith(
+                            ("--block-signal", "--default-signal", "--ignore-signal")
+                        ):
+                            idx += 1
+                            continue
+                        return None, f"env option {a!r} is unsupported; fail-closed (#750 C19)"
+                    short = a[1:]
+                    si = 0
+                    consumed_next = False
+                    while si < len(short):
+                        ch = short[si]
+                        rem = short[si + 1:]
+                        if ch in ("0", "v"):
+                            si += 1
+                            continue
+                        if ch == "i":
+                            return None, "env -i alters PATH lookup context; fail-closed (#750 C19)"
+                        if ch in ("S", "C", "P"):
+                            return None, f"env -{ch} alters execution/lookup context; fail-closed (#750 C19)"
+                        if ch == "u":
+                            if rem:
+                                uvar = rem
+                            elif idx + 1 < len(argv):
+                                uvar = argv[idx + 1]
+                                consumed_next = True
+                            else:
+                                return None, "env -u missing variable name; fail-closed (#750 C19)"
+                            if not uvar or cls._env_var_forbidden(uvar):
+                                return None, f"env -u {uvar!r} alters executable lookup context; fail-closed (#750 C19)"
+                            break
+                        return None, f"env option -{ch} is unsupported; fail-closed (#750 C19)"
+                    idx += 2 if consumed_next else 1
                 while idx < len(argv) and "=" in argv[idx]:
+                    lhs = argv[idx].split("=", 1)[0]
+                    if not lhs or cls._env_var_forbidden(lhs):
+                        return None, f"env assignment {lhs!r} alters executable lookup context; fail-closed (#750 C19)"
                     idx += 1
+                if idx >= len(argv):
+                    return None, "env wrapper has no target proof command; fail-closed (#750 C19)"
             elif name == "command":
-                if any(a in ("-v", "-V") for a in argv[idx:] if a.startswith("-") and a != "--"):
-                    break
-                while idx < len(argv) and argv[idx].startswith("-"):
+                while idx < len(argv) and argv[idx].startswith("-") and len(argv[idx]) > 1:
                     if argv[idx] == "--":
                         idx += 1
                         break
-                    idx += 1
+                    return None, f"command option {argv[idx]!r} alters lookup/execution; fail-closed (#750 C19)"
+                if idx >= len(argv):
+                    return None, "command wrapper has no target proof command; fail-closed (#750 C19)"
             elif name == "nohup":
-                if idx < len(argv) and argv[idx] == "--":
-                    idx += 1
+                while idx < len(argv) and argv[idx].startswith("-") and len(argv[idx]) > 1:
+                    if argv[idx] == "--":
+                        idx += 1
+                        break
+                    return None, f"nohup option {argv[idx]!r} is unsupported; fail-closed (#750 C19)"
+                if idx >= len(argv):
+                    return None, "nohup wrapper has no target proof command; fail-closed (#750 C19)"
             elif name == "nice":
-                while idx < len(argv) and argv[idx].startswith("-"):
-                    if argv[idx] == "--":
+                while idx < len(argv) and argv[idx].startswith("-") and len(argv[idx]) > 1:
+                    opt = argv[idx]
+                    if opt == "--":
                         idx += 1
                         break
-                    if argv[idx] in ("-n", "--adjustment"):
+                    if opt in ("-n", "--adjustment"):
+                        if idx + 1 >= len(argv):
+                            return None, f"nice {opt} missing adjustment value; fail-closed (#750 C19)"
                         idx += 2
-                    else:
+                    elif opt.startswith(("-n", "--adjustment=")) or re.match(r"^--?\d+$", opt):
                         idx += 1
+                    else:
+                        return None, f"nice option {opt!r} is unsupported; fail-closed (#750 C19)"
+                if idx >= len(argv):
+                    return None, "nice wrapper has no target proof command; fail-closed (#750 C19)"
             elif name == "timeout":
-                while idx < len(argv) and argv[idx].startswith("-"):
-                    if argv[idx] == "--":
+                while idx < len(argv) and argv[idx].startswith("-") and len(argv[idx]) > 1:
+                    opt = argv[idx]
+                    if opt == "--":
                         idx += 1
                         break
-                    if argv[idx] in ("-k", "--kill-after", "-s", "--signal"):
+                    if opt in ("-k", "--kill-after", "-s", "--signal"):
+                        if idx + 1 >= len(argv):
+                            return None, f"timeout {opt} missing argument; fail-closed (#750 C19)"
+                        idx += 2
+                    elif opt in ("-v", "--verbose", "--foreground", "--preserve-status") or opt.startswith(
+                        ("-k", "--kill-after=", "-s", "--signal=")
+                    ):
+                        idx += 1
+                    elif not opt.startswith("--") and opt[1:].endswith(("k", "s")) and all(
+                        c == "v" for c in opt[1:-1]
+                    ):
+                        if idx + 1 >= len(argv):
+                            return None, f"timeout {opt} missing argument; fail-closed (#750 C19)"
                         idx += 2
                     else:
-                        idx += 1
-                if idx < len(argv):
-                    idx += 1  # duration operand
+                        return None, f"timeout option {opt!r} is unsupported; fail-closed (#750 C19)"
+                if idx + 1 >= len(argv):
+                    return None, "timeout wrapper missing duration or target proof command; fail-closed (#750 C19)"
+                idx += 1  # duration operand
             else:
                 break
-        return tokens, None
+        return indexed, None
+
+    @classmethod
+    def _unwrap_nc_tokens(cls, argv):
+        """Extract all wrapper and target executable tokens from `argv`, refusing shell `-c`."""
+        indexed, err = cls._unwrap_nc_indexed(argv)
+        if err or indexed is None:
+            return None, err
+        return [tok for _, tok in indexed], None
 
     @classmethod
     def nc_exec_identity(cls, argv, top=None, path_env=None, expected=None, when=None):
@@ -1144,8 +1288,8 @@ class _Authority:
         or a group/world-writable non-sticky directory. Returns (records, err)."""
         if not argv:
             return None, "negative_control.command is empty after parsing"
-        tokens, wrap_err = cls._unwrap_nc_tokens(argv)
-        if wrap_err:
+        indexed, wrap_err = cls._unwrap_nc_indexed(argv)
+        if wrap_err or indexed is None:
             return None, wrap_err
         search_path = cls.nc_env().get("PATH", "") if path_env is None else path_env
         roots = []
@@ -1158,7 +1302,7 @@ class _Authority:
                 if r != Path(r.anchor):
                     roots.append(r)
         records = []
-        for tok in tokens:
+        for argv_idx, tok in indexed:
             resolved = tok if os.path.isabs(tok) else shutil.which(tok, path=search_path)
             if not resolved:
                 return None, f"proof executable {tok!r} cannot be resolved on the scrubbed PATH"
@@ -1188,7 +1332,7 @@ class _Authority:
                                   f"worktree ({real}); fail-closed")
             hop_sig = tuple((str(n), stat.S_IFMT(nst.st_mode), nst.st_dev, nst.st_ino)
                             for n, nst in nodes)
-            records.append((tok, abs_path, str(real), st.st_dev, st.st_ino,
+            records.append((argv_idx, tok, abs_path, str(real), st.st_dev, st.st_ino,
                             st.st_size, st.st_mtime_ns, digest, hop_sig))
         out = tuple(records)
         if expected is not None and out != expected:
@@ -2846,8 +2990,10 @@ def execute_negative_control(m, nc_command=None):
                     argv, top, env.get("PATH", ""), pinned_exec, f"before {phase}")
                 if exec_err:
                     return None, None, exec_err
-                if pinned_exec and not os.path.isabs(exec_argv[0]):
-                    exec_argv[0] = pinned_exec[0][1]
+                for rec in pinned_exec:
+                    slot_idx, pinned_abs = rec[0], rec[2]
+                    if 0 <= slot_idx < len(exec_argv) and not os.path.isabs(exec_argv[slot_idx]):
+                        exec_argv[slot_idx] = pinned_abs
             rc, out, errout = _run_at(repo, exec_argv, timeout=NC_TIMEOUT_S, env=env)
             if pinned_exec is not None:
                 _, post_err = _Authority.nc_exec_identity(

@@ -1933,22 +1933,10 @@ class MergeQueue:
                             problems.append(f"env: dynamic option {a!r} cannot be fingerprinted")
                             wi += 1
                             continue
-                        if a in ("-S", "--split-string"):
-                            if wi + 1 >= len(cmd_words) or is_dynamic(cmd_words[wi + 1][1]):
-                                problems.append("env -S: missing or dynamic argument cannot be fingerprinted")
-                            else:
-                                e2, s2, p2 = cls._analyze_gate_command(cmd_words[wi + 1][0], _depth + 1)
-                                executables.extend(e2)
-                                sourced.extend(s2)
-                                problems.extend(p2)
-                            wi = len(cmd_words)
-                            broke_env_s = True
-                            break
-                        if a.startswith("--split-string="):
-                            e2, s2, p2 = cls._analyze_gate_command(a.split("=", 1)[1], _depth + 1)
-                            executables.extend(e2)
-                            sourced.extend(s2)
-                            problems.extend(p2)
+                        if a in ("-S", "--split-string") or a.startswith("--split-string="):
+                            problems.append(
+                                "env -S/--split-string performs runtime word splitting and cannot be statically fingerprinted"
+                            )
                             wi = len(cmd_words)
                             broke_env_s = True
                             break
@@ -2018,18 +2006,9 @@ class MergeQueue:
                                     problems.append("env -u alters executable lookup variable")
                                 break
                             if ch_opt == "S":
-                                if rest:
-                                    e2, s2, p2 = cls._analyze_gate_command(rest, _depth + 1)
-                                    executables.extend(e2)
-                                    sourced.extend(s2)
-                                    problems.extend(p2)
-                                elif wi + 1 < len(cmd_words) and not is_dynamic(cmd_words[wi + 1][1]):
-                                    e2, s2, p2 = cls._analyze_gate_command(cmd_words[wi + 1][0], _depth + 1)
-                                    executables.extend(e2)
-                                    sourced.extend(s2)
-                                    problems.extend(p2)
-                                else:
-                                    problems.append("env -S: missing or dynamic argument cannot be fingerprinted")
+                                problems.append(
+                                    "env -S performs runtime word splitting and cannot be statically fingerprinted"
+                                )
                                 broke_env_s = True
                                 break
                             problems.append(f"env: unsupported short option -{ch_opt} cannot be statically fingerprinted")

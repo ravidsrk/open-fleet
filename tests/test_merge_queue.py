@@ -639,6 +639,8 @@ class GateRunsIsolated(QueueCase):
             "env -C /tmp ./gate-check",
             "env -i gate-check",
             "env -u PATH gate-check",
+            "env -S nice /opt/gate-check",
+            "env --split-string='sh -c true' /opt/gate-check",
             "cd subdir && ./gate-check",
             "export PATH=/opt/alternate/bin; gate-check",
             "for PATH in /opt/alternate/bin; do gate-check; done",
