@@ -1161,8 +1161,8 @@ class _Authority:
                 if not re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", mod):
                     return None, f"proof executable {tok!r} uses invalid -m module {mod!r}; fail-closed (#750 C19)"
                 scan_idx = pi + 2 if rest[pi] == "-m" else pi + 1
-                if mod == "pytest":
-                    program = "pytest"
+                if mod in ("pytest", "unittest"):
+                    program = mod
             else:
                 if rest[pi] == "--":
                     pi += 1
@@ -1218,24 +1218,107 @@ class _Authority:
                     mi += 1
             return staged, None
 
+        if program == "unittest":
+            ui, u_after, u_pos = scan_idx, False, []
+            while ui < len(rest):
+                ua = rest[ui]
+                if not u_after and ua == "--":
+                    u_after = True
+                    ui += 1
+                    continue
+                if u_after or not ua.startswith("-"):
+                    u_pos.append(ua)
+                    ui += 1
+                    continue
+                if ua in ("-s", "--start-directory", "-t", "--top-level-directory"):
+                    if ui + 1 >= len(rest):
+                        return None, f"proof executable {tok!r} {ua} missing directory operand; fail-closed (#750 C19)"
+                    err = cls._check_rel_operand(tok, rest[ui + 1], "unittest directory")
+                    if err:
+                        return None, err
+                    ui += 2
+                    continue
+                if ua.startswith(("--start-directory=", "--top-level-directory=")):
+                    err = cls._check_rel_operand(tok, ua.split("=", 1)[1], "unittest directory")
+                    if err:
+                        return None, err
+                    ui += 1
+                    continue
+                if ua.startswith(("-s", "-t")) and len(ua) > 2:
+                    err = cls._check_rel_operand(tok, ua[2:], "unittest directory")
+                    if err:
+                        return None, err
+                    ui += 1
+                    continue
+                if ua in ("-p", "--pattern", "-k"):
+                    if ui + 1 >= len(rest):
+                        return None, f"proof executable {tok!r} {ua} missing operand; fail-closed (#750 C19)"
+                    ui += 2
+                    continue
+                if ua.startswith(("--pattern=", "-p", "-k")) and len(ua) > 2:
+                    ui += 1
+                    continue
+                if len(ua) > 1 and ua[0] == "-" and ua[1] != "-" and any(ch in ua[1:] for ch in ("s", "t", "p", "k")):
+                    return None, f"proof executable {tok!r} uses ambiguous unittest option cluster {ua!r}; fail-closed (#750 C19)"
+                ui += 1
+            if u_pos[:1] == ["discover"]:
+                for d_dir in u_pos[1:2] + u_pos[3:4]:
+                    err = cls._check_rel_operand(tok, d_dir, "unittest directory")
+                    if err:
+                        return None, err
+            else:
+                for u_op in u_pos:
+                    if not re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", u_op):
+                        err = cls._check_rel_operand(tok, u_op, "unittest target")
+                        if err:
+                            return None, err
+            return staged, None
+
         value_opts = ("-f",) + (("-c",) if program == "pytest" else ())
         long_opts = ("--config", "--config-file", "--file")
+        saw_grep_pat = False
+        grep_pos = []
         i = scan_idx
         while i < len(rest):
             a = rest[i]
             if a == "--":
                 break
-            if program == "pytest" and (
-                a in ("-o", "--override-ini", "--rootdir", "--confcutdir")
-                or a.startswith(("--override-ini=", "--rootdir=", "--confcutdir="))
-            ):
-                return None, f"proof executable {tok!r} uses dynamic pytest config option {a!r}; fail-closed (#750 C19)"
+            if program == "pytest":
+                if (
+                    a in ("-o", "-p", "--override-ini", "--rootdir", "--confcutdir", "--basetemp", "--import-mode", "--pyargs")
+                    or a.startswith(("--override-ini=", "--rootdir=", "--confcutdir=", "--basetemp=", "--import-mode="))
+                    or (len(a) > 1 and a[0] == "-" and a[1] != "-" and any(ch in a[1:] for ch in ("o", "p")))
+                ):
+                    return None, f"proof executable {tok!r} uses dynamic pytest config/plugin option {a!r}; fail-closed (#750 C19)"
+                if a in ("-k", "-m", "-W", "--maxfail"):
+                    if i + 1 >= len(rest):
+                        return None, f"proof executable {tok!r} {a} missing operand; fail-closed (#750 C19)"
+                    i += 2
+                    continue
+                if a.startswith(("-k", "-m", "-W")) and len(a) > 2:
+                    i += 1
+                    continue
+                if len(a) > 1 and a[0] == "-" and a[1] != "-" and any(ch in a[1:] for ch in ("k", "m", "W")):
+                    return None, f"proof executable {tok!r} uses ambiguous pytest option cluster {a!r}; fail-closed (#750 C19)"
+            if program == "grep":
+                if a in ("-e", "--regexp"):
+                    if i + 1 >= len(rest):
+                        return None, f"proof executable {tok!r} {a} missing pattern; fail-closed (#750 C19)"
+                    saw_grep_pat = True
+                    i += 2
+                    continue
+                if a.startswith("--regexp=") or (a.startswith("-e") and len(a) > 2):
+                    saw_grep_pat = True
+                    i += 1
+                    continue
             if a.startswith(tuple(opt + "=" for opt in long_opts)):
                 val = a.split("=", 1)[1]
                 err = cls._check_rel_operand(tok, val, "config")
                 if err:
                     return None, err
                 staged.append(val)
+                if program == "grep":
+                    saw_grep_pat = True
             elif a in long_opts:
                 if i + 1 >= len(rest):
                     return None, f"proof executable {tok!r} {a} missing operand; fail-closed (#750 C19)"
@@ -1243,6 +1326,8 @@ class _Authority:
                 if err:
                     return None, err
                 staged.append(rest[i + 1])
+                if program == "grep":
+                    saw_grep_pat = True
                 i += 1
             elif a in value_opts:
                 if i + 1 >= len(rest):
@@ -1251,6 +1336,8 @@ class _Authority:
                 if err:
                     return None, err
                 staged.append(rest[i + 1])
+                if program == "grep":
+                    saw_grep_pat = True
                 i += 1
             elif a.startswith(value_opts) and len(a) > 2:
                 val = a[2:]
@@ -1258,6 +1345,8 @@ class _Authority:
                 if err:
                     return None, err
                 staged.append(val)
+                if program == "grep":
+                    saw_grep_pat = True
             elif len(a) > 1 and a[0] == "-" and a[1] != "-" and any(opt[1] in a[1:] for opt in value_opts):
                 return None, f"proof executable {tok!r} uses ambiguous option cluster {a!r}; fail-closed (#750 C19)"
             elif program == "pytest" and not a.startswith("-"):
@@ -1265,11 +1354,22 @@ class _Authority:
                 err = cls._check_rel_operand(tok, p_part, "test path")
                 if err:
                     return None, err
+            elif program == "grep" and not a.startswith("-"):
+                grep_pos.append(a)
             i += 1
-        if program == "pytest" and i < len(rest) and rest[i] == "--":
-            for post_a in rest[i + 1:]:
-                p_part = post_a.split("::", 1)[0]
-                err = cls._check_rel_operand(tok, p_part, "test path")
+        if i < len(rest) and rest[i] == "--":
+            if program == "pytest":
+                for post_a in rest[i + 1:]:
+                    p_part = post_a.split("::", 1)[0]
+                    err = cls._check_rel_operand(tok, p_part, "test path")
+                    if err:
+                        return None, err
+            elif program == "grep":
+                grep_pos.extend(rest[i + 1:])
+        if program == "grep":
+            file_ops = grep_pos if saw_grep_pat else grep_pos[1:]
+            for g_file in file_ops:
+                err = cls._check_rel_operand(tok, g_file, "file")
                 if err:
                     return None, err
         return staged, None

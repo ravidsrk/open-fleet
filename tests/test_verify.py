@@ -2756,6 +2756,14 @@ class EndToEndMutationGreen(MutationFixture):
             [sys.executable, '-W', 'ignore', '/tmp/external_proof.py'],
             ['node', '--no-warnings', '/tmp/external_proof.js'],
             ['pytest', '-c', '/tmp/external_pytest.ini'],
+            ['pytest', '-otestpaths=/opt/evil'],
+            ['pytest', '-opythonpath=/opt/evil'],
+            ['pytest', '-o', 'testpaths=/opt/evil'],
+            ['pytest', '-o', 'pythonpath=/opt/evil'],
+            ['pytest', '--override-ini=pythonpath=/opt/evil'],
+            [sys.executable, '-m', 'pytest', '-otestpaths=/opt/evil'],
+            [sys.executable, '-m', 'unittest', 'discover', '-s', '/opt/evil'],
+            ['grep', 'FIXED', '/opt/evil/app.py'],
         ):
             recs_bad, err_bad = verify._Authority.nc_exec_identity(bad_env_argv, str(self.repo))
             self.assertIsNone(recs_bad, bad_env_argv)
