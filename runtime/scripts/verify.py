@@ -1076,6 +1076,7 @@ class _Authority:
     _NC_FORBID_MUX_EXES = frozenset({
         "busybox", "xargs", "find", "stdbuf", "setsid", "flock", "chrt", "ionice",
         "taskset", "script", "su", "sudo", "chroot", "nsenter", "unshare", "bwrap",
+        "time", "parallel", "watch", "strace", "ltrace",
     })
 
     @classmethod
@@ -1084,6 +1085,66 @@ class _Authority:
         if up in cls._NC_FORBID_ENV_VARS:
             return True
         return up.startswith(("GIT_", "ORCA_", "OPEN_FLEET_", "GH_", "GITHUB_"))
+
+    @classmethod
+    def _parse_shell_script_operand(cls, tok, rest):
+        """Parse shell argv tail `rest` and return `(script_op, err)` enforcing staged repo-relative path."""
+        si = 0
+        while si < len(rest):
+            arg = rest[si]
+            if arg in ("--", "-"):
+                si += 1
+                break
+            if not arg.startswith(("-", "+")) or arg == "+":
+                break
+            if arg == "-c" or (arg.startswith("-") and not arg.startswith("--") and "c" in arg[1:]):
+                return None, (f"proof executable {tok!r} invokes a shell -c command string, "
+                              "whose inner commands are unverified (#750 C19)")
+            if arg.startswith("--"):
+                if arg in ("--posix", "--norc", "--noprofile"):
+                    si += 1
+                    continue
+                return None, (f"proof executable {tok!r} uses unsupported shell option {arg!r}; "
+                              "fail-closed (#750 C19)")
+            if arg in ("-o", "+o", "-O", "+O"):
+                if si + 1 >= len(rest):
+                    return None, f"proof executable {tok!r} {arg} missing option argument (#750 C19)"
+                si += 2
+                continue
+            short = arg[1:]
+            if arg.startswith("-") and any(ch in short for ch in ("l", "i", "s", "r")):
+                return None, (f"proof executable {tok!r} invokes interactive/login/stdin shell mode; "
+                              "fail-closed (#750 C19)")
+            if any(ch not in "abefhmnuvxBCHPoO" for ch in short):
+                return None, (f"proof executable {tok!r} uses unsupported shell option {arg!r}; "
+                              "fail-closed (#750 C19)")
+            if "o" in short or "O" in short:
+                if not (short.endswith(("o", "O")) and (short.count("o") + short.count("O") == 1)) or si + 1 >= len(rest):
+                    return None, f"proof executable {tok!r} uses ambiguous -o option cluster (#750 C19)"
+                si += 2
+                continue
+            si += 1
+        if si >= len(rest):
+            return None, (f"proof executable {tok!r} invokes shell without a script operand; "
+                          "fail-closed (#750 C19)")
+        script_op = rest[si]
+        if "/" not in script_op or os.path.isabs(script_op) or ".." in Path(script_op).parts:
+            return None, (f"proof executable {tok!r} uses bare or external shell script operand "
+                          f"{script_op!r}; require a staged repo-relative path containing '/'; "
+                          "fail-closed (#750 C19)")
+        return script_op, None
+
+    @classmethod
+    def _shell_script_operand(cls, argv):
+        """Return the repo-relative shell script operand when `argv` invokes a shell, else `None`."""
+        indexed, err = cls._unwrap_nc_indexed(argv)
+        if err or not indexed:
+            return None
+        target_idx, target_tok = indexed[-1]
+        if Path(target_tok).name not in cls._SHELL_NAMES:
+            return None
+        script_op, s_err = cls._parse_shell_script_operand(target_tok, argv[target_idx + 1:])
+        return None if s_err else script_op
 
     @classmethod
     def _unwrap_nc_indexed(cls, argv):
@@ -1099,48 +1160,9 @@ class _Authority:
             indexed.append((idx, tok))
             rest = argv[idx + 1:]
             if name in cls._SHELL_NAMES:
-                si = 0
-                while si < len(rest):
-                    arg = rest[si]
-                    if arg in ("--", "-"):
-                        si += 1
-                        break
-                    if not arg.startswith(("-", "+")) or arg == "+":
-                        break
-                    if arg == "-c" or (arg.startswith("-") and not arg.startswith("--") and "c" in arg[1:]):
-                        return None, (f"proof executable {tok!r} invokes a shell -c command string, "
-                                      "whose inner commands are unverified (#750 C19)")
-                    if arg.startswith("--"):
-                        if arg in ("--posix", "--norc", "--noprofile"):
-                            si += 1
-                            continue
-                        return None, (f"proof executable {tok!r} uses unsupported shell option {arg!r}; "
-                                      "fail-closed (#750 C19)")
-                    if arg in ("-o", "+o", "-O", "+O"):
-                        if si + 1 >= len(rest):
-                            return None, f"proof executable {tok!r} {arg} missing option argument (#750 C19)"
-                        si += 2
-                        continue
-                    short = arg[1:]
-                    if arg.startswith("-") and any(ch in short for ch in ("l", "i", "s", "r")):
-                        return None, (f"proof executable {tok!r} invokes interactive/login/stdin shell mode; "
-                                      "fail-closed (#750 C19)")
-                    if any(ch not in "abefhmnuvxBCHPoO" for ch in short):
-                        return None, (f"proof executable {tok!r} uses unsupported shell option {arg!r}; "
-                                      "fail-closed (#750 C19)")
-                    if "o" in short or "O" in short:
-                        if not (short.endswith(("o", "O")) and (short.count("o") + short.count("O") == 1)) or si + 1 >= len(rest):
-                            return None, f"proof executable {tok!r} uses ambiguous -o option cluster (#750 C19)"
-                        si += 2
-                        continue
-                    si += 1
-                if si >= len(rest):
-                    return None, (f"proof executable {tok!r} invokes shell without a script operand; "
-                                  "fail-closed (#750 C19)")
-                script_op = rest[si]
-                if os.path.isabs(script_op) or ".." in Path(script_op).parts:
-                    return None, (f"proof executable {tok!r} targets external script {script_op!r} outside "
-                                  "the staged commit; fail-closed (#750 C19)")
+                _, sh_err = cls._parse_shell_script_operand(tok, rest)
+                if sh_err:
+                    return None, sh_err
                 break
             idx += 1
             if name == "env":
@@ -1269,6 +1291,27 @@ class _Authority:
                     return None, "timeout wrapper missing duration or target proof command; fail-closed (#750 C19)"
                 idx += 1  # duration operand
             else:
+                if re.fullmatch(r"(?:python(?:[0-9.]+)?|pypy[0-9]*)", name):
+                    pi = 0
+                    while pi < len(rest) and rest[pi] in {
+                        "-B", "-E", "-I", "-O", "-OO", "-s", "-S", "-u", "-q",
+                    }:
+                        pi += 1
+                    if pi < len(rest) and not rest[pi].startswith("-m"):
+                        if rest[pi] == "--":
+                            pi += 1
+                        if pi < len(rest) and not rest[pi].startswith("-"):
+                            py_op = rest[pi]
+                            if os.path.isabs(py_op) or ".." in Path(py_op).parts:
+                                return None, (f"proof executable {tok!r} targets external script "
+                                              f"{py_op!r} outside the staged commit; fail-closed (#750 C19)")
+                elif name in {"node", "nodejs", "ruby", "perl"}:
+                    pi = 1 if rest[:1] == ["--"] else 0
+                    if pi < len(rest) and not rest[pi].startswith("-"):
+                        interp_op = rest[pi]
+                        if os.path.isabs(interp_op) or ".." in Path(interp_op).parts:
+                            return None, (f"proof executable {tok!r} targets external script "
+                                          f"{interp_op!r} outside the staged commit; fail-closed (#750 C19)")
                 break
         return indexed, None
 
@@ -2984,6 +3027,28 @@ def execute_negative_control(m, nc_command=None):
             err = _stage_phase_repo(top, head, commit, repo, phase)
             if err:
                 return None, None, err
+            sh_op = _Authority._shell_script_operand(argv)
+            pre_sh_digest = None
+            if sh_op is not None:
+                try:
+                    repo_real = Path(repo).resolve()
+                    raw_sh = os.path.abspath(os.path.join(repo, sh_op))
+                    sh_nodes = list(_Authority._nodes(raw_sh))
+                    sh_real = Path(raw_sh).resolve(strict=True)
+                    sh_st = os.stat(sh_real)
+                    if (
+                        sh_real == repo_real
+                        or repo_real not in sh_real.parents
+                        or any(n != repo_real and repo_real not in n.parents for n, _ in sh_nodes)
+                        or not stat.S_ISREG(sh_st.st_mode)
+                        or (sh_st.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
+                    ):
+                        return None, None, (f"proof shell script {sh_op!r} is missing, writable, or "
+                                            "escapes the staged commit; fail-closed (#750 C19)")
+                    pre_sh_digest = hashlib.sha256(sh_real.read_bytes()).hexdigest()
+                except (OSError, RuntimeError) as sh_exc:
+                    return None, None, (f"proof shell script {sh_op!r} does not exist in staged "
+                                        f"{phase} commit ({sh_exc}); fail-closed (#750 C19)")
             exec_argv = list(argv)
             if pinned_exec is not None:
                 _, exec_err = _Authority.nc_exec_identity(
@@ -2995,6 +3060,19 @@ def execute_negative_control(m, nc_command=None):
                     if 0 <= slot_idx < len(exec_argv) and not os.path.isabs(exec_argv[slot_idx]):
                         exec_argv[slot_idx] = pinned_abs
             rc, out, errout = _run_at(repo, exec_argv, timeout=NC_TIMEOUT_S, env=env)
+            if pre_sh_digest is not None:
+                try:
+                    post_sh_real = Path(os.path.abspath(os.path.join(repo, sh_op))).resolve(strict=True)
+                    if (
+                        post_sh_real == repo_real
+                        or repo_real not in post_sh_real.parents
+                        or hashlib.sha256(post_sh_real.read_bytes()).hexdigest() != pre_sh_digest
+                    ):
+                        return None, None, (f"proof shell script {sh_op!r} changed during {phase}; "
+                                            "fail-closed (#750 C19)")
+                except (OSError, RuntimeError) as sh_post_exc:
+                    return None, None, (f"proof shell script {sh_op!r} disappeared during {phase} "
+                                        f"({sh_post_exc}); fail-closed (#750 C19)")
             if pinned_exec is not None:
                 _, post_err = _Authority.nc_exec_identity(
                     argv, top, env.get("PATH", ""), pinned_exec, f"during {phase}")
@@ -3027,6 +3105,15 @@ def execute_negative_control(m, nc_command=None):
     pinned_exec, exec_err = _Authority.nc_exec_identity(argv, top)
     if exec_err:
         return False, [f"--execute-nc: {exec_err}"]
+    sh_head_op = _Authority._shell_script_operand(argv)
+    if sh_head_op is not None:
+        norm_sh_op = Path(os.path.normpath(sh_head_op)).as_posix().lstrip("./")
+        ls_rc, ls_out, _ = _run(
+            [_Authority.git_bin(), "-C", top, "--literal-pathspecs", "ls-tree", head, "--", norm_sh_op],
+            timeout=10, env=_Authority.git_env())
+        if ls_rc != 0 or not ls_out.strip() or ls_out.strip().split(None, 1)[0] not in ("100644", "100755"):
+            return False, [f"--execute-nc: shell proof script {sh_head_op!r} is not a tracked "
+                           "regular file in head_sha; fail-closed (#750 C19)"]
     try:
         mutant, err = _prepare_control(top, head, m, nc, tool, nc_command)
     except _Authority.DriverQueryFailed as fail:

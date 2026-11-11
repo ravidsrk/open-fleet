@@ -2750,10 +2750,29 @@ class EndToEndMutationGreen(MutationFixture):
             ['env', '-i', 'python3', 'test.py'],
             ['env', '-C', '/tmp', 'python3', 'test.py'],
             ['env', '-u', 'PATH', 'python3', 'test.py'],
+            ['sh', 'proof.sh'],
+            ['sh', '/tmp/external_proof.sh'],
+            [sys.executable, '/tmp/external_proof.py'],
         ):
             recs_bad, err_bad = verify._Authority.nc_exec_identity(bad_env_argv, str(self.repo))
             self.assertIsNone(recs_bad, bad_env_argv)
             self.assertIn('fail-closed', err_bad)
+        # Missing/untracked shell proof script `./missing.sh` fails closed before phase execution:
+        untracked_sh = self.repo / 'missing.sh'
+        untracked_sh.write_text('#!/bin/sh\nexit 1\n', encoding='utf-8')
+        m_untracked_sh = {
+            'base_sha': self.base_sha,
+            'head_sha': self.head_sha,
+            'negative_control': {
+                'tool': 'revert',
+                'paths': ['app.py'],
+                'command': 'sh ./missing.sh',
+            },
+        }
+        ok_ush, msgs_ush = verify.execute_negative_control(m_untracked_sh, 'sh ./missing.sh')
+        self.assertFalse(ok_ush, msgs_ush)
+        self.assertTrue(any('not a tracked regular file in head_sha' in x for x in msgs_ush), msgs_ush)
+        untracked_sh.unlink()
         with tempfile.TemporaryDirectory() as ext_dir:
             os.chmod(ext_dir, 0o755)
             writable_bin = Path(ext_dir) / 'runner'

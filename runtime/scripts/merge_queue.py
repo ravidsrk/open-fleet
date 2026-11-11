@@ -1393,10 +1393,17 @@ class MergeQueue:
     _SHELL_BUILTINS = frozenset({
         "true", "false", "test", "[", "echo", "printf", "exit", "cd", "pwd",
         "export", "set", "unset", "shift", "return", "break", "continue", ":",
-        "read", "umask", "wait", "trap", "local", "readonly", "typeset", "declare",
+        "read", "umask", "wait", "trap", "local", "readonly",
         "getopts", "hash", "type", "ulimit", "times", "alias", "unalias",
+    })
+    _SHELL_KEYWORDS = frozenset({
         "if", "then", "else", "elif", "fi", "for", "select", "in", "while", "until",
         "do", "done", "case", "esac",
+    })
+    _MUX_WRAPPERS = frozenset({
+        "busybox", "xargs", "stdbuf", "setsid", "flock", "chrt", "ionice",
+        "taskset", "parallel", "watch", "time", "script", "su", "sudo",
+        "chroot", "nsenter", "unshare", "bwrap", "strace", "ltrace",
     })
     _COMPOUND_PREFIX_KEYWORDS = frozenset({
         "!", "{", "}", "if", "then", "elif", "else", "while", "until", "do",
@@ -1821,14 +1828,6 @@ class MergeQueue:
             if is_unquoted(flag) and tok in cls._COMPOUND_PREFIX_KEYWORDS:
                 idx += 1
                 continue
-            if is_unquoted(flag) and tok == "time":
-                idx += 1
-                while idx < total and lex_tokens[idx][0] == "word" and lex_tokens[idx][1] in ("-p", "--"):
-                    prev = lex_tokens[idx][1]
-                    idx += 1
-                    if prev == "--":
-                        break
-                continue
             if is_unquoted(flag) and tok in cls._COMPOUND_CLOSE_KEYWORDS:
                 expect_cmd = False
                 idx += 1
@@ -1898,10 +1897,12 @@ class MergeQueue:
 
             # Peel command-executing wrappers (`env`, `nice`, `timeout`, `nohup`, `command`, `exec`)
             wi = 0
+            force_external = False
+            skip_funcs = False
             while wi < len(cmd_words):
                 cw, cflag = cmd_words[wi]
                 c_avar = assign_var_of(cflag)
-                if c_avar is not None:
+                if c_avar is not None and not force_external:
                     if c_avar.upper() in cls._LOOKUP_VARS:
                         problems.append(
                             f"assignment to {c_avar!r} alters executable lookup context and cannot be statically fingerprinted"
@@ -1913,8 +1914,15 @@ class MergeQueue:
                     wi = len(cmd_words)
                     break
                 cw_base = Path(cw).name
+                if cw_base in cls._MUX_WRAPPERS:
+                    problems.append(
+                        f"{cw!r} multiplexes or wraps inner commands whose targets cannot be statically fingerprinted"
+                    )
+                    wi = len(cmd_words)
+                    break
                 if cw_base == "env":
                     executables.append(cw)
+                    force_external = True
                     wi += 1
                     broke_env_s = False
                     # Phase A: env options
@@ -2033,6 +2041,7 @@ class MergeQueue:
                     continue
                 if cw_base == "nice":
                     executables.append(cw)
+                    force_external = True
                     wi += 1
                     while wi < len(cmd_words) and cmd_words[wi][0].startswith("-") and len(cmd_words[wi][0]) > 1:
                         n_opt, n_flag = cmd_words[wi]
@@ -2051,6 +2060,7 @@ class MergeQueue:
                     continue
                 if cw_base == "timeout":
                     executables.append(cw)
+                    force_external = True
                     wi += 1
                     while wi < len(cmd_words) and cmd_words[wi][0].startswith("-") and len(cmd_words[wi][0]) > 1:
                         t_opt, t_flag = cmd_words[wi]
@@ -2077,6 +2087,7 @@ class MergeQueue:
                     continue
                 if cw_base == "nohup":
                     executables.append(cw)
+                    force_external = True
                     wi += 1
                     while wi < len(cmd_words) and cmd_words[wi][0].startswith("-") and len(cmd_words[wi][0]) > 1:
                         nh_opt, nh_flag = cmd_words[wi]
@@ -2088,7 +2099,14 @@ class MergeQueue:
                         problems.append(f"nohup: unsupported option {nh_opt!r} cannot be statically fingerprinted")
                         wi += 1
                     continue
-                if cw in ("command", "builtin"):
+                if cw_base in ("command", "builtin") and ("/" in cw or force_external):
+                    problems.append(f"external {cw!r} utility cannot be statically fingerprinted")
+                    wi = len(cmd_words)
+                    break
+                if not force_external and cw in ("command", "builtin"):
+                    if cw == "builtin":
+                        executables.append("__opt_builtin__:builtin")
+                    skip_funcs = True
                     wi += 1
                     query_only = False
                     while wi < len(cmd_words) and cmd_words[wi][0].startswith("-") and len(cmd_words[wi][0]) > 1:
@@ -2114,7 +2132,7 @@ class MergeQueue:
                         wi = len(cmd_words)
                         break
                     continue
-                if cw == "exec":
+                if not force_external and cw == "exec":
                     wi += 1
                     while wi < len(cmd_words) and cmd_words[wi][0].startswith("-") and len(cmd_words[wi][0]) > 1:
                         opt, opt_flag = cmd_words[wi]
@@ -2134,6 +2152,8 @@ class MergeQueue:
                         else:
                             problems.append(f"exec: unsupported option {opt!r} cannot be statically fingerprinted")
                             wi += 1
+                    if wi < len(cmd_words):
+                        force_external = True
                     continue
                 break
 
@@ -2143,121 +2163,137 @@ class MergeQueue:
             if is_dynamic(final_flag):
                 problems.append(f"dynamic command word {final_word!r} cannot be statically fingerprinted")
                 continue
-            if final_word == "eval":
-                problems.append("shell 'eval' builtin cannot be statically fingerprinted")
-                continue
-            if final_word in ("cd", "pushd", "popd"):
-                problems.append(f"shell {final_word!r} builtin alters working-directory lookup context")
-                continue
-            if final_word in ("alias", "unalias", "hash"):
-                problems.append(f"shell {final_word!r} builtin alters command lookup table")
-                continue
-            if final_word in ("export", "unset", "readonly", "typeset", "declare", "local"):
-                saw_dd = False
-                for arg_w, arg_f in cmd_words[wi + 1:]:
-                    if not saw_dd and arg_w == "--":
-                        saw_dd = True
-                        continue
-                    if not saw_dd and arg_w.startswith(("-", "+")) and len(arg_w) > 1:
-                        if is_dynamic(arg_f):
-                            problems.append(f"{final_word}: dynamic option cannot be statically fingerprinted")
-                            break
-                        if final_word in ("declare", "typeset", "local") and "n" in arg_w[1:]:
-                            problems.append(f"{final_word} -n nameref alias cannot be statically fingerprinted")
-                            break
-                        if final_word == "unset" and "f" in arg_w[1:]:
-                            problems.append("unset -f alters function/executable dispatch")
-                            break
-                        continue
-                    vname = arg_w.split("=", 1)[0]
-                    dyn_vname = is_dynamic(arg_f) and (
-                        any(ch_v in vname for ch_v in "$*?[`") or "__MQ_CMDSUB__" in vname
-                    )
-                    if dyn_vname or vname.upper() in cls._LOOKUP_VARS:
-                        problems.append(
-                            f"shell {final_word!r} builtin touching lookup variable cannot be statically fingerprinted"
+            if not force_external:
+                if final_word == "eval":
+                    problems.append("shell 'eval' builtin cannot be statically fingerprinted")
+                    continue
+                if final_word in ("cd", "pushd", "popd"):
+                    problems.append(f"shell {final_word!r} builtin alters working-directory lookup context")
+                    continue
+                if final_word in ("alias", "unalias", "hash", "enable", "shopt"):
+                    problems.append(f"shell {final_word!r} builtin alters command lookup table")
+                    continue
+                if final_word in ("export", "unset", "readonly", "typeset", "declare", "local"):
+                    if final_word in ("typeset", "declare"):
+                        executables.append(f"__opt_builtin__:{final_word}")
+                    saw_dd = False
+                    for arg_w, arg_f in cmd_words[wi + 1:]:
+                        if not saw_dd and arg_w == "--":
+                            saw_dd = True
+                            continue
+                        if not saw_dd and arg_w.startswith(("-", "+")) and len(arg_w) > 1:
+                            if is_dynamic(arg_f):
+                                problems.append(f"{final_word}: dynamic option cannot be statically fingerprinted")
+                                break
+                            if final_word in ("declare", "typeset", "local") and "n" in arg_w[1:]:
+                                problems.append(f"{final_word} -n nameref alias cannot be statically fingerprinted")
+                                break
+                            if final_word == "unset" and "f" in arg_w[1:]:
+                                problems.append("unset -f alters function/executable dispatch")
+                                break
+                            continue
+                        vname = arg_w.split("=", 1)[0]
+                        dyn_vname = is_dynamic(arg_f) and (
+                            any(ch_v in vname for ch_v in "$*?[`") or "__MQ_CMDSUB__" in vname
                         )
-                        break
-                continue
-            if final_word == "read":
-                for rw, rf in cmd_words[wi + 1:]:
-                    if is_dynamic(rf) or rw.split("=", 1)[0].upper() in cls._LOOKUP_VARS:
-                        problems.append("shell 'read' builtin touching lookup variable cannot be statically fingerprinted")
-                        break
-                continue
-            if final_word == "printf":
-                for pi in range(wi + 1, len(cmd_words)):
-                    pw, pf = cmd_words[pi]
-                    if pw == "--":
-                        break
-                    if pw == "-v":
-                        if pi + 1 >= len(cmd_words) or is_dynamic(cmd_words[pi + 1][1]) or (
-                            cmd_words[pi + 1][0].upper() in cls._LOOKUP_VARS
-                        ):
+                        if dyn_vname or vname.upper() in cls._LOOKUP_VARS:
                             problems.append(
-                                "shell 'printf -v' touching lookup variable cannot be statically fingerprinted"
+                                f"shell {final_word!r} builtin touching lookup variable cannot be statically fingerprinted"
                             )
-                        break
-                    if pw.startswith("-v") and len(pw) > 2:
-                        if is_dynamic(pf) or pw[2:].upper() in cls._LOOKUP_VARS:
-                            problems.append(
-                                "shell 'printf -v' touching lookup variable cannot be statically fingerprinted"
-                            )
-                        break
-                continue
-            if final_word == "getopts":
-                if wi + 2 >= len(cmd_words) or is_dynamic(cmd_words[wi + 2][1]) or (
-                    cmd_words[wi + 2][0].upper() in cls._LOOKUP_VARS
-                ):
-                    problems.append("shell 'getopts' touching lookup variable cannot be statically fingerprinted")
-                continue
-            if final_word == "let":
-                for lw, lf in cmd_words[wi + 1:]:
-                    if is_dynamic(lf) or any(
-                        ident.upper() in cls._LOOKUP_VARS for ident in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", lw)
+                            break
+                    continue
+                if final_word == "read":
+                    for rw, rf in cmd_words[wi + 1:]:
+                        if is_dynamic(rf) or rw.split("=", 1)[0].upper() in cls._LOOKUP_VARS:
+                            problems.append("shell 'read' builtin touching lookup variable cannot be statically fingerprinted")
+                            break
+                    continue
+                if final_word == "printf":
+                    for pi in range(wi + 1, len(cmd_words)):
+                        pw, pf = cmd_words[pi]
+                        if pw == "--":
+                            break
+                        if pw == "-v":
+                            if pi + 1 >= len(cmd_words) or is_dynamic(cmd_words[pi + 1][1]) or (
+                                cmd_words[pi + 1][0].upper() in cls._LOOKUP_VARS
+                            ):
+                                problems.append(
+                                    "shell 'printf -v' touching lookup variable cannot be statically fingerprinted"
+                                )
+                            break
+                        if pw.startswith("-v") and len(pw) > 2:
+                            if is_dynamic(pf) or pw[2:].upper() in cls._LOOKUP_VARS:
+                                problems.append(
+                                    "shell 'printf -v' touching lookup variable cannot be statically fingerprinted"
+                                )
+                            break
+                    continue
+                if final_word == "getopts":
+                    if wi + 2 >= len(cmd_words) or is_dynamic(cmd_words[wi + 2][1]) or (
+                        cmd_words[wi + 2][0].upper() in cls._LOOKUP_VARS
                     ):
-                        problems.append("shell 'let' touching lookup variable cannot be statically fingerprinted")
-                        break
-                continue
-            if final_word == "trap":
-                t_args = cmd_words[wi + 1:]
-                if not t_args:
+                        problems.append("shell 'getopts' touching lookup variable cannot be statically fingerprinted")
                     continue
-                ti = 0
-                if t_args[0][0] == "--":
-                    ti = 1
-                elif t_args[0][0].startswith("-"):
-                    problems.append("trap: option flags cannot be statically fingerprinted")
+                if final_word == "let":
+                    executables.append("__opt_builtin__:let")
+                    for lw, lf in cmd_words[wi + 1:]:
+                        if is_dynamic(lf) or any(
+                            ident.upper() in cls._LOOKUP_VARS for ident in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", lw)
+                        ):
+                            problems.append("shell 'let' touching lookup variable cannot be statically fingerprinted")
+                            break
                     continue
-                if ti >= len(t_args):
+                if final_word == "trap":
+                    t_args = cmd_words[wi + 1:]
+                    if not t_args:
+                        continue
+                    ti = 0
+                    if t_args[0][0] == "--":
+                        ti = 1
+                    elif t_args[0][0].startswith("-"):
+                        problems.append("trap: option flags cannot be statically fingerprinted")
+                        continue
+                    if ti >= len(t_args):
+                        continue
+                    t_act, t_flag = t_args[ti]
+                    if is_dynamic(t_flag):
+                        problems.append("trap: dynamic action string cannot be statically fingerprinted")
+                    elif t_act and t_act != "-" and not t_act.isdigit():
+                        e2, s2, p2 = cls._analyze_gate_command(t_act, _depth + 1)
+                        executables.extend(e2)
+                        sourced.extend(s2)
+                        problems.extend(p2)
                     continue
-                t_act, t_flag = t_args[ti]
-                if is_dynamic(t_flag):
-                    problems.append("trap: dynamic action string cannot be statically fingerprinted")
-                elif t_act and t_act != "-" and not t_act.isdigit():
-                    e2, s2, p2 = cls._analyze_gate_command(t_act, _depth + 1)
-                    executables.extend(e2)
-                    sourced.extend(s2)
-                    problems.extend(p2)
-                continue
-            if final_word in (".", "source"):
-                if wi + 1 >= len(cmd_words) or is_dynamic(cmd_words[wi + 1][1]):
-                    problems.append(f"{final_word}: dynamic or missing script target cannot be fingerprinted")
-                else:
-                    src_target = cmd_words[wi + 1][0]
-                    if "/" not in src_target and not os.path.isabs(src_target):
-                        problems.append(
-                            f"{final_word}: script target {src_target!r} without '/' searches PATH and cannot be statically fingerprinted"
-                        )
+                if final_word in (".", "source"):
+                    if final_word == "source":
+                        executables.append("__opt_builtin__:source")
+                    if wi + 1 >= len(cmd_words) or is_dynamic(cmd_words[wi + 1][1]):
+                        problems.append(f"{final_word}: dynamic or missing script target cannot be fingerprinted")
                     else:
-                        sourced.append(src_target)
-                continue
-            if final_word in defined_funcs:
+                        src_target = cmd_words[wi + 1][0]
+                        if "/" not in src_target and not os.path.isabs(src_target):
+                            problems.append(
+                                f"{final_word}: script target {src_target!r} without '/' searches PATH and cannot be statically fingerprinted"
+                            )
+                        else:
+                            sourced.append(src_target)
+                    continue
+            if force_external:
+                if final_word:
+                    executables.append(final_word)
+            elif final_word in defined_funcs and not skip_funcs:
                 executables.append(f"__func__:{final_word}")
-            elif final_word and final_word not in cls._SHELL_BUILTINS:
+            elif final_word and not (
+                final_word in cls._SHELL_BUILTINS
+                or (is_unquoted(final_flag) and final_word in cls._SHELL_KEYWORDS)
+            ):
                 executables.append(final_word)
             final_base = Path(final_word).name
-            if final_base in cls._SHELL_NAMES:
+            if final_base == "find" and any(
+                fa in ("-exec", "-execdir", "-ok", "-okdir") for fa, _ in cmd_words[wi + 1:]
+            ):
+                problems.append("find -exec/-ok dispatches inner commands that cannot be statically fingerprinted")
+            elif final_base in cls._SHELL_NAMES:
                 s_src, s_exe, s_prob = cls._analyze_shell_invocation(final_word, cmd_words[wi + 1:], _depth)
                 executables.extend(s_exe)
                 sourced.extend(s_src)
@@ -2578,7 +2614,7 @@ class MergeQueue:
     @classmethod
     def _extract_gate_executables(cls, gate_cmd: str, _depth: int = 0) -> list[str]:
         exes, sourced, _ = cls._analyze_gate_command(gate_cmd, _depth=_depth)
-        return [*[x for x in exes if not x.startswith("__func__:")], *sourced]
+        return [*[x for x in exes if not x.startswith(("__func__:", "__opt_builtin__:"))], *sourced]
 
     def _read_sourced_gate_script(self, tok: str, cwd: Path | None, commit: str | None) -> str | None:
         if os.path.isabs(tok):
@@ -2633,7 +2669,7 @@ class MergeQueue:
             if tok in seen:
                 continue
             seen.add(tok)
-            if tok.startswith("__func__:"):
+            if tok.startswith(("__func__:", "__opt_builtin__:")):
                 fn_name = tok.split(":", 1)[1]
                 shadow = shutil.which(fn_name, path=clean_path) if "/" not in fn_name else None
                 if not shadow:
@@ -2843,34 +2879,78 @@ class MergeQueue:
                 if os.path.exists(sys_dir):
                     bound_ro.add(sys_dir)
                     cmd += ["--ro-bind", sys_dir, sys_dir]
-            forbidden_roots = {
+            raw_forbidden = {
                 "/", "/root", "/home", "/Users", "/tmp", "/var", "/var/tmp", "/proc", "/sys", "/dev", "/run",
             }
+            forbidden_roots: set[str] = set()
+            for r in raw_forbidden:
+                forbidden_roots.add(os.path.normpath(r))
+                if os.path.exists(r):
+                    forbidden_roots.add(os.path.realpath(r))
+            strict_subtrees = tuple(
+                os.path.realpath(r) if os.path.exists(r) else r
+                for r in ("/root", "/proc", "/sys", "/dev", "/run")
+            )
+            sensitive_ancestors: set[str] = set()
+            forbidden_subtrees: list[str] = list(strict_subtrees)
             orig_home = os.path.normpath(self.env.get("HOME") or "")
             if orig_home and orig_home != ".":
                 forbidden_roots.add(orig_home)
-            forbidden_roots.add(str(Path(self.git.repo_dir).resolve()))
+                orig_home_real = os.path.realpath(orig_home)
+                forbidden_roots.add(orig_home_real)
+                sensitive_ancestors.add(orig_home_real)
+                for cred_sub in (".ssh", ".gnupg", ".aws", ".config", ".kube", ".docker", ".codex", ".claude", ".gemini"):
+                    c_dir = os.path.join(orig_home_real, cred_sub)
+                    forbidden_subtrees.append(os.path.realpath(c_dir) if os.path.exists(c_dir) else c_dir)
+            repo_real = str(Path(self.git.repo_dir).resolve())
+            forbidden_roots.add(repo_real)
+            sensitive_ancestors.add(repo_real)
+            forbidden_subtrees.append(repo_real)
             store_path = getattr(self.store, "path", None)
             if store_path:
-                forbidden_roots.add(str(Path(store_path).resolve().parent))
+                store_dir_real = str(Path(store_path).resolve().parent)
+                forbidden_roots.add(store_dir_real)
+                sensitive_ancestors.add(store_dir_real)
+                forbidden_subtrees.append(store_dir_real)
+
+            def _forbidden_bind_source(src: str) -> bool:
+                norm_s = os.path.normpath(src)
+                try:
+                    real_s = os.path.realpath(norm_s)
+                except OSError:
+                    return True
+                if not real_s or norm_s in forbidden_roots or real_s in forbidden_roots:
+                    return True
+                real_slash = real_s.rstrip("/") + "/"
+                if any(sa == real_s or sa.startswith(real_slash) for sa in sensitive_ancestors):
+                    return True
+                if any(real_s == sub or real_s.startswith(sub.rstrip("/") + "/") for sub in forbidden_subtrees):
+                    return True
+                return False
+
             for extra_dir in self._clean_gate_path().split(os.pathsep):
                 norm_extra = os.path.normpath(extra_dir)
                 if not norm_extra or not os.path.isabs(norm_extra) or not os.path.exists(norm_extra):
                     continue
                 if any(norm_extra == d or norm_extra.startswith(d + "/") for d in sys_dirs):
                     continue
-                if norm_extra in forbidden_roots:
+                if _forbidden_bind_source(norm_extra):
                     continue
                 to_bind = [norm_extra]
                 if norm_extra.endswith("/bin"):
                     prefix = os.path.dirname(norm_extra)
-                    if prefix and prefix not in forbidden_roots:
+                    if prefix and not _forbidden_bind_source(prefix):
+                        real_prefix_slash = os.path.realpath(prefix).rstrip("/") + "/"
                         for sub in ("lib", "lib64", "libexec", "share"):
                             cand_sub = os.path.join(prefix, sub)
-                            if os.path.exists(cand_sub):
+                            if (
+                                os.path.exists(cand_sub)
+                                and not _forbidden_bind_source(cand_sub)
+                                and os.path.realpath(cand_sub).startswith(real_prefix_slash)
+                            ):
                                 to_bind.append(cand_sub)
                 for bpath in to_bind:
-                    if bpath not in bound_ro and bpath not in forbidden_roots:
+                    if bpath not in bound_ro and not _forbidden_bind_source(bpath):
                         bound_ro.add(bpath)
                         cmd += ["--ro-bind", bpath, bpath]
             cmd += [

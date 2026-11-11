@@ -610,17 +610,41 @@ class GateRunsIsolated(QueueCase):
         sed_exes, _, sed_probs = mq_mod.MergeQueue._analyze_gate_command(f"sed -e '' -f {ext_sed} /dev/null")
         self.assertFalse(sed_probs, sed_probs)
         self.assertIn(str(ext_sed), sed_exes)
+        # Wrapped builtin-named binaries (`env test`, `nice echo`, `exec test`) execute via PATH and are fingerprinted:
+        self.assertEqual(mq_mod.MergeQueue._extract_gate_executables("env test -f marker"), ["env", "test"])
+        self.assertEqual(mq_mod.MergeQueue._extract_gate_executables("nice -n 5 echo ok"), ["nice", "echo"])
+        self.assertEqual(mq_mod.MergeQueue._extract_gate_executables("exec test -f marker"), ["test"])
+        ext_test = self.w.tmp / "bin" / "test"
+        ext_test.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        ext_test.chmod(0o755)
+        try:
+            tok_et = self.acquire("c-env-test", "--takeover")
+            self.board(tok_et, self.w.unit("env-test-unit"))
+            rc_etp, out_etp = self.w.cli("plan", "--token", tok_et, "--gate-cmd", "env test -f anything")
+            self.assertEqual(rc_etp, 0, out_etp)
+            self.assertEqual(out_etp["planned"][0]["result"], "tested", out_etp)
+            ext_test.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            rc_etm, out_etm = self.w.cli("merge", "--token", tok_et, "--require-gate", "env test -f anything")
+            self.assertNotEqual(rc_etm, 0, out_etm)
+            self.assertEqual(out_etm.get("code"), "gate_not_run", out_etm)
+        finally:
+            ext_test.unlink(missing_ok=True)
         # Unresolved executable names fail closed in `_gate_fingerprint`:
         unres_fp, unres_probs = self.w.queue()._gate_fingerprint("nonexistent_gate_binary_xyz")
         self.assertEqual(unres_fp, "")
         self.assertTrue(unres_probs)
-        # `bwrap` argv never `--ro-bind`s `/` or conductor `$HOME` even when `/bin` or `$HOME/bin` is on PATH:
+        # `bwrap` argv never `--ro-bind`s `/` or conductor `$HOME` (even through a PATH symlink):
         q_bw = self.w.queue()
         fake_home = self.w.tmp / "fake-home"
         (fake_home / "bin").mkdir(parents=True, exist_ok=True)
+        (fake_home / ".ssh").mkdir(parents=True, exist_ok=True)
+        sym_home = fake_home / "symbin"
+        sym_home.symlink_to(fake_home)
+        sym_ssh = fake_home / "sshbin"
+        sym_ssh.symlink_to(fake_home / ".ssh")
         q_bw.env.pop("MQ_GATE_SANDBOX_CMD", None)
         q_bw.env["HOME"] = str(fake_home)
-        q_bw.env["PATH"] = f"{fake_home / 'bin'}:/usr/bin:/bin"
+        q_bw.env["PATH"] = f"{fake_home / 'bin'}:{sym_home}:{sym_ssh}:/usr/bin:/bin"
         with unittest.mock.patch.object(
             type(q_bw), "_bwrap_mode", return_value=("/usr/bin/bwrap", ("--unshare-all",))
         ):
@@ -628,6 +652,8 @@ class GateRunsIsolated(QueueCase):
         ro_srcs = [bw_argv[i + 1] for i, v in enumerate(bw_argv) if v == "--ro-bind"]
         self.assertNotIn("/", ro_srcs)
         self.assertNotIn(str(fake_home), ro_srcs)
+        self.assertNotIn(str(sym_home), ro_srcs)
+        self.assertNotIn(str(sym_ssh), ro_srcs)
         self.assertIn(str(fake_home / "bin"), ro_srcs)
         # Dynamic command words (`eval`) and lookup-mutating forms (`PATH=`, `env PATH=`, `env -C`, `cd`, `command -p`) fail closed:
         for unsafe_gate in (
