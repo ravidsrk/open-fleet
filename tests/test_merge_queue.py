@@ -902,7 +902,7 @@ class GateRunsIsolated(QueueCase):
         self.assertEqual(out_m.get("code"), "gate_not_run", out_m)
 
     def test_versioned_interpreter_external_script_replacement_invalidates_plan(self):
-        tools_dir = self.w.tmp / "ver-interp"
+        tools_dir = self.w.tmp / "bin" / "ver-interp"
         tools_dir.mkdir(parents=True, exist_ok=True)
         ruby31 = tools_dir / "ruby3.1"
         ruby31.write_text("#!/bin/sh\nexec /bin/sh \"$1\"\n", encoding="utf-8")
@@ -921,7 +921,7 @@ class GateRunsIsolated(QueueCase):
         self.assertEqual(out_m.get("code"), "gate_not_run", out_m)
 
     def test_shebang_interpreter_replacement_invalidates_saved_plan(self):
-        tools_dir = self.w.tmp / "shebang-interp"
+        tools_dir = self.w.tmp / "bin" / "shebang-interp"
         tools_dir.mkdir(parents=True, exist_ok=True)
         interp = tools_dir / "py-chain"
         interp.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -964,6 +964,71 @@ class GateRunsIsolated(QueueCase):
                 self.w.env.pop("PATH", None)
             else:
                 self.w.env["PATH"] = saved_path
+
+    def test_bwrap_filtered_path_and_dangling_symlinks_fingerprint_sandbox_view(self):
+        fake_home = self.w.tmp / "bw-fp-home"
+        forbidden_dir = fake_home / ".ssh" / "tools"
+        mounted_dir = fake_home / "bin1"
+        mounted_dir2 = fake_home / "bin2"
+        forbidden_dir.mkdir(parents=True, exist_ok=True)
+        mounted_dir.mkdir(parents=True, exist_ok=True)
+        mounted_dir2.mkdir(parents=True, exist_ok=True)
+
+        hidden_gate = forbidden_dir / "shadow-gate"
+        hidden_gate.write_text("#!/bin/sh\necho hidden-v1\n", encoding="utf-8")
+        hidden_gate.chmod(0o755)
+        only_hidden = forbidden_dir / "only-hidden"
+        only_hidden.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        only_hidden.chmod(0o755)
+
+        visible_gate = mounted_dir / "shadow-gate"
+        visible_gate.write_text("#!/bin/sh\necho visible-v1\n", encoding="utf-8")
+        visible_gate.chmod(0o755)
+
+        (mounted_dir / "dangling-gate").symlink_to(hidden_gate)
+        real_dangling_fallback = mounted_dir2 / "dangling-gate"
+        real_dangling_fallback.write_text("#!/bin/sh\necho fallback-v1\n", encoding="utf-8")
+        real_dangling_fallback.chmod(0o755)
+
+        bad_shebang = mounted_dir / "bad-shebang"
+        bad_shebang.write_text(f"#!{hidden_gate}\nexit 0\n", encoding="utf-8")
+        bad_shebang.chmod(0o755)
+
+        q = self.w.queue()
+        q.env.pop("MQ_GATE_SANDBOX_CMD", None)
+        q.env["HOME"] = str(fake_home)
+        q.env["PATH"] = f"{forbidden_dir}:{mounted_dir}:{mounted_dir2}:/usr/bin:/bin"
+        with unittest.mock.patch.object(
+            type(q), "_bwrap_mode", return_value=("/usr/bin/bwrap", ("--unshare-all",))
+        ):
+            fp1, probs1 = q._gate_fingerprint("shadow-gate")
+            self.assertEqual(probs1, [])
+            self.assertTrue(fp1)
+            # Mutating the unmounted forbidden binary does not change the sandbox fingerprint.
+            hidden_gate.write_text("#!/bin/sh\necho hidden-v2\n", encoding="utf-8")
+            fp_after_hidden, probs_h = q._gate_fingerprint("shadow-gate")
+            self.assertEqual(probs_h, [])
+            self.assertEqual(fp_after_hidden, fp1)
+            # Mutating the mounted binary that bwrap actually executes invalidates the fingerprint.
+            visible_gate.write_text("#!/bin/sh\necho visible-v2\n", encoding="utf-8")
+            fp_after_visible, probs_v = q._gate_fingerprint("shadow-gate")
+            self.assertEqual(probs_v, [])
+            self.assertNotEqual(fp_after_visible, fp1)
+            # Executable present only in forbidden PATH dir fails closed.
+            fp_only, probs_only = q._gate_fingerprint("only-hidden")
+            self.assertEqual(fp_only, "")
+            self.assertTrue(probs_only)
+            # Dangling symlink into forbidden dir falls through to next mounted PATH dir, matching /bin/sh.
+            fp_d1, probs_d1 = q._gate_fingerprint("dangling-gate")
+            self.assertEqual(probs_d1, [])
+            self.assertTrue(fp_d1)
+            real_dangling_fallback.write_text("#!/bin/sh\necho fallback-v2\n", encoding="utf-8")
+            fp_d2, _ = q._gate_fingerprint("dangling-gate")
+            self.assertNotEqual(fp_d2, fp_d1)
+            # Shebang pointing into forbidden dir fails closed.
+            fp_sb, probs_sb = q._gate_fingerprint("bad-shebang")
+            self.assertEqual(fp_sb, "")
+            self.assertTrue(probs_sb)
 
 
 class GitLaneFreshness(Freshness):

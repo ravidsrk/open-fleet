@@ -3259,7 +3259,13 @@ class MergeQueue:
         return False
 
     def _fingerprint_shebang_chain(
-        self, raw_bytes: bytes, label: str, clean_path: str, _depth: int = 0
+        self,
+        raw_bytes: bytes,
+        label: str,
+        clean_path: str,
+        _depth: int = 0,
+        *,
+        ro_binds: tuple[str, ...] | None = None,
     ) -> tuple[list[dict[str, Any]], list[str]]:
         """Fingerprint `#!` interpreter chains (including `#!/usr/bin/env <prog>`) for executable scripts."""
         if _depth > 4:
@@ -3278,15 +3284,19 @@ class MergeQueue:
             return [], [f"{label}: relative or empty shebang interpreter {interp!r} cannot be statically fingerprinted"]
         chain: list[dict[str, Any]] = []
         probs: list[str] = []
+        i_real = self._sandbox_resolve_path(interp, ro_binds)
+        if not i_real:
+            return [], [f"{label}: shebang interpreter {interp!r} is not accessible inside gate sandbox"]
         try:
-            i_real = os.path.realpath(interp)
             i_st = os.stat(i_real)
             i_bytes = Path(i_real).read_bytes()
             i_sha = hashlib.sha256(i_bytes).hexdigest()
         except OSError as exc:
             return [], [f"{label}: shebang interpreter {interp!r}: {exc}"]
         chain.append({"interp": interp, "real": i_real, "dev": i_st.st_dev, "ino": i_st.st_ino, "sha256": i_sha})
-        sub_chain, sub_probs = self._fingerprint_shebang_chain(i_bytes, f"{label}#!{interp}", clean_path, _depth + 1)
+        sub_chain, sub_probs = self._fingerprint_shebang_chain(
+            i_bytes, f"{label}#!{interp}", clean_path, _depth + 1, ro_binds=ro_binds
+        )
         chain.extend(sub_chain)
         probs.extend(sub_probs)
         interp_names = {Path(interp).name, Path(i_real).name}
@@ -3296,12 +3306,17 @@ class MergeQueue:
                     f"{label}: shebang env argument {interp_arg!r} alters lookup or splits options and cannot be statically fingerprinted"
                 )
                 return chain, probs
-            env_resolved = interp_arg if os.path.isabs(interp_arg) else shutil.which(interp_arg, path=clean_path)
-            if not env_resolved:
-                probs.append(f"{label}: shebang env target {interp_arg!r} could not be resolved on gate PATH")
+            if os.path.isabs(interp_arg):
+                e_real = self._sandbox_resolve_path(interp_arg, ro_binds)
+            elif "/" in interp_arg:
+                probs.append(f"{label}: relative shebang env target {interp_arg!r} cannot be statically fingerprinted")
+                return chain, probs
+            else:
+                e_real = self._sandbox_which(interp_arg, clean_path, ro_binds)
+            if not e_real:
+                probs.append(f"{label}: shebang env target {interp_arg!r} could not be resolved on gate sandbox PATH")
                 return chain, probs
             try:
-                e_real = os.path.realpath(env_resolved)
                 e_st = os.stat(e_real)
                 e_bytes = Path(e_real).read_bytes()
                 e_sha = hashlib.sha256(e_bytes).hexdigest()
@@ -3312,7 +3327,7 @@ class MergeQueue:
                 "env_target": interp_arg, "real": e_real, "dev": e_st.st_dev, "ino": e_st.st_ino, "sha256": e_sha,
             })
             e_sub, e_probs = self._fingerprint_shebang_chain(
-                e_bytes, f"{label}#!env:{interp_arg}", clean_path, _depth + 1
+                e_bytes, f"{label}#!env:{interp_arg}", clean_path, _depth + 1, ro_binds=ro_binds
             )
             chain.extend(e_sub)
             probs.extend(e_probs)
@@ -3321,9 +3336,18 @@ class MergeQueue:
             probs.append(f"{label}: shebang option {interp_arg!r} cannot be statically fingerprinted")
         return chain, probs
 
-    def _read_sourced_gate_script(self, tok: str, cwd: Path | None, commit: str | None) -> str | None:
+    def _read_sourced_gate_script(
+        self,
+        tok: str,
+        cwd: Path | None,
+        commit: str | None,
+        ro_binds: tuple[str, ...] | None = None,
+    ) -> str | None:
         if os.path.isabs(tok):
-            p = Path(tok)
+            real_s = self._sandbox_resolve_path(tok, ro_binds)
+            if real_s is None:
+                return None
+            p = Path(real_s)
             if p.is_file():
                 try:
                     return p.read_text(encoding="utf-8", errors="replace")
@@ -3353,20 +3377,80 @@ class MergeQueue:
                 return None
         return None
 
-    def _gate_fingerprint(self, gate_cmd: str, cwd: Path | None = None,
-                          commit: str | None = None, _depth: int = 0) -> tuple[str, list[str]]:
+    def _gate_fingerprint(
+        self,
+        gate_cmd: str,
+        cwd: Path | None = None,
+        commit: str | None = None,
+        _depth: int = 0,
+        *,
+        _has_ro_binds: bool = False,
+        _ro_binds: tuple[str, ...] | None = None,
+    ) -> tuple[str, list[str]]:
         if _depth > 4:
             return "", ["sourced script recursion depth exceeded"]
         clean_path = self._clean_gate_path()
+        ro_binds = _ro_binds if _has_ro_binds else self._bwrap_ro_binds()
         items: list[dict[str, Any]] = []
         exec_tokens: set[str] = {"/bin/sh"}
         exes, sourced, problems = self._analyze_gate_command(gate_cmd, _exec_tokens=exec_tokens)
+        custom_sbx = (
+            self.env.get("MQ_GATE_SANDBOX_CMD")
+            or self.env.get("OPEN_FLEET_GATE_SANDBOX_CMD")
+            or ""
+        ).strip()
+        if _depth == 0 and custom_sbx:
+            try:
+                sbx_argv = shlex.split(custom_sbx)
+            except ValueError as exc:
+                sbx_argv = []
+                problems.append(f"MQ_GATE_SANDBOX_CMD: {exc}")
+            if not sbx_argv:
+                problems.append("MQ_GATE_SANDBOX_CMD: empty sandbox command")
+            else:
+                sbx_exe = sbx_argv[0]
+                if os.path.isabs(sbx_exe):
+                    sbx_real = self._sandbox_resolve_path(sbx_exe, None)
+                elif "/" in sbx_exe:
+                    sbx_real = None
+                    problems.append(f"MQ_GATE_SANDBOX_CMD: relative sandbox executable {sbx_exe!r} is not allowed")
+                else:
+                    sbx_real = self._sandbox_which(sbx_exe, clean_path, None)
+                if not sbx_real:
+                    problems.append(f"MQ_GATE_SANDBOX_CMD: {sbx_exe!r} could not be resolved")
+                else:
+                    try:
+                        sbx_st = os.stat(sbx_real)
+                        sbx_bytes = Path(sbx_real).read_bytes()
+                        sbx_sha = hashlib.sha256(sbx_bytes).hexdigest()
+                        sbx_sb, sbx_sb_probs = self._fingerprint_shebang_chain(
+                            sbx_bytes, "MQ_GATE_SANDBOX_CMD", clean_path, ro_binds=None
+                        )
+                        problems.extend(sbx_sb_probs)
+                        items.append({
+                            "tok": "__sandbox_cmd__",
+                            "argv": sbx_argv,
+                            "real": sbx_real,
+                            "dev": sbx_st.st_dev,
+                            "ino": sbx_st.st_ino,
+                            "sha256": sbx_sha,
+                            "shebang": sbx_sb,
+                        })
+                    except OSError as exc:
+                        problems.append(f"MQ_GATE_SANDBOX_CMD: {exc}")
         for src in sourced:
-            src_text = self._read_sourced_gate_script(src, cwd, commit)
+            src_text = self._read_sourced_gate_script(src, cwd, commit, ro_binds=ro_binds)
             if src_text is None:
                 problems.append(f"source {src}: script cannot be read for static executable analysis")
             else:
-                sub_fp, sub_probs = self._gate_fingerprint(src_text, cwd=cwd, commit=commit, _depth=_depth + 1)
+                sub_fp, sub_probs = self._gate_fingerprint(
+                    src_text,
+                    cwd=cwd,
+                    commit=commit,
+                    _depth=_depth + 1,
+                    _has_ro_binds=True,
+                    _ro_binds=ro_binds,
+                )
                 problems.extend(sub_probs)
                 items.append({"tok": f"source:{src}", "sub_fp": sub_fp})
         candidates = ["/bin/sh", *exes, *sourced]
@@ -3377,16 +3461,17 @@ class MergeQueue:
             seen.add(tok)
             if tok.startswith(("__func__:", "__opt_builtin__:")):
                 fn_name = tok.split(":", 1)[1]
-                shadow = shutil.which(fn_name, path=clean_path) if "/" not in fn_name else None
-                if not shadow:
+                s_real = self._sandbox_which(fn_name, clean_path, ro_binds) if "/" not in fn_name else None
+                if not s_real:
                     items.append({"tok": tok, "shadowed": None})
                     continue
                 try:
-                    s_real = os.path.realpath(shadow)
                     s_st = os.stat(s_real)
                     s_bytes = Path(s_real).read_bytes()
                     s_digest = hashlib.sha256(s_bytes).hexdigest()
-                    s_sb, s_sb_probs = self._fingerprint_shebang_chain(s_bytes, fn_name, clean_path)
+                    s_sb, s_sb_probs = self._fingerprint_shebang_chain(
+                        s_bytes, fn_name, clean_path, ro_binds=ro_binds
+                    )
                     problems.extend(s_sb_probs)
                     items.append({
                         "tok": tok,
@@ -3432,7 +3517,6 @@ class MergeQueue:
                 if not pkg_missing:
                     items.append({"tok": tok, "kind": "py_mod", "files": mod_digests})
                 continue
-            resolved: str | None
             if "/" in tok and not os.path.isabs(tok):
                 norm_tok = Path(os.path.normpath(tok)).as_posix()
                 rel_bytes, rel_err = self._read_rel_gate_bytes(tok, cwd, commit)
@@ -3441,30 +3525,37 @@ class MergeQueue:
                     problems.append(rel_err)
                 rel_item: dict[str, Any] = {"tok": norm_tok, "kind": "relative", "sha256": rel_digest}
                 if tok in exec_tokens and rel_bytes is not None:
-                    rel_sb, rel_sb_probs = self._fingerprint_shebang_chain(rel_bytes, norm_tok, clean_path)
+                    rel_sb, rel_sb_probs = self._fingerprint_shebang_chain(
+                        rel_bytes, norm_tok, clean_path, ro_binds=ro_binds
+                    )
                     problems.extend(rel_sb_probs)
                     rel_item["shebang"] = rel_sb
                 items.append(rel_item)
                 continue
-            resolved = tok if os.path.isabs(tok) else shutil.which(tok, path=clean_path)
-            if not resolved:
-                problems.append(f"{tok}: executable could not be resolved on gate PATH")
+            real_target = (
+                self._sandbox_resolve_path(tok, ro_binds)
+                if os.path.isabs(tok)
+                else self._sandbox_which(tok, clean_path, ro_binds)
+            )
+            if not real_target:
+                problems.append(f"{tok}: executable could not be resolved inside gate sandbox")
                 items.append({"tok": tok, "resolved": None})
                 continue
             try:
-                real = os.path.realpath(resolved)
-                st = os.stat(real)
-                raw_bytes = Path(real).read_bytes()
+                st = os.stat(real_target)
+                raw_bytes = Path(real_target).read_bytes()
                 digest = hashlib.sha256(raw_bytes).hexdigest()
                 ext_item: dict[str, Any] = {
                     "tok": tok,
-                    "real": real,
+                    "real": real_target,
                     "dev": st.st_dev,
                     "ino": st.st_ino,
                     "sha256": digest,
                 }
                 if tok in exec_tokens:
-                    ext_sb, ext_sb_probs = self._fingerprint_shebang_chain(raw_bytes, tok, clean_path)
+                    ext_sb, ext_sb_probs = self._fingerprint_shebang_chain(
+                        raw_bytes, tok, clean_path, ro_binds=ro_binds
+                    )
                     problems.extend(ext_sb_probs)
                     ext_item["shebang"] = ext_sb
                 items.append(ext_item)
@@ -3473,7 +3564,10 @@ class MergeQueue:
                 items.append({"tok": tok, "error": str(exc)})
         if problems:
             return "", problems
-        payload = json.dumps({"path": clean_path, "items": items}, sort_keys=True).encode("utf-8")
+        fp_obj: dict[str, Any] = {"path": clean_path, "items": items}
+        if ro_binds is not None:
+            fp_obj["ro_binds"] = list(ro_binds)
+        payload = json.dumps(fp_obj, sort_keys=True).encode("utf-8")
         return hashlib.sha256(payload).hexdigest(), problems
 
     @staticmethod
@@ -3583,6 +3677,256 @@ class MergeQueue:
 
     _BWRAP_SYS_DIRS: tuple[str, ...] = ("/usr", "/bin", "/lib", "/lib64", "/sbin", "/etc", "/opt")
 
+    def _bwrap_ro_binds(self) -> tuple[str, ...] | None:
+        custom_sbx = (
+            self.env.get("MQ_GATE_SANDBOX_CMD")
+            or self.env.get("OPEN_FLEET_GATE_SANDBOX_CMD")
+            or ""
+        ).strip()
+        if custom_sbx or self._bwrap_mode() is None:
+            return None
+        sys_dirs = self._BWRAP_SYS_DIRS
+        bound_ro: set[str] = set()
+        ordered_ro: list[str] = []
+        raw_forbidden = {
+            "/", "/root", "/home", "/Users", "/tmp", "/var", "/var/tmp", "/proc", "/sys", "/dev", "/run",
+        }
+        forbidden_roots: set[str] = set()
+        for r in raw_forbidden:
+            forbidden_roots.add(os.path.normpath(r))
+            if os.path.exists(r):
+                forbidden_roots.add(os.path.realpath(r))
+        strict_subtrees = tuple(
+            os.path.realpath(r) if os.path.exists(r) else r
+            for r in ("/root", "/proc", "/sys", "/dev", "/run")
+        )
+        sensitive_ancestors: set[str] = set()
+        forbidden_subtrees: list[str] = list(strict_subtrees)
+
+        def _mark_sensitive(raw_p: str, *, forbid_subtree: bool) -> None:
+            norm_p = os.path.normpath(raw_p)
+            if not norm_p or norm_p in (".", "/"):
+                return
+            real_p = os.path.realpath(norm_p)
+            for cand_p in (norm_p, real_p):
+                forbidden_roots.add(cand_p)
+                sensitive_ancestors.add(cand_p)
+                if forbid_subtree:
+                    forbidden_subtrees.append(cand_p)
+
+        orig_home = os.path.normpath(self.env.get("HOME") or "")
+        if orig_home and orig_home != ".":
+            _mark_sensitive(orig_home, forbid_subtree=False)
+            orig_home_real = os.path.realpath(orig_home)
+            for cred_sub in (
+                ".ssh", ".gnupg", ".aws", ".config", ".kube", ".docker",
+                ".codex", ".claude", ".gemini", ".netrc", ".git-credentials",
+                ".npmrc", ".pypirc", ".pgpass",
+            ):
+                _mark_sensitive(os.path.join(orig_home_real, cred_sub), forbid_subtree=True)
+        for env_cred_dir in ("XDG_CONFIG_HOME", "GH_CONFIG_DIR", "DOCKER_CONFIG", "GNUPGHOME"):
+            val_d = (self.env.get(env_cred_dir) or "").strip()
+            if val_d and os.path.isabs(val_d):
+                _mark_sensitive(val_d, forbid_subtree=True)
+        for env_cred_file in ("AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE", "NETRC", "NPM_CONFIG_USERCONFIG"):
+            val_f = (self.env.get(env_cred_file) or "").strip()
+            if val_f and os.path.isabs(val_f):
+                _mark_sensitive(val_f, forbid_subtree=True)
+        for kc_part in (self.env.get("KUBECONFIG") or "").split(os.pathsep):
+            kc_part = kc_part.strip()
+            if kc_part and os.path.isabs(kc_part):
+                _mark_sensitive(kc_part, forbid_subtree=True)
+        _mark_sensitive(str(Path(self.git.repo_dir).resolve()), forbid_subtree=True)
+        store_path = getattr(self.store, "path", None)
+        if store_path:
+            _mark_sensitive(str(Path(store_path).resolve().parent), forbid_subtree=True)
+
+        def _directly_forbidden(norm_s: str, real_s: str) -> bool:
+            if not real_s or norm_s in forbidden_roots or real_s in forbidden_roots:
+                return True
+            for p in (norm_s, real_s):
+                if any(p == sa for sa in sensitive_ancestors):
+                    return True
+                if any(p == sub or p.startswith(sub.rstrip("/") + "/") for sub in forbidden_subtrees):
+                    return True
+            return False
+
+        def _forbidden_bind_source(src: str) -> bool:
+            norm_s = os.path.normpath(src)
+            try:
+                real_s = os.path.realpath(norm_s)
+            except OSError:
+                return True
+            if _directly_forbidden(norm_s, real_s):
+                return True
+            norm_slash = norm_s.rstrip("/") + "/"
+            real_slash = real_s.rstrip("/") + "/"
+            if any(sa.startswith(norm_slash) or sa.startswith(real_slash) for sa in sensitive_ancestors):
+                return True
+            return False
+
+        def _collect_safe_sys_binds(src: str, depth: int = 0) -> list[str]:
+            norm_s = os.path.normpath(src)
+            if not os.path.exists(norm_s):
+                return []
+            try:
+                real_s = os.path.realpath(norm_s)
+            except OSError:
+                return []
+            if _directly_forbidden(norm_s, real_s):
+                return []
+            if not _forbidden_bind_source(norm_s):
+                return [norm_s]
+            if depth >= 6 or os.path.islink(norm_s) or not os.path.isdir(norm_s):
+                return []
+            try:
+                entries = sorted(os.listdir(norm_s))
+            except OSError:
+                return []
+            if len(entries) > 4096:
+                return []
+            out_binds: list[str] = []
+            for entry in entries:
+                out_binds.extend(_collect_safe_sys_binds(os.path.join(norm_s, entry), depth + 1))
+            return out_binds
+
+        for sys_dir in sys_dirs:
+            for safe_b in _collect_safe_sys_binds(sys_dir):
+                if safe_b not in bound_ro:
+                    bound_ro.add(safe_b)
+                    ordered_ro.append(safe_b)
+
+        for extra_dir in self._clean_gate_path().split(os.pathsep):
+            norm_extra = os.path.normpath(extra_dir)
+            if not norm_extra or not os.path.isabs(norm_extra) or not os.path.exists(norm_extra):
+                continue
+            if any(norm_extra == d or norm_extra.startswith(d.rstrip("/") + "/") for d in bound_ro):
+                continue
+            if _forbidden_bind_source(norm_extra):
+                continue
+            to_bind = [norm_extra]
+            if norm_extra.endswith("/bin"):
+                prefix = os.path.dirname(norm_extra)
+                if prefix and not _forbidden_bind_source(prefix):
+                    real_prefix_slash = os.path.realpath(prefix).rstrip("/") + "/"
+                    for sub in ("lib", "lib64", "libexec", "share"):
+                        cand_sub = os.path.join(prefix, sub)
+                        if (
+                            os.path.exists(cand_sub)
+                            and not _forbidden_bind_source(cand_sub)
+                            and os.path.realpath(cand_sub).startswith(real_prefix_slash)
+                        ):
+                            to_bind.append(cand_sub)
+            for bpath in to_bind:
+                if bpath not in bound_ro and not _forbidden_bind_source(bpath):
+                    bound_ro.add(bpath)
+                    ordered_ro.append(bpath)
+        return tuple(ordered_ro)
+
+    @classmethod
+    def _sandbox_resolve_path(cls, path_str: str, ro_binds: tuple[str, ...] | None) -> str | None:
+        if not path_str or not os.path.isabs(path_str):
+            return None
+        if ro_binds is None:
+            try:
+                real = os.path.realpath(path_str)
+                return real if os.path.exists(real) else None
+            except OSError:
+                return None
+        bind_map: dict[str, str] = {}
+        ancestors: set[str] = {"/"}
+        for b in ro_binds:
+            nb = os.path.normpath(b)
+            try:
+                bind_map[nb] = os.path.realpath(nb)
+            except OSError:
+                continue
+            parent = os.path.dirname(nb)
+            while parent and parent not in ancestors:
+                ancestors.add(parent)
+                nparent = os.path.dirname(parent)
+                if nparent == parent:
+                    break
+                parent = nparent
+        if not bind_map:
+            return None
+
+        def _active_mount(sbx_path: str) -> tuple[str, str] | None:
+            best: str | None = None
+            for mb in bind_map:
+                if sbx_path == mb or sbx_path.startswith(mb.rstrip("/") + "/"):
+                    if best is None or len(mb) > len(best):
+                        best = mb
+            return (best, bind_map[best]) if best is not None else None
+
+        pending = [seg for seg in os.path.normpath(path_str).split("/") if seg]
+        cur = "/"
+        hops = 0
+        while pending:
+            seg = pending.pop(0)
+            if seg in ("", "."):
+                continue
+            if seg == "..":
+                cur = os.path.dirname(cur.rstrip("/")) or "/"
+                continue
+            nxt = "/" + seg if cur == "/" else f"{cur}/{seg}"
+            mnt = _active_mount(nxt)
+            if mnt is None:
+                if nxt in ancestors:
+                    cur = nxt
+                    continue
+                return None
+            mb, host_root = mnt
+            if nxt == mb:
+                if not os.path.exists(host_root):
+                    return None
+                cur = nxt
+                continue
+            rel = nxt[len(mb.rstrip("/")) + 1:]
+            host_cur = os.path.join(host_root, rel)
+            if not os.path.lexists(host_cur):
+                return None
+            if os.path.islink(host_cur):
+                hops += 1
+                if hops > 40:
+                    return None
+                try:
+                    target = os.readlink(host_cur)
+                except OSError:
+                    return None
+                if os.path.isabs(target):
+                    cur = "/"
+                target_segs = [s for s in target.split("/") if s]
+                pending = target_segs + pending
+                continue
+            if pending and not os.path.isdir(host_cur):
+                return None
+            cur = nxt
+
+        final_mnt = _active_mount(cur)
+        if final_mnt is None:
+            return None
+        mb, host_root = final_mnt
+        host_final = host_root if cur == mb else os.path.join(host_root, cur[len(mb.rstrip("/")) + 1:])
+        return host_final if os.path.exists(host_final) else None
+
+    @classmethod
+    def _sandbox_which(cls, cmd_name: str, clean_path: str, ro_binds: tuple[str, ...] | None) -> str | None:
+        if not cmd_name or "/" in cmd_name:
+            return None
+        if ro_binds is None:
+            found = shutil.which(cmd_name, path=clean_path)
+            return os.path.realpath(found) if found else None
+        for raw_dir in clean_path.split(os.pathsep):
+            norm_dir = os.path.normpath(raw_dir) if raw_dir else ""
+            if not norm_dir or not os.path.isabs(norm_dir):
+                continue
+            cand = os.path.join(norm_dir, cmd_name)
+            resolved = cls._sandbox_resolve_path(cand, ro_binds)
+            if resolved and os.path.isfile(resolved) and os.access(resolved, os.X_OK):
+                return resolved
+        return None
+
     def _gate_exec_argv(self, gate_cmd: str, checkout: Path, gate_home: Path,
                         gate_tmp: Path) -> list[str]:
         req_sbx = (
@@ -3601,141 +3945,8 @@ class MergeQueue:
         if bw_mode is not None:
             bw, ns_flags = bw_mode
             cmd = [bw, *ns_flags, "--die-with-parent", "--proc", "/proc", "--dev", "/dev"]
-            sys_dirs = self._BWRAP_SYS_DIRS
-            bound_ro: set[str] = set()
-            raw_forbidden = {
-                "/", "/root", "/home", "/Users", "/tmp", "/var", "/var/tmp", "/proc", "/sys", "/dev", "/run",
-            }
-            forbidden_roots: set[str] = set()
-            for r in raw_forbidden:
-                forbidden_roots.add(os.path.normpath(r))
-                if os.path.exists(r):
-                    forbidden_roots.add(os.path.realpath(r))
-            strict_subtrees = tuple(
-                os.path.realpath(r) if os.path.exists(r) else r
-                for r in ("/root", "/proc", "/sys", "/dev", "/run")
-            )
-            sensitive_ancestors: set[str] = set()
-            forbidden_subtrees: list[str] = list(strict_subtrees)
-
-            def _mark_sensitive(raw_p: str, *, forbid_subtree: bool) -> None:
-                norm_p = os.path.normpath(raw_p)
-                if not norm_p or norm_p in (".", "/"):
-                    return
-                real_p = os.path.realpath(norm_p)
-                for cand_p in (norm_p, real_p):
-                    forbidden_roots.add(cand_p)
-                    sensitive_ancestors.add(cand_p)
-                    if forbid_subtree:
-                        forbidden_subtrees.append(cand_p)
-
-            orig_home = os.path.normpath(self.env.get("HOME") or "")
-            if orig_home and orig_home != ".":
-                _mark_sensitive(orig_home, forbid_subtree=False)
-                orig_home_real = os.path.realpath(orig_home)
-                for cred_sub in (
-                    ".ssh", ".gnupg", ".aws", ".config", ".kube", ".docker",
-                    ".codex", ".claude", ".gemini", ".netrc", ".git-credentials",
-                    ".npmrc", ".pypirc", ".pgpass",
-                ):
-                    _mark_sensitive(os.path.join(orig_home_real, cred_sub), forbid_subtree=True)
-            for env_cred_dir in ("XDG_CONFIG_HOME", "GH_CONFIG_DIR", "DOCKER_CONFIG", "GNUPGHOME"):
-                val_d = (self.env.get(env_cred_dir) or "").strip()
-                if val_d and os.path.isabs(val_d):
-                    _mark_sensitive(val_d, forbid_subtree=True)
-            for env_cred_file in ("AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE", "NETRC", "NPM_CONFIG_USERCONFIG"):
-                val_f = (self.env.get(env_cred_file) or "").strip()
-                if val_f and os.path.isabs(val_f):
-                    _mark_sensitive(val_f, forbid_subtree=True)
-            for kc_part in (self.env.get("KUBECONFIG") or "").split(os.pathsep):
-                kc_part = kc_part.strip()
-                if kc_part and os.path.isabs(kc_part):
-                    _mark_sensitive(kc_part, forbid_subtree=True)
-            _mark_sensitive(str(Path(self.git.repo_dir).resolve()), forbid_subtree=True)
-            store_path = getattr(self.store, "path", None)
-            if store_path:
-                _mark_sensitive(str(Path(store_path).resolve().parent), forbid_subtree=True)
-
-            def _directly_forbidden(norm_s: str, real_s: str) -> bool:
-                if not real_s or norm_s in forbidden_roots or real_s in forbidden_roots:
-                    return True
-                for p in (norm_s, real_s):
-                    if any(p == sa for sa in sensitive_ancestors):
-                        return True
-                    if any(p == sub or p.startswith(sub.rstrip("/") + "/") for sub in forbidden_subtrees):
-                        return True
-                return False
-
-            def _forbidden_bind_source(src: str) -> bool:
-                norm_s = os.path.normpath(src)
-                try:
-                    real_s = os.path.realpath(norm_s)
-                except OSError:
-                    return True
-                if _directly_forbidden(norm_s, real_s):
-                    return True
-                norm_slash = norm_s.rstrip("/") + "/"
-                real_slash = real_s.rstrip("/") + "/"
-                if any(sa.startswith(norm_slash) or sa.startswith(real_slash) for sa in sensitive_ancestors):
-                    return True
-                return False
-
-            def _collect_safe_sys_binds(src: str, depth: int = 0) -> list[str]:
-                norm_s = os.path.normpath(src)
-                if not os.path.exists(norm_s):
-                    return []
-                try:
-                    real_s = os.path.realpath(norm_s)
-                except OSError:
-                    return []
-                if _directly_forbidden(norm_s, real_s):
-                    return []
-                if not _forbidden_bind_source(norm_s):
-                    return [norm_s]
-                if depth >= 6 or os.path.islink(norm_s) or not os.path.isdir(norm_s):
-                    return []
-                try:
-                    entries = sorted(os.listdir(norm_s))
-                except OSError:
-                    return []
-                if len(entries) > 4096:
-                    return []
-                out_binds: list[str] = []
-                for entry in entries:
-                    out_binds.extend(_collect_safe_sys_binds(os.path.join(norm_s, entry), depth + 1))
-                return out_binds
-
-            for sys_dir in sys_dirs:
-                for safe_b in _collect_safe_sys_binds(sys_dir):
-                    if safe_b not in bound_ro:
-                        bound_ro.add(safe_b)
-                        cmd += ["--ro-bind", safe_b, safe_b]
-
-            for extra_dir in self._clean_gate_path().split(os.pathsep):
-                norm_extra = os.path.normpath(extra_dir)
-                if not norm_extra or not os.path.isabs(norm_extra) or not os.path.exists(norm_extra):
-                    continue
-                if any(norm_extra == d or norm_extra.startswith(d.rstrip("/") + "/") for d in bound_ro):
-                    continue
-                if _forbidden_bind_source(norm_extra):
-                    continue
-                to_bind = [norm_extra]
-                if norm_extra.endswith("/bin"):
-                    prefix = os.path.dirname(norm_extra)
-                    if prefix and not _forbidden_bind_source(prefix):
-                        real_prefix_slash = os.path.realpath(prefix).rstrip("/") + "/"
-                        for sub in ("lib", "lib64", "libexec", "share"):
-                            cand_sub = os.path.join(prefix, sub)
-                            if (
-                                os.path.exists(cand_sub)
-                                and not _forbidden_bind_source(cand_sub)
-                                and os.path.realpath(cand_sub).startswith(real_prefix_slash)
-                            ):
-                                to_bind.append(cand_sub)
-                for bpath in to_bind:
-                    if bpath not in bound_ro and not _forbidden_bind_source(bpath):
-                        bound_ro.add(bpath)
-                        cmd += ["--ro-bind", bpath, bpath]
+            for bpath in self._bwrap_ro_binds() or ():
+                cmd += ["--ro-bind", bpath, bpath]
             cmd += [
                 "--bind", str(checkout), str(checkout),
                 "--bind", str(gate_home), str(gate_home),
