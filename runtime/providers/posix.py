@@ -3460,15 +3460,35 @@ if {repr(self.backend)} == "cmux":
     def _purge_private_inbox(worktree: str | None) -> None:
         if not worktree:
             return
+        uid = os.getuid()
+        dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        wt_fd = -1
+        inbox_fd = -1
         with contextlib.suppress(OSError):
-            inbox_dir = Path(worktree) / ".open-fleet"
-            if inbox_dir.is_symlink():
-                return
-            inbox_file = inbox_dir / "inbox.jsonl"
-            if inbox_file.exists() or inbox_file.is_symlink():
-                inbox_file.unlink(missing_ok=True)
-            if inbox_dir.is_dir() and not any(inbox_dir.iterdir()):
-                inbox_dir.rmdir()
+            try:
+                wt_fd = os.open(worktree, dir_flags)
+                wt_st = os.fstat(wt_fd)
+                if not stat.S_ISDIR(wt_st.st_mode) or wt_st.st_uid != uid:
+                    return
+                inbox_fd = os.open(".open-fleet", dir_flags, dir_fd=wt_fd)
+                in_st = os.fstat(inbox_fd)
+                if not stat.S_ISDIR(in_st.st_mode) or in_st.st_uid != uid:
+                    return
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink("inbox.jsonl", dir_fd=inbox_fd)
+                with os.scandir(os.dup(inbox_fd)) as it:
+                    empty = next(it, None) is None
+                os.close(inbox_fd)
+                inbox_fd = -1
+                if empty:
+                    os.rmdir(".open-fleet", dir_fd=wt_fd)
+            finally:
+                if inbox_fd >= 0:
+                    with contextlib.suppress(OSError):
+                        os.close(inbox_fd)
+                if wt_fd >= 0:
+                    with contextlib.suppress(OSError):
+                        os.close(wt_fd)
 
     def worker_fence(
         self,

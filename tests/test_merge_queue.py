@@ -920,6 +920,51 @@ class GateRunsIsolated(QueueCase):
         self.assertNotEqual(rc_m, 0, out_m)
         self.assertEqual(out_m.get("code"), "gate_not_run", out_m)
 
+    def test_shebang_interpreter_replacement_invalidates_saved_plan(self):
+        tools_dir = self.w.tmp / "shebang-interp"
+        tools_dir.mkdir(parents=True, exist_ok=True)
+        interp = tools_dir / "py-chain"
+        interp.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        interp.chmod(0o755)
+        gate_script = tools_dir / "run-gate"
+        gate_script.write_text(f"#!{interp}\n# script body unchanged\n", encoding="utf-8")
+        gate_script.chmod(0o755)
+
+        tok = self.acquire("c-shebang")
+        self.board(tok, self.w.unit("shebang-unit"))
+        rc_p, out_p = self.w.cli("plan", "--token", tok, "--gate-cmd", str(gate_script))
+        self.assertEqual(rc_p, 0, out_p)
+        self.assertEqual(out_p["planned"][0]["result"], "tested", out_p)
+
+        interp.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        rc_m, out_m = self.w.cli("merge", "--token", tok, "--require-gate", str(gate_script))
+        self.assertNotEqual(rc_m, 0, out_m)
+        self.assertEqual(out_m.get("code"), "gate_not_run", out_m)
+
+        env_prog = tools_dir / "env-chain-prog"
+        env_prog.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        env_prog.chmod(0o755)
+        env_script = tools_dir / "run-env-gate"
+        env_script.write_text("#!/usr/bin/env env-chain-prog\n# script body unchanged\n", encoding="utf-8")
+        env_script.chmod(0o755)
+        saved_path = self.w.env.get("PATH")
+        self.w.env["PATH"] = f"{tools_dir}:{saved_path or '/usr/bin:/bin'}"
+        try:
+            tok_env = self.acquire("c-shebang-env", "--takeover")
+            self.board(tok_env, self.w.unit("shebang-env-unit"))
+            rc_ep, out_ep = self.w.cli("plan", "--token", tok_env, "--gate-cmd", str(env_script))
+            self.assertEqual(rc_ep, 0, out_ep)
+            self.assertEqual(out_ep["planned"][0]["result"], "tested", out_ep)
+            env_prog.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            rc_em, out_em = self.w.cli("merge", "--token", tok_env, "--require-gate", str(env_script))
+            self.assertNotEqual(rc_em, 0, out_em)
+            self.assertEqual(out_em.get("code"), "gate_not_run", out_em)
+        finally:
+            if saved_path is None:
+                self.w.env.pop("PATH", None)
+            else:
+                self.w.env["PATH"] = saved_path
+
 
 class GitLaneFreshness(Freshness):
     mode = "git"

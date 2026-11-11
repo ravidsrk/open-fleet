@@ -2849,6 +2849,63 @@ class EndToEndMutationGreen(MutationFixture):
         self.assertTrue(any('proof executable changed before control phase' in f for f in fatal),
                         fatal)
 
+    def test_versioned_pypy_unittest_discovery_and_shebang_interpreter_pinning(self):
+        self.write('checks/__init__.py', '')
+        self.write('checks/probe.py', 'import unittest\n')
+        probe_head = self.commit('add checks/probe.py')
+        try:
+            self.assertTrue(
+                verify._is_oracle_path(
+                    'checks/probe.py',
+                    nc_command='pypy3.11 -m unittest checks.probe',
+                    head=probe_head,
+                )
+            )
+            self.assertTrue(
+                verify._is_oracle_path(
+                    'checks/probe.py',
+                    nc_command='pypy-3.10 -m pytest checks/probe.py',
+                    head=probe_head,
+                )
+            )
+        finally:
+            self.git('reset', '--hard', self.head_sha)
+            shutil.rmtree(self.repo / 'checks', ignore_errors=True)
+
+        wt_interp = self.repo / 'bin' / 'local-interp'
+        wt_interp.parent.mkdir(parents=True, exist_ok=True)
+        wt_interp.write_text('#!/bin/sh\nexit 0\n', encoding='utf-8')
+        wt_interp.chmod(0o755)
+        try:
+            with tempfile.TemporaryDirectory() as ext_dir:
+                os.chmod(ext_dir, 0o755)
+                ext_root = Path(ext_dir)
+                bad_wrap = ext_root / 'wrap-repo-interp'
+                bad_wrap.write_text(f'#!{wt_interp}\nexit 0\n', encoding='utf-8')
+                bad_wrap.chmod(0o755)
+                recs_repo, err_repo = verify._Authority.nc_exec_identity([str(bad_wrap)], str(self.repo))
+                self.assertIsNone(recs_repo)
+                self.assertIn('resolves inside the repository worktree', err_repo)
+
+                ext_interp = ext_root / 'custom-interp'
+                ext_interp.write_text('#!/bin/sh\nexit 0\n', encoding='utf-8')
+                ext_interp.chmod(0o755)
+                good_wrap = ext_root / 'wrap-ext-interp'
+                good_wrap.write_text(f'#!{ext_interp}\nexit 0\n', encoding='utf-8')
+                good_wrap.chmod(0o755)
+                recs_init, err_init = verify._Authority.nc_exec_identity([str(good_wrap)], str(self.repo))
+                self.assertIsNone(err_init, err_init)
+                self.assertIsNotNone(recs_init)
+
+                ext_interp.write_text('#!/bin/sh\nexit 1\n', encoding='utf-8')
+                recs_after, err_after = verify._Authority.nc_exec_identity(
+                    [str(good_wrap)], str(self.repo), expected=recs_init, when='before control'
+                )
+                self.assertIsNone(recs_after)
+                self.assertIn('proof executable changed before control phase', err_after)
+        finally:
+            shutil.rmtree(self.repo / 'bin', ignore_errors=True)
+
 
 _edspec = importlib.util.spec_from_file_location("ed25519", ROOT / "runtime" / "scripts" / "ed25519.py")
 ed = importlib.util.module_from_spec(_edspec)

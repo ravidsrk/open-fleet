@@ -2036,7 +2036,9 @@ class MergeQueue:
         return tokens, problems
 
     @classmethod
-    def _analyze_gate_command(cls, gate_cmd: str, _depth: int = 0) -> tuple[list[str], list[str], list[str]]:
+    def _analyze_gate_command(
+        cls, gate_cmd: str, _depth: int = 0, _exec_tokens: set[str] | None = None
+    ) -> tuple[list[str], list[str], list[str]]:
         """Extract `(executables, sourced_files, problems)` across simple and compound shell syntax."""
         if _depth > 6:
             return [], [], ["gate command recursion depth exceeded"]
@@ -2047,7 +2049,7 @@ class MergeQueue:
         sourced: list[str] = []
         problems: list[str] = list(sub_problems)
         for sub in subs:
-            s_exe, s_src, s_prob = cls._analyze_gate_command(sub, _depth + 1)
+            s_exe, s_src, s_prob = cls._analyze_gate_command(sub, _depth + 1, _exec_tokens=_exec_tokens)
             executables.extend(s_exe)
             sourced.extend(s_src)
             problems.extend(s_prob)
@@ -2258,6 +2260,8 @@ class MergeQueue:
                     break
                 if cw_base == "env":
                     executables.append(cw)
+                    if _exec_tokens is not None:
+                        _exec_tokens.add(cw)
                     force_external = True
                     wi += 1
                     broke_env_s = False
@@ -2377,6 +2381,8 @@ class MergeQueue:
                     continue
                 if cw_base == "nice":
                     executables.append(cw)
+                    if _exec_tokens is not None:
+                        _exec_tokens.add(cw)
                     force_external = True
                     wi += 1
                     while wi < len(cmd_words) and cmd_words[wi][0].startswith("-") and len(cmd_words[wi][0]) > 1:
@@ -2405,6 +2411,8 @@ class MergeQueue:
                     continue
                 if cw_base == "timeout":
                     executables.append(cw)
+                    if _exec_tokens is not None:
+                        _exec_tokens.add(cw)
                     force_external = True
                     wi += 1
                     timeout_bad = False
@@ -2455,6 +2463,8 @@ class MergeQueue:
                     continue
                 if cw_base == "nohup":
                     executables.append(cw)
+                    if _exec_tokens is not None:
+                        _exec_tokens.add(cw)
                     force_external = True
                     wi += 1
                     while wi < len(cmd_words) and cmd_words[wi][0].startswith("-") and len(cmd_words[wi][0]) > 1:
@@ -2717,7 +2727,7 @@ class MergeQueue:
                     if is_dynamic(t_flag):
                         problems.append("trap: dynamic action string cannot be statically fingerprinted")
                     elif t_act and t_act != "-" and not t_act.isdigit():
-                        e2, s2, p2 = cls._analyze_gate_command(t_act, _depth + 1)
+                        e2, s2, p2 = cls._analyze_gate_command(t_act, _depth + 1, _exec_tokens=_exec_tokens)
                         executables.extend(e2)
                         sourced.extend(s2)
                         problems.extend(p2)
@@ -2764,6 +2774,8 @@ class MergeQueue:
             if force_external:
                 if final_word:
                     executables.append(final_word)
+                    if _exec_tokens is not None:
+                        _exec_tokens.add(final_word)
             elif final_word in defined_funcs and not skip_funcs:
                 executables.append(f"__func__:{final_word}")
             elif final_word and not (
@@ -2771,6 +2783,8 @@ class MergeQueue:
                 or (is_unquoted(final_flag) and final_word in cls._SHELL_KEYWORDS)
             ):
                 executables.append(final_word)
+                if _exec_tokens is not None:
+                    _exec_tokens.add(final_word)
             final_base = Path(final_word).name
             if final_base == "find" and any(
                 fa in ("-exec", "-execdir", "-ok", "-okdir") or is_dynamic(ff)
@@ -2778,7 +2792,9 @@ class MergeQueue:
             ):
                 problems.append("find -exec/-ok or dynamic predicate dispatches commands that cannot be statically fingerprinted")
             elif cls._is_shell_name(final_base):
-                s_src, s_exe, s_prob = cls._analyze_shell_invocation(final_word, cmd_words[wi + 1:], _depth)
+                s_src, s_exe, s_prob = cls._analyze_shell_invocation(
+                    final_word, cmd_words[wi + 1:], _depth, _exec_tokens=_exec_tokens
+                )
                 executables.extend(s_exe)
                 sourced.extend(s_src)
                 problems.extend(s_prob)
@@ -2796,7 +2812,11 @@ class MergeQueue:
 
     @classmethod
     def _analyze_shell_invocation(
-        cls, shell_word: str, args: list[tuple[str, Any]], _depth: int
+        cls,
+        shell_word: str,
+        args: list[tuple[str, Any]],
+        _depth: int,
+        _exec_tokens: set[str] | None = None,
     ) -> tuple[list[str], list[str], list[str]]:
         """Analyze `sh`/`bash`/etc. invocations (`-c <cmd>` or `<script>` operand), failing closed on
         stdin/interactive/login modes or ambiguous flags."""
@@ -2868,7 +2888,7 @@ class MergeQueue:
                     if is_dynamic(sub_flag):
                         problems.append(f"{shell_word} -c: dynamic script cannot be fingerprinted")
                     else:
-                        e2, s2, p2 = cls._analyze_gate_command(sub_script, _depth + 1)
+                        e2, s2, p2 = cls._analyze_gate_command(sub_script, _depth + 1, _exec_tokens=_exec_tokens)
                         executables.extend(e2)
                         sourced.extend(s2)
                         problems.extend(p2)
@@ -3187,8 +3207,8 @@ class MergeQueue:
             *sourced,
         ]
 
-    def _hash_rel_gate_file(self, rel_tok: str, cwd: Path | None, commit: str | None) -> tuple[str | None, str | None]:
-        """Return `(sha256_hex, err)` for a repo-relative file in `cwd` (plan) or `commit` (plan_passed)."""
+    def _read_rel_gate_bytes(self, rel_tok: str, cwd: Path | None, commit: str | None) -> tuple[bytes | None, str | None]:
+        """Return `(raw_bytes, err)` for a repo-relative file in `cwd` (plan) or `commit` (plan_passed)."""
         norm_tok = Path(os.path.normpath(rel_tok)).as_posix()
         if os.path.isabs(rel_tok) or norm_tok in ("", ".") or ".." in Path(norm_tok).parts:
             return None, f"{rel_tok}: escapes gate checkout"
@@ -3200,7 +3220,7 @@ class MergeQueue:
             if not cand.is_file():
                 return None, f"{rel_tok}: relative executable or script not found in gate checkout"
             try:
-                return hashlib.sha256(cand.read_bytes()).hexdigest(), None
+                return cand.read_bytes(), None
             except OSError as exc:
                 return None, f"{rel_tok}: {exc}"
         if commit:
@@ -3211,11 +3231,95 @@ class MergeQueue:
                     capture_output=True, env=self.git.env, timeout=30,
                 )
                 if proc.returncode == 0:
-                    return hashlib.sha256(proc.stdout).hexdigest(), None
+                    return proc.stdout, None
             except (OSError, subprocess.SubprocessError) as exc:
                 return None, f"{rel_tok}@{commit}: {exc}"
             return None, f"{rel_tok}: relative executable or script not found in commit {commit}"
         return None, f"{rel_tok}: relative executable or script requires gate checkout or commit context"
+
+    def _hash_rel_gate_file(self, rel_tok: str, cwd: Path | None, commit: str | None) -> tuple[str | None, str | None]:
+        """Return `(sha256_hex, err)` for a repo-relative file in `cwd` (plan) or `commit` (plan_passed)."""
+        raw_bytes, err = self._read_rel_gate_bytes(rel_tok, cwd, commit)
+        if err or raw_bytes is None:
+            return None, err
+        return hashlib.sha256(raw_bytes).hexdigest(), None
+
+    @staticmethod
+    def _shebang_arg_allowed(interp_names: set[str], interp_arg: str) -> bool:
+        if not interp_arg:
+            return True
+        if any(re.fullmatch(r"(?:python|pypy)(?:[-.]?\d+(?:\.\d+)*)?", n) for n in interp_names):
+            return bool(re.fullmatch(r"-[BEIOPSsuq]+", interp_arg))
+        if any(re.fullmatch(r"(?:sh|bash|dash|ash|ksh|mksh|zsh|yash)(?:[-.]?\d+(?:\.\d+)*)?", n) for n in interp_names):
+            return bool(re.fullmatch(r"-[abefhmnuvxBCEHP]+", interp_arg))
+        if any(re.fullmatch(r"perl(?:[-.]?\d+(?:\.\d+)*)?", n) for n in interp_names):
+            return bool(re.fullmatch(r"-[wTt]+", interp_arg))
+        if any(re.fullmatch(r"(?:[gmnb]?awk|sed|[gs]sed)(?:[-.]?\d+(?:\.\d+)*)?", n) for n in interp_names):
+            return interp_arg == "-f"
+        return False
+
+    def _fingerprint_shebang_chain(
+        self, raw_bytes: bytes, label: str, clean_path: str, _depth: int = 0
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        """Fingerprint `#!` interpreter chains (including `#!/usr/bin/env <prog>`) for executable scripts."""
+        if _depth > 4:
+            return [], [f"{label}: shebang recursion depth exceeded"]
+        if not raw_bytes.startswith(b"#!"):
+            return [], []
+        nl = raw_bytes.find(b"\n")
+        first_line = raw_bytes[2:nl] if nl != -1 else raw_bytes[2:]
+        if b"\r" in first_line or b"\x00" in first_line or (nl == -1 and len(raw_bytes) > 255) or len(first_line) > 253:
+            return [], [f"{label}: malformed or CR-terminated shebang cannot be statically fingerprinted"]
+        line_str = first_line.decode("utf-8", errors="surrogateescape").strip(" \t")
+        parts = re.split(r"[ \t]+", line_str, maxsplit=1) if line_str else []
+        interp = parts[0] if parts else ""
+        interp_arg = parts[1].strip(" \t") if len(parts) > 1 else ""
+        if not interp or not interp.startswith("/"):
+            return [], [f"{label}: relative or empty shebang interpreter {interp!r} cannot be statically fingerprinted"]
+        chain: list[dict[str, Any]] = []
+        probs: list[str] = []
+        try:
+            i_real = os.path.realpath(interp)
+            i_st = os.stat(i_real)
+            i_bytes = Path(i_real).read_bytes()
+            i_sha = hashlib.sha256(i_bytes).hexdigest()
+        except OSError as exc:
+            return [], [f"{label}: shebang interpreter {interp!r}: {exc}"]
+        chain.append({"interp": interp, "real": i_real, "dev": i_st.st_dev, "ino": i_st.st_ino, "sha256": i_sha})
+        sub_chain, sub_probs = self._fingerprint_shebang_chain(i_bytes, f"{label}#!{interp}", clean_path, _depth + 1)
+        chain.extend(sub_chain)
+        probs.extend(sub_probs)
+        interp_names = {Path(interp).name, Path(i_real).name}
+        if "env" in interp_names:
+            if not interp_arg or interp_arg.startswith("-") or "=" in interp_arg or any(c in interp_arg for c in " \t"):
+                probs.append(
+                    f"{label}: shebang env argument {interp_arg!r} alters lookup or splits options and cannot be statically fingerprinted"
+                )
+                return chain, probs
+            env_resolved = interp_arg if os.path.isabs(interp_arg) else shutil.which(interp_arg, path=clean_path)
+            if not env_resolved:
+                probs.append(f"{label}: shebang env target {interp_arg!r} could not be resolved on gate PATH")
+                return chain, probs
+            try:
+                e_real = os.path.realpath(env_resolved)
+                e_st = os.stat(e_real)
+                e_bytes = Path(e_real).read_bytes()
+                e_sha = hashlib.sha256(e_bytes).hexdigest()
+            except OSError as exc:
+                probs.append(f"{label}: shebang env target {interp_arg!r}: {exc}")
+                return chain, probs
+            chain.append({
+                "env_target": interp_arg, "real": e_real, "dev": e_st.st_dev, "ino": e_st.st_ino, "sha256": e_sha,
+            })
+            e_sub, e_probs = self._fingerprint_shebang_chain(
+                e_bytes, f"{label}#!env:{interp_arg}", clean_path, _depth + 1
+            )
+            chain.extend(e_sub)
+            probs.extend(e_probs)
+            return chain, probs
+        if interp_arg and not self._shebang_arg_allowed(interp_names, interp_arg):
+            probs.append(f"{label}: shebang option {interp_arg!r} cannot be statically fingerprinted")
+        return chain, probs
 
     def _read_sourced_gate_script(self, tok: str, cwd: Path | None, commit: str | None) -> str | None:
         if os.path.isabs(tok):
@@ -3255,7 +3359,8 @@ class MergeQueue:
             return "", ["sourced script recursion depth exceeded"]
         clean_path = self._clean_gate_path()
         items: list[dict[str, Any]] = []
-        exes, sourced, problems = self._analyze_gate_command(gate_cmd)
+        exec_tokens: set[str] = {"/bin/sh"}
+        exes, sourced, problems = self._analyze_gate_command(gate_cmd, _exec_tokens=exec_tokens)
         for src in sourced:
             src_text = self._read_sourced_gate_script(src, cwd, commit)
             if src_text is None:
@@ -3279,9 +3384,17 @@ class MergeQueue:
                 try:
                     s_real = os.path.realpath(shadow)
                     s_st = os.stat(s_real)
-                    s_digest = hashlib.sha256(Path(s_real).read_bytes()).hexdigest()
+                    s_bytes = Path(s_real).read_bytes()
+                    s_digest = hashlib.sha256(s_bytes).hexdigest()
+                    s_sb, s_sb_probs = self._fingerprint_shebang_chain(s_bytes, fn_name, clean_path)
+                    problems.extend(s_sb_probs)
                     items.append({
-                        "tok": tok, "real": s_real, "dev": s_st.st_dev, "ino": s_st.st_ino, "sha256": s_digest,
+                        "tok": tok,
+                        "real": s_real,
+                        "dev": s_st.st_dev,
+                        "ino": s_st.st_ino,
+                        "sha256": s_digest,
+                        "shebang": s_sb,
                     })
                 except OSError as exc:
                     problems.append(f"{fn_name}: {exc}")
@@ -3322,10 +3435,16 @@ class MergeQueue:
             resolved: str | None
             if "/" in tok and not os.path.isabs(tok):
                 norm_tok = Path(os.path.normpath(tok)).as_posix()
-                rel_digest, rel_err = self._hash_rel_gate_file(tok, cwd, commit)
+                rel_bytes, rel_err = self._read_rel_gate_bytes(tok, cwd, commit)
+                rel_digest = hashlib.sha256(rel_bytes).hexdigest() if rel_bytes is not None else None
                 if rel_err:
                     problems.append(rel_err)
-                items.append({"tok": norm_tok, "kind": "relative", "sha256": rel_digest})
+                rel_item: dict[str, Any] = {"tok": norm_tok, "kind": "relative", "sha256": rel_digest}
+                if tok in exec_tokens and rel_bytes is not None:
+                    rel_sb, rel_sb_probs = self._fingerprint_shebang_chain(rel_bytes, norm_tok, clean_path)
+                    problems.extend(rel_sb_probs)
+                    rel_item["shebang"] = rel_sb
+                items.append(rel_item)
                 continue
             resolved = tok if os.path.isabs(tok) else shutil.which(tok, path=clean_path)
             if not resolved:
@@ -3335,14 +3454,20 @@ class MergeQueue:
             try:
                 real = os.path.realpath(resolved)
                 st = os.stat(real)
-                digest = hashlib.sha256(Path(real).read_bytes()).hexdigest()
-                items.append({
+                raw_bytes = Path(real).read_bytes()
+                digest = hashlib.sha256(raw_bytes).hexdigest()
+                ext_item: dict[str, Any] = {
                     "tok": tok,
                     "real": real,
                     "dev": st.st_dev,
                     "ino": st.st_ino,
                     "sha256": digest,
-                })
+                }
+                if tok in exec_tokens:
+                    ext_sb, ext_sb_probs = self._fingerprint_shebang_chain(raw_bytes, tok, clean_path)
+                    problems.extend(ext_sb_probs)
+                    ext_item["shebang"] = ext_sb
+                items.append(ext_item)
             except OSError as exc:
                 problems.append(f"{tok}: {exc}")
                 items.append({"tok": tok, "error": str(exc)})

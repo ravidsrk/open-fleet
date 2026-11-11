@@ -1692,6 +1692,90 @@ class _Authority:
         return [tok for _, tok in indexed], None
 
     @classmethod
+    def _verify_exec_file_and_shebang(cls, resolved, label, roots, search_path, _depth=0):
+        """Verify executable `resolved` and any `#!` interpreter chain, returning `(chain, err)`."""
+        if _depth > 4:
+            return None, f"proof executable {label!r} exceeds shebang nesting depth; fail-closed (#750 C19)"
+        try:
+            abs_path = os.path.abspath(resolved)
+            nodes = list(cls._nodes(abs_path))
+            real = Path(abs_path).resolve(strict=True)
+            st = os.stat(real)
+            if not stat.S_ISREG(st.st_mode) or not os.access(real, os.X_OK):
+                return None, f"proof executable {label!r} is not an executable regular file ({real})"
+            if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                return None, (f"proof executable {label!r} ({real}) is group- or world-writable; "
+                              "fail-closed (#750 C19)")
+            for n, nst in nodes:
+                if stat.S_ISLNK(nst.st_mode):
+                    continue
+                if (nst.st_mode & (stat.S_IWGRP | stat.S_IWOTH)) and not (
+                        stat.S_ISDIR(nst.st_mode) and (nst.st_mode & stat.S_ISVTX)):
+                    return None, (f"proof executable {label!r} resolves through writable node {n}; "
+                                  "fail-closed (#750 C19)")
+            raw_bytes = real.read_bytes()
+            digest = hashlib.sha256(raw_bytes).hexdigest()
+        except (OSError, RuntimeError) as exc:
+            return None, f"proof executable {label!r} cannot be verified ({exc})"
+        for r in roots:
+            if real == r or r in real.parents or any(n == r or r in n.parents for n, _ in nodes):
+                return None, (f"proof executable {label!r} resolves inside the repository "
+                              f"worktree ({real}); fail-closed")
+        hop_sig = tuple((str(n), stat.S_IFMT(nst.st_mode), nst.st_dev, nst.st_ino)
+                        for n, nst in nodes)
+        self_rec = (abs_path, str(real), st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, digest, hop_sig)
+        if not raw_bytes.startswith(b"#!"):
+            return (self_rec,), None
+        nl = raw_bytes.find(b"\n")
+        first_line = raw_bytes[2:nl] if nl != -1 else raw_bytes[2:]
+        if b"\r" in first_line or b"\x00" in first_line or (nl == -1 and len(raw_bytes) > 255) or len(first_line) > 253:
+            return None, f"proof executable {label!r} has malformed or CR-terminated shebang; fail-closed (#750 C19)"
+        line_str = first_line.decode("utf-8", errors="surrogateescape").strip(" \t")
+        parts = re.split(r"[ \t]+", line_str, maxsplit=1) if line_str else []
+        interp = parts[0] if parts else ""
+        interp_arg = parts[1].strip(" \t") if len(parts) > 1 else ""
+        if not interp or not interp.startswith("/"):
+            return None, f"proof executable {label!r} uses relative or empty shebang interpreter {interp!r}; fail-closed (#750 C19)"
+        sub_chain, sub_err = cls._verify_exec_file_and_shebang(
+            interp, f"{label}#!{interp}", roots, search_path, _depth + 1
+        )
+        if sub_err:
+            return None, sub_err
+        interp_names = {Path(interp).name, Path(sub_chain[0][1]).name}
+        if "env" in interp_names:
+            if not interp_arg or interp_arg.startswith("-") or "=" in interp_arg or any(c in interp_arg for c in " \t"):
+                return None, (f"proof executable {label!r} shebang env argument {interp_arg!r} "
+                              "alters lookup or splits options; fail-closed (#750 C19)")
+            env_resolved = interp_arg if os.path.isabs(interp_arg) else shutil.which(interp_arg, path=search_path)
+            if not env_resolved:
+                return None, (f"proof executable {label!r} shebang env target {interp_arg!r} "
+                              "cannot be resolved on the scrubbed PATH; fail-closed (#750 C19)")
+            env_chain, env_err = cls._verify_exec_file_and_shebang(
+                env_resolved, f"{label}#!env:{interp_arg}", roots, search_path, _depth + 1
+            )
+            if env_err:
+                return None, env_err
+            return (self_rec, *sub_chain, *env_chain), None
+        if interp_arg and not cls._shebang_arg_allowed(interp_names, interp_arg):
+            return None, (f"proof executable {label!r} shebang option {interp_arg!r} "
+                          "cannot be statically pinned; fail-closed (#750 C19)")
+        return (self_rec, *sub_chain), None
+
+    @staticmethod
+    def _shebang_arg_allowed(interp_names, interp_arg):
+        if not interp_arg:
+            return True
+        if any(re.fullmatch(r"(?:python|pypy)(?:[-.]?\d+(?:\.\d+)*)?", n) for n in interp_names):
+            return bool(re.fullmatch(r"-[BEIOPSsuq]+", interp_arg))
+        if any(re.fullmatch(r"(?:sh|bash|dash|ash|ksh|mksh|zsh|yash)(?:[-.]?\d+(?:\.\d+)*)?", n) for n in interp_names):
+            return bool(re.fullmatch(r"-[abefhmnuvxBCEHP]+", interp_arg))
+        if any(re.fullmatch(r"perl(?:[-.]?\d+(?:\.\d+)*)?", n) for n in interp_names):
+            return bool(re.fullmatch(r"-[wTt]+", interp_arg))
+        if any(re.fullmatch(r"(?:[gmnb]?awk|sed|[gs]sed)(?:[-.]?\d+(?:\.\d+)*)?", n) for n in interp_names):
+            return interp_arg == "-f"
+        return False
+
+    @classmethod
     def nc_exec_identity(cls, argv, top=None, path_env=None, expected=None, when=None):
         """Resolve and fingerprint the proof executable(s) in `argv` (#750 C19).
         Refuses executables that cannot be resolved on the scrubbed PATH, invoke shell `-c`, are
@@ -1717,34 +1801,10 @@ class _Authority:
             resolved = tok if os.path.isabs(tok) else shutil.which(tok, path=search_path)
             if not resolved:
                 return None, f"proof executable {tok!r} cannot be resolved on the scrubbed PATH"
-            try:
-                abs_path = os.path.abspath(resolved)
-                nodes = list(cls._nodes(abs_path))
-                real = Path(abs_path).resolve(strict=True)
-                st = os.stat(real)
-                if not stat.S_ISREG(st.st_mode) or not os.access(real, os.X_OK):
-                    return None, f"proof executable {tok!r} is not an executable regular file ({real})"
-                if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-                    return None, (f"proof executable {tok!r} ({real}) is group- or world-writable; "
-                                  "fail-closed (#750 C19)")
-                for n, nst in nodes:
-                    if stat.S_ISLNK(nst.st_mode):
-                        continue
-                    if (nst.st_mode & (stat.S_IWGRP | stat.S_IWOTH)) and not (
-                            stat.S_ISDIR(nst.st_mode) and (nst.st_mode & stat.S_ISVTX)):
-                        return None, (f"proof executable {tok!r} resolves through writable node {n}; "
-                                      "fail-closed (#750 C19)")
-                digest = hashlib.sha256(real.read_bytes()).hexdigest()
-            except (OSError, RuntimeError) as exc:
-                return None, f"proof executable {tok!r} cannot be verified ({exc})"
-            for r in roots:
-                if real == r or r in real.parents or any(n == r or r in n.parents for n, _ in nodes):
-                    return None, (f"proof executable {tok!r} resolves inside the repository "
-                                  f"worktree ({real}); fail-closed")
-            hop_sig = tuple((str(n), stat.S_IFMT(nst.st_mode), nst.st_dev, nst.st_ino)
-                            for n, nst in nodes)
-            records.append((argv_idx, tok, abs_path, str(real), st.st_dev, st.st_ino,
-                            st.st_size, st.st_mtime_ns, digest, hop_sig))
+            chain, chain_err = cls._verify_exec_file_and_shebang(resolved, tok, roots, search_path)
+            if chain_err:
+                return None, chain_err
+            records.append((argv_idx, tok, *chain[0], chain[1:]))
         out = tuple(records)
         if expected is not None and out != expected:
             return None, f"proof executable changed {when} phase; fail-closed"
@@ -2586,7 +2646,7 @@ def _is_oracle_path(path, nc_command=None, head=None):
             argv = argv[2:] if argv[1:2] == ["--"] else argv[1:]
         prog = Path(argv[0]).name if argv else ""
         runner, rest = ("pytest", argv[1:]) if prog == "pytest" else (None, [])
-        if re.fullmatch(r"(?:python(?:[0-9.]+)?|pypy[0-9]*)", prog):
+        if re.fullmatch(r"(?:python|pypy)(?:[-.]?\d+(?:\.\d+)*)?", prog):
             i = 1
             while i < len(argv) and argv[i] in {"-B", "-E", "-I", "-O", "-OO", "-s", "-S", "-u", "-q"}:
                 i += 1

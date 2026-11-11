@@ -820,6 +820,19 @@ class TestExternalAdversarialRemediation750(ProviderTestBase):
         # C38: agent message files purged on release
         self.assertEqual(list(msg_dir.glob("*.json")), [])
 
+        # Symlinked ancestor `<home>/messages/<repo>` must never delete outside the message store:
+        import shutil
+        victim_root = self.tmp_path / "unrelated-store"
+        victim_agent = victim_root / "mc-24"
+        victim_agent.mkdir(parents=True)
+        keep_file = victim_agent / "keep.txt"
+        keep_file.write_text("do-not-delete\n", encoding="utf-8")
+        shutil.rmtree(home / "messages" / "proj")
+        (home / "messages" / "proj").symlink_to(victim_root, target_is_directory=True)
+        prov._purge_agent_messages("proj", "mc-24")
+        self.assertTrue(keep_file.is_file())
+        self.assertEqual(keep_file.read_text(encoding="utf-8"), "do-not-delete\n")
+
     def test_c29_and_c33_external_worker_start_claims_local_task_and_binds_retry_payload(self) -> None:
         wt = self.tmp_path / "wt-ext"
         wt.mkdir()

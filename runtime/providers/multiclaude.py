@@ -43,7 +43,6 @@ import json
 import os
 import re
 import shlex
-import shutil
 import socket
 import stat
 import time
@@ -330,6 +329,10 @@ class MulticlaudeProvider(ExternalDispatchMixin, RuntimeProvider):
         return res
 
     @staticmethod
+    def _valid_msg_segment(seg: str) -> bool:
+        return bool(seg) and seg not in (".", "..") and "/" not in seg and "\\" not in seg and "\x00" not in seg
+
+    @staticmethod
     def _ensure_private_dir(path: Path) -> None:
         if path.is_symlink():
             raise ProviderError("multiclaude_unsafe_path", f"refusing symlinked message directory {path}")
@@ -341,8 +344,12 @@ class MulticlaudeProvider(ExternalDispatchMixin, RuntimeProvider):
 
     def _deliver(self, repo: str, to: str, body: str, sender: str = "open-fleet") -> str:
         """Queue a message the multiclaude way (file + `route_messages`)."""
+        if not self._valid_msg_segment(repo) or not self._valid_msg_segment(to):
+            raise ProviderError("multiclaude_unsafe_path", f"refusing unsafe message segment ({repo!r}/{to!r})")
+        if self.home.is_symlink():
+            raise ProviderError("multiclaude_unsafe_path", f"refusing symlinked multiclaude home {self.home}")
         msg_id = f"msg-{str(uuid.uuid4())[:13]}"
-        if self.home.exists() and not self.home.is_symlink() and self.home.stat().st_uid == os.getuid():
+        if self.home.exists() and self.home.stat().st_uid == os.getuid():
             with contextlib.suppress(OSError):
                 os.chmod(self.home, 0o700)
         for cur in (self.home / "messages", self.home / "messages" / repo, self.home / "messages" / repo / to):
@@ -369,13 +376,56 @@ class MulticlaudeProvider(ExternalDispatchMixin, RuntimeProvider):
         self._command("route_messages")
         return msg_id
 
+    @classmethod
+    def _rmtree_fd_pinned(cls, parent_fd: int, name: str, uid: int, dir_flags: int, _depth: int = 0) -> None:
+        if _depth > 8 or not cls._valid_msg_segment(name):
+            return
+        sub_fd = os.open(name, dir_flags, dir_fd=parent_fd)
+        try:
+            st = os.fstat(sub_fd)
+            if not stat.S_ISDIR(st.st_mode) or st.st_uid != uid:
+                return
+            with os.scandir(os.dup(sub_fd)) as it:
+                entries = list(it)
+            for ent in entries:
+                ent_st = ent.stat(follow_symlinks=False)
+                if stat.S_ISDIR(ent_st.st_mode):
+                    cls._rmtree_fd_pinned(sub_fd, ent.name, uid, dir_flags, _depth + 1)
+                else:
+                    os.unlink(ent.name, dir_fd=sub_fd)
+        finally:
+            os.close(sub_fd)
+        os.rmdir(name, dir_fd=parent_fd)
+
     def _purge_agent_messages(self, repo: str, agent_name: str) -> None:
+        if not self._valid_msg_segment(repo) or not self._valid_msg_segment(agent_name):
+            return
+        uid = os.getuid()
+        dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        fds: list[int] = []
         with contextlib.suppress(OSError):
-            msg_dir = self.home / "messages" / repo / agent_name
-            if msg_dir.is_symlink():
-                msg_dir.unlink(missing_ok=True)
-            elif msg_dir.is_dir() and msg_dir.stat().st_uid == os.getuid():
-                shutil.rmtree(msg_dir, ignore_errors=True)
+            try:
+                cur_fd = os.open(str(self.home), dir_flags)
+                fds.append(cur_fd)
+                st = os.fstat(cur_fd)
+                if not stat.S_ISDIR(st.st_mode) or st.st_uid != uid:
+                    return
+                for seg in ("messages", repo):
+                    nxt_fd = os.open(seg, dir_flags, dir_fd=cur_fd)
+                    fds.append(nxt_fd)
+                    nst = os.fstat(nxt_fd)
+                    if not stat.S_ISDIR(nst.st_mode) or nst.st_uid != uid:
+                        return
+                    cur_fd = nxt_fd
+                ast = os.stat(agent_name, dir_fd=cur_fd, follow_symlinks=False)
+                if stat.S_ISLNK(ast.st_mode):
+                    os.unlink(agent_name, dir_fd=cur_fd)
+                elif stat.S_ISDIR(ast.st_mode) and ast.st_uid == uid:
+                    self._rmtree_fd_pinned(cur_fd, agent_name, uid, dir_flags)
+            finally:
+                for fd in reversed(fds):
+                    with contextlib.suppress(OSError):
+                        os.close(fd)
 
     def _window_gone(self, repo: str, agent_name: str) -> bool:
         session = self._tmux_target(repo, agent_name).rsplit(":", 1)[0]
