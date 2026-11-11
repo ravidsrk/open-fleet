@@ -513,6 +513,22 @@ class LocalStateStore:
                     (1 if contacted else 0, task_id or None, request_id),
                 )
 
+    def settle_failed_request(self, request_id: str | None) -> None:
+        """Settle an in-flight pending request after a failed call (#750).
+
+        Once `contacted_runtime` is set, keep the pending row as settled ambiguous
+        (`claim_pid = NULL`) so a retry returns the pending marker instead of duplicating an
+        upstream side effect; otherwise drop this process's pre-contact claim."""
+        if not request_id:
+            return
+        row = self.request_row(request_id)
+        if not row or row.get("state") != "pending" or row.get("response_json"):
+            return
+        if int(row.get("contacted_runtime") or 0) != 0:
+            self.mark_request_contacted(request_id, contacted=True, settled_ambiguous=True)
+        elif int(row.get("claim_pid") or 0) == os.getpid():
+            self.release_request(request_id)
+
     @staticmethod
     def check_request_payload(request_id: str, recorded: str | None, offered: str | None) -> None:
         """A request id binds its payload: a changed payload never reuses a result (#597)."""
@@ -1451,7 +1467,12 @@ class LocalStateStore:
         if cached:
             return cached
         try:
-            extra_upstream = upstream_fn(run_id) if upstream_fn is not None else self._NO_UPSTREAM
+            if upstream_fn is not None:
+                if getattr(upstream_fn, "_manages_request_contact", False) is not True:
+                    self.mark_request_contacted(retry_request, contacted=True)
+                extra_upstream = upstream_fn(run_id)
+            else:
+                extra_upstream = self._NO_UPSTREAM
             now = time.time()
             with self._connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
@@ -1524,7 +1545,7 @@ class LocalStateStore:
                         conn.execute("ROLLBACK")
                     raise
         except BaseException:
-            self.release_request(retry_request)
+            self.settle_failed_request(retry_request)
             raise
         return res
 
@@ -1540,6 +1561,7 @@ class LocalStateStore:
         wait: bool = False,
         timeout_ms: int | None = None,
         retry_request: str | None = None,
+        upstream_fn: Callable[[], dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         run_id = self._resolve_caller_run(run, default_run="default") or "default"
         terminal = self._resolve_terminal(terminal)
@@ -1570,6 +1592,7 @@ class LocalStateStore:
         last_keepalive = time.time()
 
         try:
+            extra_check = upstream_fn() if upstream_fn is not None else {}
             with self._connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 allowed_recipients = self._mailbox_scope(conn, run_id, terminal)
@@ -1634,6 +1657,7 @@ class LocalStateStore:
                             "acked": len(ack_ids),
                             "waited": bool(wait),
                             "timedOut": bool(wait and not items),
+                            **extra_check,
                         }
                         self._save_request_in_tx(conn, retry_request, "check", "completed", res, payload_sha)
                         conn.execute("COMMIT")
@@ -1645,7 +1669,7 @@ class LocalStateStore:
                     last_keepalive = now
                 time.sleep(min(0.1, max(0.01, deadline - now)))
         except BaseException:
-            self.release_request(retry_request)
+            self.settle_failed_request(retry_request)
             raise
 
     def reply_message(
@@ -1656,6 +1680,7 @@ class LocalStateStore:
         run: str | None = None,
         sender: str | None = None,
         retry_request: str | None = None,
+        upstream_fn: Callable[[], dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         eff_run = self._resolve_caller_run(run, default_run=None)
         replier = sender or self._resolve_terminal(None) or COORDINATOR_ALIAS
@@ -1696,63 +1721,70 @@ class LocalStateStore:
                         orig = conn.execute("SELECT * FROM messages WHERE id = ?", (gate["message_id"],)).fetchone()
                 if not orig:
                     conn.execute("ROLLBACK")
-                    raise ProviderError("message_not_found", f"message {msg_id!r} not found")
-                if eff_run is not None and orig["run_id"] != eff_run:
-                    conn.execute("ROLLBACK")
-                    raise ProviderError(
-                        "cross_run_access",
-                        f"message {msg_id!r} belongs to run {orig['run_id']!r}, not {eff_run!r}",
+                    if upstream_fn is None:
+                        raise ProviderError("message_not_found", f"message {msg_id!r} not found")
+                else:
+                    if eff_run is not None and orig["run_id"] != eff_run:
+                        conn.execute("ROLLBACK")
+                        raise ProviderError(
+                            "cross_run_access",
+                            f"message {msg_id!r} belongs to run {orig['run_id']!r}, not {eff_run!r}",
+                        )
+                    attrs = json.loads(orig["attrs_json"] or "{}")
+                    gate_id = gate["gate_id"] if gate else attrs.get("gateId")
+                    replier = sender or self._resolve_terminal(None) or COORDINATOR_ALIAS
+                    gate_row = None
+                    if gate_id:
+                        gate_row = gate or conn.execute("SELECT * FROM gates WHERE gate_id = ?", (gate_id,)).fetchone()
+                        if gate_row:
+                            if gate_row["run_id"] != orig["run_id"]:
+                                conn.execute("ROLLBACK")
+                                raise ProviderError(
+                                    "cross_run_access",
+                                    f"gate {gate_id!r} belongs to run {gate_row['run_id']!r}, not {orig['run_id']!r}",
+                                )
+                            try:
+                                # Refuse BEFORE the reply message is sent, not only at resolution.
+                                self._check_gate_answerer(conn, gate_row, replier)
+                            except ProviderError:
+                                conn.execute("ROLLBACK")
+                                raise
+                    recipient = orig["sender"]
+                    subject = f"Re: {orig['subject']}"
+                    run_id = orig["run_id"]
+                    reply_msg_id, _ = self._insert_message(
+                        conn,
+                        run_id=run_id,
+                        sender=replier,
+                        recipient=recipient,
+                        msg_type="info",
+                        subject=subject,
+                        outcome=None,
+                        payload=body,
+                        attrs={"replyTo": orig["id"], **({"gateId": gate_id} if gate_id else {})},
+                        reply_to=orig["id"],
                     )
-                attrs = json.loads(orig["attrs_json"] or "{}")
-                gate_id = gate["gate_id"] if gate else attrs.get("gateId")
-                replier = sender or self._resolve_terminal(None) or COORDINATOR_ALIAS
-                gate_row = None
-                if gate_id:
-                    gate_row = gate or conn.execute("SELECT * FROM gates WHERE gate_id = ?", (gate_id,)).fetchone()
-                    if gate_row:
-                        if gate_row["run_id"] != orig["run_id"]:
-                            conn.execute("ROLLBACK")
-                            raise ProviderError(
-                                "cross_run_access",
-                                f"gate {gate_id!r} belongs to run {gate_row['run_id']!r}, not {orig['run_id']!r}",
-                            )
-                        try:
-                            # Refuse BEFORE the reply message is sent, not only at resolution.
-                            self._check_gate_answerer(conn, gate_row, replier)
-                        except ProviderError:
-                            conn.execute("ROLLBACK")
-                            raise
-                recipient = orig["sender"]
-                subject = f"Re: {orig['subject']}"
-                run_id = orig["run_id"]
-                reply_msg_id, _ = self._insert_message(
-                    conn,
-                    run_id=run_id,
-                    sender=replier,
-                    recipient=recipient,
-                    msg_type="info",
-                    subject=subject,
-                    outcome=None,
-                    payload=body,
-                    attrs={"replyTo": orig["id"], **({"gateId": gate_id} if gate_id else {})},
-                    reply_to=orig["id"],
-                )
-                resolved = None
-                if gate_id and gate_row:
-                    # Answering a worker's `ask` question by message id resolves its durable gate, so
-                    # `ask --resume <id>` returns the human's answer (#591 review: gates never completed).
-                    resolved = self._resolve_gate_in_tx(conn, gate_row, body, status="answered", who=replier)
-                res = {
-                    "replied": True,
-                    "messageId": reply_msg_id,
-                    "replyMessageId": reply_msg_id,
-                    "to": recipient,
-                    "gate": resolved,
-                }
-                self._save_request_in_tx(conn, retry_request, "reply", "completed", res, payload_sha)
-                conn.execute("COMMIT")
+                    resolved = None
+                    if gate_id and gate_row:
+                        # Answering a worker's `ask` question by message id resolves its durable gate, so
+                        # `ask --resume <id>` returns the human's answer (#591 review: gates never completed).
+                        resolved = self._resolve_gate_in_tx(conn, gate_row, body, status="answered", who=replier)
+                    res = {
+                        "replied": True,
+                        "messageId": reply_msg_id,
+                        "replyMessageId": reply_msg_id,
+                        "to": recipient,
+                        "gate": resolved,
+                    }
+                    self._save_request_in_tx(conn, retry_request, "reply", "completed", res, payload_sha)
+                    conn.execute("COMMIT")
+            if not orig and upstream_fn is not None:
+                if getattr(upstream_fn, "_manages_request_contact", False) is not True:
+                    self.mark_request_contacted(retry_request, contacted=True)
+                res = upstream_fn()
+                self.save_request(retry_request, "reply", "completed", res, payload_sha)
         except BaseException:
-            self.release_request(retry_request)  # a failed claim must not block the retry
+            self.settle_failed_request(retry_request)
             raise
         return res
 

@@ -313,6 +313,11 @@ class JCodeSwarmProvider(ExternalDispatchMixin, RuntimeProvider):
         **kwargs: Any,
     ) -> dict[str, Any]:
         eff_body = payload if payload is not None else (kwargs.get("body") if kwargs.get("body") is not None else subject)
+        eff_retry = (
+            retry_request
+            if retry_request is not None
+            else (str(attrs["retry-request"]) if isinstance(attrs, dict) and "retry-request" in attrs else None)
+        )
 
         def _relay(eff_run: str) -> Any:
             bound = self.state._worker_bound_run()
@@ -339,11 +344,21 @@ class JCodeSwarmProvider(ExternalDispatchMixin, RuntimeProvider):
                     ).fetchone()
                 target = str(row["session_id"]) if row else None
             if broadcast or target:
-                return self._request(
-                    "comm_message", from_session=self._coordinator(), message=f"[{msg_type}] {subject}\n{eff_body}",
-                    to_session=target,
-                )
+                coord = self._coordinator()
+                if eff_retry:
+                    self.state.mark_request_contacted(eff_retry, contacted=True)
+                try:
+                    return self._request(
+                        "comm_message", from_session=coord, message=f"[{msg_type}] {subject}\n{eff_body}",
+                        to_session=target,
+                    )
+                except ProviderError as exc:
+                    if eff_retry and exc.code.endswith(("_socket_unknown", "_not_configured")):
+                        self.state.mark_request_contacted(eff_retry, contacted=False)
+                    raise
             return self.state._NO_UPSTREAM
+
+        setattr(_relay, "_manages_request_contact", True)
 
         return self.state.send_message(
             subject=subject,

@@ -973,11 +973,16 @@ class RuntimeProvider:
                     if cached:
                         return cached
                     try:
+                        if hasattr(state, "mark_request_contacted"):
+                            state.mark_request_contacted(retry_req, contacted=True)
                         res = self.send_message(**send_kw)
                         state.save_request(retry_req, "send", "completed", res, payload_sha)
                         return res
                     except BaseException:
-                        state.release_request(retry_req)
+                        if hasattr(state, "settle_failed_request"):
+                            state.settle_failed_request(retry_req)
+                        else:
+                            state.release_request(retry_req)
                         raise
                 return self.send_message(**send_kw)
             if sub == "check":

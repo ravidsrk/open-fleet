@@ -1224,6 +1224,141 @@ class TestExternalAdversarialRemediation750(ProviderTestBase):
             "ready",
         )
 
+    def test_post_contact_message_retries_retain_ambiguous_claims(self) -> None:
+        home = self.tmp_path / "mc-retry-home"
+        (home / "repos" / "proj").mkdir(parents=True)
+        wt = home / "wts" / "proj" / "mc-r1"
+        wt.mkdir(parents=True)
+        route_calls: list[dict[str, object]] = []
+        fail_route = {"on": False}
+
+        def mc_runner(msg: dict[str, object], **_kw: object) -> dict[str, object]:
+            if msg["command"] == "spawn_agent":
+                (wt / ".claude").mkdir(parents=True, exist_ok=True)
+                src = home / "repos" / "proj" / ".multiclaude" / "hooks.json"
+                if src.exists():
+                    (wt / ".claude" / "settings.json").write_text(src.read_text())
+                return {"success": True, "data": {"name": "mc-r1", "worktree_path": str(wt)}}
+            if msg["command"] == "route_messages":
+                route_calls.append(msg)
+                if fail_route["on"]:
+                    raise ProviderError("multiclaude_empty_output", "socket closed after write")
+            return {"success": True, "data": {"routed": 1}}
+
+        mc = MulticlaudeProvider(state=self.state, runner=mc_runner, home=home, repo="proj")
+        mc.worker_start(task_id="t-mc-r", agent="claude", profile="ro", prompt="Audit", name="mc-r1")
+        fail_route["on"] = True
+        route_calls.clear()
+        msg_dir = home / "messages" / "proj" / "mc-r1"
+        for existing in msg_dir.glob("*.json"):
+            existing.unlink()
+
+        # Pre-contact refusal (unsafe recipient path segment) releases the claim immediately.
+        with self.state._connect() as conn:
+            conn.execute(
+                "INSERT INTO dispatches(dispatch_id, task_id, run_id, worktree, agent, profile, state, terminal_handle, backend, session_id, launch_effective, created_at, updated_at) "
+                "VALUES ('mc-bad', '', 'default', '', 'claude', 'ro', 'running', 'mc-bad', 'multiclaude', '../escape', '{}', 1.0, 1.0)"
+            )
+        with self.assertRaises(ProviderError) as pre_mc:
+            mc.send_message(subject="s", msg_type="info", to="mc-bad", payload="p", retry_request="req-mc-pre")
+        self.assertEqual(pre_mc.exception.code, "multiclaude_unsafe_path")
+        self.assertEqual(mc.request_show("req-mc-pre")["state"], "absent")
+
+        # Post-contact failure (file written, route_messages reply lost) retains ambiguous claim.
+        with self.assertRaises(ProviderError) as lost_mc:
+            mc.send_message(subject="hi", msg_type="info", to="mc-r1", payload="once", retry_request="req-mc-lost")
+        self.assertEqual(lost_mc.exception.code, "multiclaude_empty_output")
+        files_after_first = sorted(p.name for p in msg_dir.glob("*.json"))
+        self.assertEqual(len(files_after_first), 1)
+        self.assertEqual(len(route_calls), 1)
+        shown = mc.request_show("req-mc-lost")
+        self.assertEqual(shown["state"], "pending")
+        self.assertTrue(shown.get("ambiguousContact"))
+
+        # Retry returns pending marker without writing a second file or re-routing.
+        retry_res = mc.send_message(subject="hi", msg_type="info", to="mc-r1", payload="once", retry_request="req-mc-lost")
+        self.assertEqual(retry_res, {"state": "pending", "requestId": "req-mc-lost"})
+        self.assertEqual(sorted(p.name for p in msg_dir.glob("*.json")), files_after_first)
+        self.assertEqual(len(route_calls), 1)
+
+        # Operator takeover clears the ambiguous claim; subsequent retry uses the same deterministic msg-<digest>.json.
+        rec = mc.launch_reconcile(request="req-mc-lost", takeover=True)
+        self.assertEqual(rec["reconciled"][0]["resolution"], "reclaimed_after_takeover")
+        fail_route["on"] = False
+        ok_mc = mc.send_message(subject="hi", msg_type="info", to="mc-r1", payload="once", retry_request="req-mc-lost")
+        self.assertTrue(ok_mc["sent"])
+        self.assertEqual(sorted(p.name for p in msg_dir.glob("*.json")), files_after_first)
+
+        # Overstory send, unread check, and upstream reply retain claims post-contact and release pre-contact.
+        ov_calls: list[list[str]] = []
+        ov_mode = {"fail": "timeout"}
+
+        def ov_runner(argv: list[str], **_kw: object) -> dict[str, object]:
+            ov_calls.append(list(argv))
+            if ov_mode["fail"] == "missing":
+                raise ProviderError("overstory_cli_missing", "ov missing")
+            if ov_mode["fail"] == "timeout":
+                raise ProviderError("overstory_timeout", "ov timed out")
+            return {"success": True, "messages": [{"id": "ov-m1"}]}
+
+        ov = OverstoryProvider(state=self.state, runner=ov_runner)
+        with self.assertRaises(ProviderError):
+            ov.send_message(subject="bad", msg_type="nonexistent", to="orchestrator", retry_request="req-ov-invalid")
+        self.assertEqual(self.state.request_show("req-ov-invalid")["state"], "absent")
+        self.assertEqual(ov_calls, [])
+
+        ov_mode["fail"] = "missing"
+        with self.assertRaises(ProviderError):
+            ov.send_message(subject="hi", msg_type="info", to="orchestrator", retry_request="req-ov-missing")
+        self.assertEqual(self.state.request_show("req-ov-missing")["state"], "absent")
+
+        ov_mode["fail"] = "timeout"
+        ov_calls.clear()
+        with self.assertRaises(ProviderError):
+            ov.send_message(subject="hi", msg_type="info", to="orchestrator", retry_request="req-ov-send")
+        self.assertTrue(self.state.request_show("req-ov-send").get("ambiguousContact"))
+        self.assertEqual(
+            ov.send_message(subject="hi", msg_type="info", to="orchestrator", retry_request="req-ov-send"),
+            {"state": "pending", "requestId": "req-ov-send"},
+        )
+        self.assertEqual(len(ov_calls), 1)
+
+        ov_calls.clear()
+        with self.assertRaises(ProviderError):
+            ov.check_messages(mode="unread", retry_request="req-ov-check")
+        self.assertTrue(self.state.request_show("req-ov-check").get("ambiguousContact"))
+        self.assertEqual(ov.check_messages(mode="unread", retry_request="req-ov-check"), {"state": "pending", "requestId": "req-ov-check"})
+        self.assertEqual(len(ov_calls), 1)
+
+        ov_calls.clear()
+        with self.assertRaises(ProviderError):
+            ov.reply_message(msg_id="ov-up-1", body="ack", retry_request="req-ov-reply")
+        self.assertTrue(self.state.request_show("req-ov-reply").get("ambiguousContact"))
+        self.assertEqual(ov.reply_message(msg_id="ov-up-1", body="ack", retry_request="req-ov-reply"), {"state": "pending", "requestId": "req-ov-reply"})
+        self.assertEqual(len(ov_calls), 1)
+
+        # JCode Swarm broadcast send: missing coordinator releases pre-contact; lost socket reply retains claim.
+        jc_calls: list[dict[str, object]] = []
+        jc_nocoord = JCodeSwarmProvider(state=self.state, runner=lambda r, **_k: (jc_calls.append(r) or {"type": "ack"}))
+        with self.assertRaises(ProviderError):
+            jc_nocoord.send_message(subject="b", msg_type="info", to="broadcast", retry_request="req-jc-pre")
+        self.assertEqual(jc_nocoord.request_show("req-jc-pre")["state"], "absent")
+        self.assertEqual(jc_calls, [])
+
+        def jc_lost(req: dict[str, object], **_kw: object) -> dict[str, object]:
+            jc_calls.append(req)
+            raise ProviderError("jcode_no_reply", "socket closed")
+
+        jc = JCodeSwarmProvider(state=self.state, runner=jc_lost, coordinator_session="coord-1")
+        with self.assertRaises(ProviderError):
+            jc.send_message(subject="b", msg_type="info", to="broadcast", retry_request="req-jc-lost")
+        self.assertTrue(jc.request_show("req-jc-lost").get("ambiguousContact"))
+        self.assertEqual(
+            jc.send_message(subject="b", msg_type="info", to="broadcast", retry_request="req-jc-lost"),
+            {"state": "pending", "requestId": "req-jc-lost"},
+        )
+        self.assertEqual(len(jc_calls), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

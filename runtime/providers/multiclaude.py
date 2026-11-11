@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -342,13 +343,26 @@ class MulticlaudeProvider(ExternalDispatchMixin, RuntimeProvider):
             raise ProviderError("multiclaude_unsafe_path", f"refusing untrusted message directory {path}")
         os.chmod(path, 0o700)
 
-    def _deliver(self, repo: str, to: str, body: str, sender: str = "open-fleet") -> str:
+    def _deliver(
+        self,
+        repo: str,
+        to: str,
+        body: str,
+        sender: str = "open-fleet",
+        *,
+        request_key: str | None = None,
+        on_contact: Callable[[], None] | None = None,
+    ) -> str:
         """Queue a message the multiclaude way (file + `route_messages`)."""
         if not self._valid_msg_segment(repo) or not self._valid_msg_segment(to):
             raise ProviderError("multiclaude_unsafe_path", f"refusing unsafe message segment ({repo!r}/{to!r})")
         if self.home.is_symlink():
             raise ProviderError("multiclaude_unsafe_path", f"refusing symlinked multiclaude home {self.home}")
-        msg_id = f"msg-{str(uuid.uuid4())[:13]}"
+        if request_key:
+            digest = hashlib.sha256(f"{repo}\0{to}\0{request_key}".encode("utf-8")).hexdigest()[:13]
+            msg_id = f"msg-{digest}"
+        else:
+            msg_id = f"msg-{str(uuid.uuid4())[:13]}"
         if self.home.exists() and self.home.stat().st_uid == os.getuid():
             with contextlib.suppress(OSError):
                 os.chmod(self.home, 0o700)
@@ -363,6 +377,8 @@ class MulticlaudeProvider(ExternalDispatchMixin, RuntimeProvider):
             {"id": msg_id, "from": sender, "to": to, "timestamp": stamp, "body": body, "status": "pending"},
             indent=2,
         ).encode("utf-8")
+        if on_contact is not None:
+            on_contact()
         nofollow = getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(str(msg_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | nofollow, 0o600)
         try:
@@ -648,6 +664,11 @@ class MulticlaudeProvider(ExternalDispatchMixin, RuntimeProvider):
         **kwargs: Any,
     ) -> dict[str, Any]:
         eff_body = payload if payload is not None else (kwargs.get("body") if kwargs.get("body") is not None else subject)
+        eff_retry = (
+            retry_request
+            if retry_request is not None
+            else (str(attrs["retry-request"]) if isinstance(attrs, dict) and "retry-request" in attrs else None)
+        )
 
         def _relay(eff_run: str) -> Any:
             if to and self.state._worker_bound_run():
@@ -669,8 +690,20 @@ class MulticlaudeProvider(ExternalDispatchMixin, RuntimeProvider):
                     ).fetchone()
                 if row:
                     repo = self._effective(row).get("repo") or self._repo()
-                    return {"messageId": self._deliver(repo, str(row["session_id"]), f"[{msg_type}] {subject}: {eff_body}")}
+                    return {
+                        "messageId": self._deliver(
+                            repo,
+                            str(row["session_id"]),
+                            f"[{msg_type}] {subject}: {eff_body}",
+                            request_key=eff_retry,
+                            on_contact=(lambda: self.state.mark_request_contacted(eff_retry, contacted=True))
+                            if eff_retry
+                            else None,
+                        )
+                    }
             return self.state._NO_UPSTREAM
+
+        setattr(_relay, "_manages_request_contact", True)
 
         return self.state.send_message(
             subject=subject,

@@ -515,6 +515,11 @@ class GastownProvider(RuntimeProvider):
         **kwargs: Any,
     ) -> dict[str, Any]:
         eff_body = payload if payload is not None else (kwargs.get("body") if kwargs.get("body") is not None else subject)
+        eff_retry = (
+            retry_request
+            if retry_request is not None
+            else (str(attrs["retry-request"]) if isinstance(attrs, dict) and "retry-request" in attrs else None)
+        )
 
         def _relay(eff_run: str) -> dict[str, Any]:
             if self.state._worker_bound_run() and to and to not in ("mayor", "coordinator"):
@@ -544,8 +549,17 @@ class GastownProvider(RuntimeProvider):
             argv = ["gt", "mail", "send", str(recipient), "-s", gt_subject, "-m", str(eff_body), "--type", gt_type]
             if sender:
                 argv += ["--from", str(sender)]
-            return {"output": self._run(argv)}
+            if eff_retry:
+                self.state.mark_request_contacted(eff_retry, contacted=True)
+            try:
+                out = self._run(argv)
+            except ProviderError as exc:
+                if eff_retry and exc.code.endswith(("_cli_missing", "_not_configured")):
+                    self.state.mark_request_contacted(eff_retry, contacted=False)
+                raise
+            return {"output": out}
 
+        setattr(_relay, "_manages_request_contact", True)
         return self.state.send_message(
             subject=subject,
             msg_type=msg_type,
@@ -595,15 +609,24 @@ class GastownProvider(RuntimeProvider):
             with self.state._connect() as conn:
                 self.state._mailbox_scope(conn, eff_run, self.state._resolve_terminal(terminal))
             eff_terminal = terminal
-        signal: Any = None
-        if wait:
-            secs = max(1, int((timeout_ms or 60000) / 1000))
-            signal = self._run_json(["gt", "mol", "step", "await-signal", "--json", "--timeout", f"{secs}s"], timeout=secs + 30)
-        inbox_argv = ["gt", "mail", "inbox", "--json"] + (["--unread"] if mode == "unread" else ["--all"])
-        if eff_terminal:
-            inbox_argv += ["--address", str(eff_terminal)]
-        upstream = parse_json_strict(self._run(inbox_argv), self.name)
-        local = self.state.check_messages(
+
+        def _upstream_check() -> dict[str, Any]:
+            signal: Any = None
+            if wait:
+                secs = max(1, int((timeout_ms or 60000) / 1000))
+                signal = self._run_json(
+                    ["gt", "mol", "step", "await-signal", "--json", "--timeout", f"{secs}s"], timeout=secs + 30
+                )
+            inbox_argv = ["gt", "mail", "inbox", "--json"] + (["--unread"] if mode == "unread" else ["--all"])
+            if eff_terminal:
+                inbox_argv += ["--address", str(eff_terminal)]
+            upstream = parse_json_strict(self._run(inbox_argv), self.name)
+            extra: dict[str, Any] = {"upstreamInbox": upstream if isinstance(upstream, list) else []}
+            if signal is not None:
+                extra["upstreamSignal"] = signal
+            return extra
+
+        return self.state.check_messages(
             terminal=terminal,
             run=run,
             ack=ack,
@@ -613,11 +636,8 @@ class GastownProvider(RuntimeProvider):
             wait=False,
             timeout_ms=timeout_ms,
             retry_request=retry_request,
+            upstream_fn=_upstream_check,
         )
-        local["upstreamInbox"] = upstream if isinstance(upstream, list) else []
-        if signal is not None:
-            local["upstreamSignal"] = signal
-        return local
 
     def reply_message(
         self,
@@ -629,16 +649,29 @@ class GastownProvider(RuntimeProvider):
         retry_request: str | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        try:
-            return self.state.reply_message(msg_id=msg_id, body=body, run=run, sender=sender, retry_request=retry_request)
-        except ProviderError as exc:
-            if exc.code != "message_not_found":
+        def _upstream_reply() -> dict[str, Any]:
+            if self.state._worker_bound_run():
+                raise ProviderError("cross_run_access", "launched worker cannot reply to unverified upstream mail id")
+            # Not a local message id: it is a Gastown mail id from `upstreamInbox`.
+            if retry_request:
+                self.state.mark_request_contacted(retry_request, contacted=True)
+            try:
+                out = self._run(["gt", "mail", "reply", str(msg_id), "-m", str(body)])
+            except ProviderError as exc:
+                if retry_request and exc.code.endswith(("_cli_missing", "_not_configured")):
+                    self.state.mark_request_contacted(retry_request, contacted=False)
                 raise
-        if self.state._worker_bound_run():
-            raise ProviderError("cross_run_access", "launched worker cannot reply to unverified upstream mail id")
-        # Not a local message id: it is a Gastown mail id from `upstreamInbox`.
-        out = self._run(["gt", "mail", "reply", str(msg_id), "-m", str(body)])
-        return {"replied": True, "id": msg_id, "scope": "upstream", "upstream": {"output": out}}
+            return {"replied": True, "id": msg_id, "scope": "upstream", "upstream": {"output": out}}
+
+        setattr(_upstream_reply, "_manages_request_contact", True)
+        return self.state.reply_message(
+            msg_id=msg_id,
+            body=body,
+            run=run,
+            sender=sender,
+            retry_request=retry_request,
+            upstream_fn=_upstream_reply,
+        )
 
     def ask_human(self, **kwargs: Any) -> dict[str, Any]:
         return self.state.ask_human(**kwargs)
