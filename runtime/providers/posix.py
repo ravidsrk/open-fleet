@@ -1774,9 +1774,9 @@ with store._connect() as conn:
     # Release the gate BEFORE the final state write (exit.json above already records the run;
     # monitor_started_at keeps proving a monitor ran). Its last write stays the dispatch state.
     conn.execute("UPDATE dispatches SET monitor_pid = 0 WHERE dispatch_id = ? AND monitor_pid = ?", (DISPATCH, MONITOR_PID))
-    bound = [] if SUPERVISED else conn.execute(
-        "SELECT dispatch_id, run_id FROM dispatches WHERE terminal_handle = ? AND state IN ('ready', 'running')",
-        ({repr(term_handle)},),
+    bound = conn.execute(
+        "SELECT dispatch_id, run_id FROM dispatches WHERE terminal_handle = ? AND dispatch_id != ? AND state IN ('ready', 'running')",
+        ({repr(term_handle)}, DISPATCH),
     ).fetchall()
 if SUPERVISED:
     store.ensure_terminal_or_died(

@@ -1077,6 +1077,77 @@ class LocalStateStore:
         )
         return self._recompute_dependents(conn, task_id)
 
+    def _is_dispatch_settled(self, conn: sqlite3.Connection, run_id: str, row: Any) -> bool:
+        if row["state"] in (*FENCED_DISPATCH_STATES, "died", "completed"):
+            return True
+        if row["task_id"]:
+            t_st = conn.execute("SELECT status FROM tasks WHERE id = ?", (row["task_id"],)).fetchone()
+            if t_st and t_st["status"] != "dispatched":
+                return True
+        senders = [s for s in {row["dispatch_id"], row["terminal_handle"] or ""} if s]
+        return self._terminal_report(conn, run_id, senders, dispatch_id=row["dispatch_id"]) is not None
+
+    def _resolve_sender_dispatch(
+        self,
+        conn: sqlite3.Connection,
+        run_id: str,
+        sender_id: str,
+        *,
+        hint_task_id: str | None = None,
+    ) -> Any:
+        env_disp = env_get("OPEN_FLEET_DISPATCH_ID", "ORCA_DISPATCH_ID", self.env, "")
+        if env_disp:
+            disp_row = conn.execute(
+                "SELECT rowid AS rid, dispatch_id, state, task_id, terminal_handle FROM dispatches "
+                "WHERE run_id = ? AND dispatch_id = ? LIMIT 1",
+                (run_id, env_disp),
+            ).fetchone()
+            if disp_row and disp_row["terminal_handle"] and self._is_dispatch_settled(conn, run_id, disp_row):
+                siblings = conn.execute(
+                    "SELECT rowid AS rid, dispatch_id, state, task_id, terminal_handle FROM dispatches "
+                    "WHERE run_id = ? AND terminal_handle = ? AND rowid > ? AND state IN ('ready', 'running') "
+                    "ORDER BY rowid ASC",
+                    (run_id, disp_row["terminal_handle"], disp_row["rid"]),
+                ).fetchall()
+                unsettled = [
+                    s
+                    for s in siblings
+                    if (disp_row["task_id"] is None or s["task_id"] != disp_row["task_id"])
+                    and not self._is_dispatch_settled(conn, run_id, s)
+                ]
+                if hint_task_id:
+                    for s in unsettled:
+                        if s["task_id"] == hint_task_id:
+                            return s
+                if unsettled:
+                    return unsettled[0]
+            return disp_row
+        if sender_id not in ("worker", COORDINATOR_ALIAS):
+            exact = conn.execute(
+                "SELECT rowid AS rid, dispatch_id, state, task_id, terminal_handle FROM dispatches "
+                "WHERE run_id = ? AND dispatch_id = ? LIMIT 1",
+                (run_id, sender_id),
+            ).fetchone()
+            if exact is not None:
+                return exact
+            by_handle = conn.execute(
+                "SELECT rowid AS rid, dispatch_id, state, task_id, terminal_handle FROM dispatches "
+                "WHERE run_id = ? AND terminal_handle = ? "
+                "ORDER BY CASE WHEN state IN ('ready', 'running') THEN 0 ELSE 1 END, rowid ASC",
+                (run_id, sender_id),
+            ).fetchall()
+            unsettled_h = [
+                r for r in by_handle if r["state"] in ("ready", "running") and not self._is_dispatch_settled(conn, run_id, r)
+            ]
+            if hint_task_id:
+                for r in unsettled_h:
+                    if r["task_id"] == hint_task_id:
+                        return r
+            if unsettled_h:
+                return unsettled_h[0]
+            return by_handle[-1] if by_handle else None
+        return None
+
     def send_message(
         self,
         *,
@@ -1120,6 +1191,26 @@ class LocalStateStore:
             now = time.time()
             with self._connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
+                is_term_mail = msg_type in TERMINAL_MESSAGE_TYPES and "fileTouchConflict" not in clean_attrs
+                hint_task = next(
+                    (
+                        clean_attrs[k]
+                        for k in ("taskId", "task_id", "task-id")
+                        if isinstance(clean_attrs.get(k), str) and clean_attrs[k]
+                    ),
+                    None,
+                )
+                disp_row = (
+                    self._resolve_sender_dispatch(conn, run_id, sender_id, hint_task_id=hint_task)
+                    if is_term_mail
+                    else None
+                )
+                stored_attrs = dict(clean_attrs)
+                if is_term_mail:
+                    for dk in ("dispatchId", "dispatch_id", "dispatch-id"):
+                        stored_attrs.pop(dk, None)
+                    if disp_row is not None:
+                        stored_attrs["dispatchId"] = disp_row["dispatch_id"]
                 msg_id, deliv_id = self._insert_message(
                     conn,
                     run_id=run_id,
@@ -1129,24 +1220,10 @@ class LocalStateStore:
                     subject=subject,
                     outcome=outcome,
                     payload=effective_payload,
-                    attrs=clean_attrs,
+                    attrs=stored_attrs,
                     reply_to=reply_to,
                 )
                 if msg_type == "worker_done" and outcome in ("succeeded", "failed"):
-                    env_disp = env_get("OPEN_FLEET_DISPATCH_ID", "ORCA_DISPATCH_ID", self.env, "")
-                    if env_disp:
-                        disp_row = conn.execute(
-                            "SELECT dispatch_id, state FROM dispatches WHERE run_id = ? AND dispatch_id = ? LIMIT 1",
-                            (run_id, env_disp),
-                        ).fetchone()
-                    elif sender_id not in ("worker", COORDINATOR_ALIAS):
-                        disp_row = conn.execute(
-                            "SELECT dispatch_id, state FROM dispatches WHERE run_id = ? AND (dispatch_id = ? OR terminal_handle = ?) "
-                            "ORDER BY created_at DESC, rowid DESC LIMIT 1",
-                            (run_id, sender_id, sender_id),
-                        ).fetchone()
-                    else:
-                        disp_row = None
                     if disp_row and disp_row["state"] not in (*FENCED_DISPATCH_STATES, "died", "completed"):
                         self._settle_dispatch_task(conn, disp_row["dispatch_id"], succeeded=(outcome == "succeeded"), now=now)
                 message = {
@@ -1846,25 +1923,91 @@ class LocalStateStore:
 
     # --- #590: Synthetic `worker_died` Guarantee on Exit Without Terminal Mail (learned from Overstory) ---
     @staticmethod
-    def _terminal_report(conn: sqlite3.Connection, run_id: str, senders: list[str]) -> Any:
-        """The worker's own terminal mail (or the worker_died already sent for it), if any."""
+    def _terminal_report(
+        conn: sqlite3.Connection,
+        run_id: str,
+        senders: list[str],
+        *,
+        dispatch_id: str | None = None,
+    ) -> Any:
+        """The worker's own terminal mail (or the worker_died already sent for it), bound to `dispatch_id`."""
+        if not senders:
+            return None
         placeholders = ",".join("?" for _ in senders)
-        return conn.execute(
+        rows = conn.execute(
             f"""
-            SELECT id, msg_type, outcome FROM messages
+            SELECT id, sender, msg_type, outcome, attrs_json, created_at FROM messages
             WHERE run_id = ? AND sender IN ({placeholders})
               AND msg_type IN ('worker_done', 'merge_ready', 'escalation')
               AND COALESCE(attrs_json, '') NOT LIKE '%"fileTouchConflict"%'
-            LIMIT 1
+            ORDER BY created_at DESC, rowid DESC
             """,
             [run_id, *senders],
+        ).fetchall()
+        if not dispatch_id:
+            return rows[0] if rows else None
+        disp = conn.execute(
+            "SELECT rowid AS rid, dispatch_id, task_id, terminal_handle, created_at "
+            "FROM dispatches WHERE dispatch_id = ?",
+            (dispatch_id,),
         ).fetchone()
+        other_disp_ids = {
+            r["dispatch_id"]
+            for r in conn.execute(
+                "SELECT dispatch_id FROM dispatches WHERE run_id = ? AND dispatch_id != ?",
+                (run_id, dispatch_id),
+            ).fetchall()
+        }
+        sibling_count = 0
+        if disp and disp["terminal_handle"]:
+            sibling_row = conn.execute(
+                "SELECT COUNT(*) AS c FROM dispatches WHERE run_id = ? AND terminal_handle = ? AND dispatch_id != ?",
+                (run_id, disp["terminal_handle"], dispatch_id),
+            ).fetchone()
+            sibling_count = int(sibling_row["c"] or 0) if sibling_row else 0
+        for m in rows:
+            try:
+                attrs = json.loads(m["attrs_json"] or "{}")
+            except ValueError:
+                attrs = {}
+            if not isinstance(attrs, dict):
+                attrs = {}
+            msg_disp = next(
+                (
+                    attrs[k]
+                    for k in ("dispatchId", "dispatch_id", "dispatch-id")
+                    if isinstance(attrs.get(k), str) and attrs[k]
+                ),
+                None,
+            )
+            if msg_disp is not None:
+                if msg_disp != dispatch_id:
+                    continue
+                return m
+            if m["sender"] in other_disp_ids:
+                continue
+            msg_task = next(
+                (
+                    attrs[k]
+                    for k in ("taskId", "task_id", "task-id")
+                    if isinstance(attrs.get(k), str) and attrs[k]
+                ),
+                None,
+            )
+            if msg_task is not None and disp and disp["task_id"] and msg_task != disp["task_id"]:
+                continue
+            if disp and m["created_at"] < disp["created_at"]:
+                continue
+            if m["sender"] != dispatch_id and sibling_count > 0:
+                continue
+            return m
+        return None
 
     def terminal_report(self, *, dispatch_id: str, worker_handle: str | None = None, run_id: str = "default") -> str | None:
         """The id of the terminal mail this dispatch already reported, or None (#596)."""
         senders = [s for s in {dispatch_id, worker_handle or ""} if s]
         with self._connect() as conn:
-            row = self._terminal_report(conn, run_id, senders)
+            row = self._terminal_report(conn, run_id, senders, dispatch_id=dispatch_id)
         return row["id"] if row else None
 
     def ensure_terminal_or_died(
@@ -1907,7 +2050,7 @@ class LocalStateStore:
                 return {"syntheticDied": False, "alreadyDied": True}
             now = time.time()
             eff_run = disp["run_id"] or run_id
-            row = self._terminal_report(conn, eff_run, senders)
+            row = self._terminal_report(conn, eff_run, senders, dispatch_id=dispatch_id)
             if row:
                 if disp["state"] != "completed":
                     conn.execute(
@@ -1983,7 +2126,7 @@ class LocalStateStore:
                 conn.execute("COMMIT")
                 return {"relayed": False, "state": disp["state"] if disp else None}
             eff_run = disp["run_id"] or run_id
-            row = self._terminal_report(conn, eff_run, senders)
+            row = self._terminal_report(conn, eff_run, senders, dispatch_id=dispatch_id)
             if row:
                 conn.execute("COMMIT")
                 return {"relayed": False, "existingMessageId": row["id"]}

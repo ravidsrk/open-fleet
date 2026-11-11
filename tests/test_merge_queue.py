@@ -768,7 +768,17 @@ class GateRunsIsolated(QueueCase):
             "runner$((1+1))",
             f"echo $'\\'' $({probe}) $'\\''",
             ': "${PYTHONPATH:=/tmp}"',
+            ': "${PATH[0]:=/opt/proofs/bin}"',
             f"echo $(case x in x) {probe} ;; esac)",
+            'bash -c \'printf -v "PATH[0]" /opt/proofs/bin; proof\'',
+            "bash -c 'printf -vPATH[0] /opt/proofs/bin; proof'",
+            "bash -c 'printf -v safe -v PATH /opt/proofs/bin; proof'",
+            'bash -c \'export "PATH[0]=/opt/proofs/bin"; proof\'',
+            'bash -c \'export "PATH+=/opt/proofs/bin"; proof\'',
+            'bash -c \'read "PATH[0]"; proof\'',
+            'bash -c \'unset "PATH[0]"; proof\'',
+            "(( true , PATH = 0 )) && pytest",
+            "[[ 0 -eq PATH[0]=1 ]] && pytest",
         ):
             _, _, bad_probs = mq_mod.MergeQueue._analyze_gate_command(unsafe_form)
             self.assertTrue(bad_probs, f"expected fail-closed problem on {unsafe_form!r}")

@@ -687,6 +687,65 @@ class TestCoordinatorTakeoverAndWorkerBindingFence(Base):
         self.assertEqual(by_id_retry[tr], "dispatched")
         self.assertEqual(by_id_retry[tr_child], "pending")
 
+        # Stale terminal mail on a reused `terminal_handle` (`dispatch_inject`) cannot complete a
+        # subsequent injected dispatch/task that crashes without reporting:
+        t_inj_1 = self.store.task_create(spec="inj-first", run="run-d")["task"]["id"]
+        t_inj_2 = self.store.task_create(spec="inj-second", run="run-d")["task"]["id"]
+        t_inj_2_child = self.store.task_create(spec="inj-second-child", deps=[t_inj_2], run="run-d")["task"]["id"]
+        self.store.task_update(task_id=t_inj_1, status="dispatched", run="run-d")
+        with self.store._connect() as conn:
+            conn.execute(
+                "INSERT INTO dispatches(dispatch_id, task_id, run_id, worktree, agent, terminal_handle, state, created_at, updated_at) "
+                "VALUES ('disp-inj-1', ?, 'run-d', '/w', 'claude', 'term-shared', 'running', 10, 10)",
+                (t_inj_1,),
+            )
+        w_shared = self.mod.LocalStateStore(
+            self.db,
+            env={"OPEN_FLEET_DISPATCH_ID": "disp-inj-1", "OPEN_FLEET_TERMINAL_HANDLE": "term-shared"},
+        )
+        w_shared.send_message(subject="first-done", msg_type="worker_done", outcome="succeeded", run="run-d")
+        self.store.task_update(task_id=t_inj_2, status="dispatched", run="run-d")
+        with self.store._connect() as conn:
+            conn.execute(
+                "INSERT INTO dispatches(dispatch_id, task_id, run_id, worktree, agent, terminal_handle, state, created_at, updated_at) "
+                "VALUES ('disp-inj-2', ?, 'run-d', '/w', 'custom', 'term-shared', 'ready', 20, 20)",
+                (t_inj_2,),
+            )
+        inj_crash = self.store.ensure_terminal_or_died(
+            dispatch_id="disp-inj-2", worker_handle="term-shared", exit_code=137, run_id="run-d"
+        )
+        self.assertTrue(inj_crash["syntheticDied"])
+        self.assertEqual(self.store.dispatch_state("disp-inj-2"), "died")
+        by_id_inj = {t["id"]: t["status"] for t in self.store.task_list(run="run-d")["tasks"]}
+        self.assertEqual(by_id_inj[t_inj_1], "completed")
+        self.assertEqual(by_id_inj[t_inj_2], "dispatched")
+        self.assertEqual(by_id_inj[t_inj_2_child], "pending")
+        # Positive `dispatch_inject` completion on the same reused handle attributes to the active injected dispatch:
+        t_inj_3 = self.store.task_create(spec="inj-third", run="run-d")["task"]["id"]
+        self.store.task_update(task_id=t_inj_3, status="dispatched", run="run-d")
+        with self.store._connect() as conn:
+            conn.execute(
+                "INSERT INTO dispatches(dispatch_id, task_id, run_id, worktree, agent, terminal_handle, state, created_at, updated_at) "
+                "VALUES ('disp-inj-3', ?, 'run-d', '/w', 'custom', 'term-shared', 'running', 30, 30)",
+                (t_inj_3,),
+            )
+        w_shared.send_message(
+            subject="third-done",
+            msg_type="worker_done",
+            outcome="succeeded",
+            run="run-d",
+            attrs={"dispatch_id": "disp-inj-2"},  # forged snake_case key is stripped in favor of disp-inj-3
+        )
+        inj_ok = self.store.ensure_terminal_or_died(
+            dispatch_id="disp-inj-3", worker_handle="term-shared", exit_code=0, run_id="run-d"
+        )
+        self.assertFalse(inj_ok["syntheticDied"])
+        self.assertEqual(self.store.dispatch_state("disp-inj-3"), "completed")
+        self.assertEqual(
+            next(t["status"] for t in self.store.task_list(run="run-d")["tasks"] if t["id"] == t_inj_3),
+            "completed",
+        )
+
     def test_c35_default_run_fencing_and_human_sender_rejected_on_fenced_gate(self):
         self.store.run_create(run="default", sender="coord-main")
         with self.assertRaises(self.mod.ProviderError) as ctx:

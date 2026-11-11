@@ -1415,7 +1415,23 @@ class MergeQueue:
     _LOOKUP_VARS = frozenset({
         "PATH", "IFS", "CDPATH", "ENV", "BASH_ENV",
         "LD_PRELOAD", "LD_LIBRARY_PATH", "PYTHONPATH",
+        "PYTHONHOME", "PYTHONSTARTUP", "NODE_OPTIONS", "PERL5OPT", "RUBYOPT",
+        "FPATH", "GLOBIGNORE", "EXECIGNORE",
     })
+
+    @classmethod
+    def _touches_lookup_var(cls, raw_target: str) -> bool:
+        """True if `raw_target` (plain, `+=`, or subscripted `NAME[idx]`) names a lookup variable,
+        or uses an array subscript expression (which Bash evaluates as arithmetic)."""
+        if "[" in raw_target or "]" in raw_target:
+            return True
+        base = re.split(r"[\+=]", raw_target, maxsplit=1)[0]
+        if base.upper() in cls._LOOKUP_VARS or base.upper().startswith("BASH_FUNC_"):
+            return True
+        return any(
+            ident.upper() in cls._LOOKUP_VARS or ident.upper().startswith("BASH_FUNC_")
+            for ident in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", base)
+        )
 
     @classmethod
     def _allowed_extra_keep(cls, name: str) -> bool:
@@ -1668,6 +1684,18 @@ class MergeQueue:
                 i += 1
                 at_tok = False
                 continue
+            if not in_dq and at_tok and ch == "(" and i + 1 < n and cmd[i + 1] == "(":
+                ic_s, ip_s = cls._find_matching_paren(cmd, i + 2)
+                if ic_s < 0:
+                    problems.extend(ip_s)
+                    break
+                if ic_s + 1 < n and cmd[ic_s + 1] == ")":
+                    problems.append(
+                        "standalone ((...)) arithmetic command cannot be portably fingerprinted"
+                    )
+                    i = ic_s + 2
+                    at_tok = False
+                    continue
             if not in_dq and ch in ("<", ">") and i + 1 < n and cmd[i + 1] == "(":
                 ec, ep = cls._find_matching_paren(cmd, i + 2)
                 if ec < 0:
@@ -1679,8 +1707,12 @@ class MergeQueue:
                 at_tok = False
                 continue
             if ch == "$" and i + 1 < n and cmd[i + 1] == "{":
+                if re.match(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\[", cmd[i:]):
+                    problems.append(
+                        "array subscript parameter expansion cannot be statically fingerprinted"
+                    )
                 m_pe = re.match(r"^\$\{([A-Za-z_][A-Za-z0-9_]*):?=", cmd[i:])
-                if m_pe and m_pe.group(1).upper() in cls._LOOKUP_VARS:
+                if m_pe and cls._touches_lookup_var(m_pe.group(1)):
                     problems.append(
                         f"parameter expansion assigning to {m_pe.group(1)!r} alters executable lookup context"
                     )
@@ -1696,12 +1728,12 @@ class MergeQueue:
                         arith_san, arith_subs, arith_probs = cls._strip_cmd_substitutions(arith_body)
                         subs.extend(arith_subs)
                         problems.extend(arith_probs)
-                        if "'" in arith_san or '"' in arith_san:
+                        if "'" in arith_san or '"' in arith_san or "[" in arith_san or "]" in arith_san:
                             problems.append(
-                                "quoted string inside arithmetic expansion cannot be statically fingerprinted"
+                                "quoted or subscripted expression inside arithmetic expansion cannot be statically fingerprinted"
                             )
                         for ident in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", arith_san):
-                            if ident != "__MQ_CMDSUB__" and ident.upper() in cls._LOOKUP_VARS:
+                            if ident != "__MQ_CMDSUB__" and cls._touches_lookup_var(ident):
                                 problems.append(
                                     f"arithmetic expansion touching {ident!r} cannot be statically fingerprinted"
                                 )
@@ -1789,8 +1821,8 @@ class MergeQueue:
                 tokens.append(("op", matched_op, False))
                 i += len(matched_op)
                 continue
-            # Read one shell word; detect POSIX unquoted assignment prefix (`NAME=`) before quotes
-            m_asgn = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=", cmd[i:])
+            # Read one shell word; detect unquoted assignment prefix (`NAME=`, `NAME+=`, `NAME[idx]=`) before quotes
+            m_asgn = re.match(r"^([A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?)\+?=", cmd[i:])
             assign_var = m_asgn.group(1) if m_asgn else None
             buf: list[str] = []
             quoted = False
@@ -1900,6 +1932,17 @@ class MergeQueue:
             if in_double_bracket:
                 if kind == "word" and is_unquoted(flag) and tok == "]]":
                     in_double_bracket = False
+                elif kind == "word" and (
+                    "[" in tok
+                    or "]" in tok
+                    or any(
+                        ident != "__MQ_CMDSUB__" and cls._touches_lookup_var(ident)
+                        for ident in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", tok)
+                    )
+                ):
+                    problems.append(
+                        "[[ ... ]] conditional touching lookup or subscripted variable cannot be statically fingerprinted"
+                    )
                 idx += 1
                 continue
             if kind == "redir":
@@ -1963,7 +2006,7 @@ class MergeQueue:
             # Command position: peel assignments and compound keywords
             avar = assign_var_of(flag)
             if avar is not None:
-                if avar.upper() in cls._LOOKUP_VARS:
+                if cls._touches_lookup_var(avar):
                     problems.append(
                         f"assignment to {avar!r} alters executable lookup context and cannot be statically fingerprinted"
                     )
@@ -1989,7 +2032,7 @@ class MergeQueue:
                     problems.append(f"{tok}: non-POSIX header cannot be statically fingerprinted")
                 else:
                     loop_var, loop_flag = lex_tokens[idx + 1][1], lex_tokens[idx + 1][2]
-                    if is_dynamic(loop_flag) or loop_var.upper() in cls._LOOKUP_VARS:
+                    if is_dynamic(loop_flag) or cls._touches_lookup_var(loop_var):
                         problems.append(
                             f"{tok} loop variable {loop_var!r} alters executable lookup context"
                         )
@@ -2049,7 +2092,7 @@ class MergeQueue:
                 cw, cflag = cmd_words[wi]
                 c_avar = assign_var_of(cflag)
                 if c_avar is not None and not force_external:
-                    if c_avar.upper() in cls._LOOKUP_VARS:
+                    if cls._touches_lookup_var(c_avar):
                         problems.append(
                             f"assignment to {c_avar!r} alters executable lookup context and cannot be statically fingerprinted"
                         )
@@ -2112,7 +2155,7 @@ class MergeQueue:
                             else:
                                 uvar, udyn = "", True
                                 wi += 1
-                            if udyn or uvar.upper() in cls._LOOKUP_VARS:
+                            if udyn or cls._touches_lookup_var(uvar):
                                 problems.append("env -u/--unset alters executable lookup variable")
                             continue
                         if a.startswith("--"):
@@ -2156,7 +2199,7 @@ class MergeQueue:
                                     consumed_next = True
                                 else:
                                     uvar, udyn = "", True
-                                if udyn or uvar.upper() in cls._LOOKUP_VARS:
+                                if udyn or cls._touches_lookup_var(uvar):
                                     problems.append("env -u alters executable lookup variable")
                                 break
                             if ch_opt == "S":
@@ -2179,7 +2222,7 @@ class MergeQueue:
                         lhs = ea.split("=", 1)[0]
                         if is_dynamic(eaflag) and ("$" in lhs or "__MQ_CMDSUB__" in lhs):
                             problems.append("env: dynamic variable assignment cannot be statically fingerprinted")
-                        elif lhs.upper() in cls._LOOKUP_VARS:
+                        elif cls._touches_lookup_var(lhs):
                             problems.append(
                                 f"env {lhs}=... alters executable lookup context and cannot be statically fingerprinted"
                             )
@@ -2338,11 +2381,11 @@ class MergeQueue:
                                 problems.append("unset -f alters function/executable dispatch")
                                 break
                             continue
-                        vname = arg_w.split("=", 1)[0]
+                        vname = arg_w.split("=", 1)[0].rstrip("+")
                         dyn_vname = is_dynamic(arg_f) and (
                             any(ch_v in vname for ch_v in "$*?[`") or "__MQ_CMDSUB__" in vname
                         )
-                        if dyn_vname or vname.upper() in cls._LOOKUP_VARS:
+                        if dyn_vname or cls._touches_lookup_var(vname):
                             problems.append(
                                 f"shell {final_word!r} builtin touching lookup variable cannot be statically fingerprinted"
                             )
@@ -2350,41 +2393,51 @@ class MergeQueue:
                     continue
                 if final_word == "read":
                     for rw, rf in cmd_words[wi + 1:]:
-                        if is_dynamic(rf) or rw.split("=", 1)[0].upper() in cls._LOOKUP_VARS:
+                        if is_dynamic(rf) or cls._touches_lookup_var(rw.split("=", 1)[0]):
                             problems.append("shell 'read' builtin touching lookup variable cannot be statically fingerprinted")
                             break
                     continue
                 if final_word == "printf":
-                    for pi in range(wi + 1, len(cmd_words)):
+                    pi = wi + 1
+                    while pi < len(cmd_words):
                         pw, pf = cmd_words[pi]
-                        if pw == "--":
+                        if pw == "--" or not pw.startswith("-") or pw == "-":
+                            break
+                        if is_dynamic(pf):
+                            problems.append("shell 'printf' dynamic option cannot be statically fingerprinted")
                             break
                         if pw == "-v":
                             if pi + 1 >= len(cmd_words) or is_dynamic(cmd_words[pi + 1][1]) or (
-                                cmd_words[pi + 1][0].upper() in cls._LOOKUP_VARS
+                                cls._touches_lookup_var(cmd_words[pi + 1][0])
                             ):
                                 problems.append(
                                     "shell 'printf -v' touching lookup variable cannot be statically fingerprinted"
                                 )
-                            break
+                                break
+                            pi += 2
+                            continue
                         if pw.startswith("-v") and len(pw) > 2:
-                            if is_dynamic(pf) or pw[2:].upper() in cls._LOOKUP_VARS:
+                            if cls._touches_lookup_var(pw[2:]):
                                 problems.append(
                                     "shell 'printf -v' touching lookup variable cannot be statically fingerprinted"
                                 )
-                            break
+                                break
+                            pi += 1
+                            continue
+                        problems.append(f"shell 'printf' unsupported option {pw!r} cannot be statically fingerprinted")
+                        break
                     continue
                 if final_word == "getopts":
                     if wi + 2 >= len(cmd_words) or is_dynamic(cmd_words[wi + 2][1]) or (
-                        cmd_words[wi + 2][0].upper() in cls._LOOKUP_VARS
+                        cls._touches_lookup_var(cmd_words[wi + 2][0])
                     ):
                         problems.append("shell 'getopts' touching lookup variable cannot be statically fingerprinted")
                     continue
                 if final_word == "let":
                     executables.append("__opt_builtin__:let")
                     for lw, lf in cmd_words[wi + 1:]:
-                        if is_dynamic(lf) or any(
-                            ident.upper() in cls._LOOKUP_VARS for ident in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", lw)
+                        if is_dynamic(lf) or "[" in lw or "]" in lw or any(
+                            cls._touches_lookup_var(ident) for ident in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", lw)
                         ):
                             problems.append("shell 'let' touching lookup variable cannot be statically fingerprinted")
                             break
