@@ -614,13 +614,26 @@ class TestSpawnWorkerRefusals(unittest.TestCase):
     def test_a_ro_spawn_verifies_a_named_guard_rather_than_skipping_it(self):
         # W4-06: ro used to skip the arming block entirely, so a wired guard went unchecked and a
         # ro worker (which can still write through Bash, W4-05) never even saw the warning. ro now
-        # verifies a named registration, and refuses when it is not armed.
+        # verifies a named registration, and refuses when it is not armed — including when an rw
+        # registration omits the ro write floor (--readonly, C26).
         with tempfile.TemporaryDirectory() as tmp:
             settings = Path(tmp) / "settings.json"
             settings.write_text("{}")
             rc, _, err = run_spawn(["task_test", f"path:{Path(tmp) / 'wt'}", "t", "claude"],
                                    env_extra={"PROFILE": "ro", "ORCA_DENY_HOOK_SETTINGS": str(settings)})
             self.assert_refused(rc, err, "not armed")
+            rw_settings = self._armed_settings(tmp)
+            rc, _, err = run_spawn(["task_test", f"path:{Path(tmp) / 'wt'}", "t", "claude"],
+                                   env_extra={"PROFILE": "ro", "ORCA_DENY_HOOK_SETTINGS": str(rw_settings)})
+            self.assert_refused(rc, err, "ro write floor is not live")
+            ro_settings = Path(tmp) / "ro-settings.json"
+            ro_settings.write_text(subprocess.run(
+                ["sh", str(HOOK), "--settings", str(Path(tmp) / "wt"), "--readonly"],
+                capture_output=True, text=True, check=True,
+            ).stdout)
+            _rc, _, err = run_spawn(["task_test", f"path:{Path(tmp) / 'wt'}", "t", "claude"],
+                                    env_extra={"PROFILE": "ro", "ORCA_DENY_HOOK_SETTINGS": str(ro_settings)})
+            self.assertNotIn("not armed", err)
 
     def test_a_ro_spawn_without_a_guard_proceeds_with_a_note(self):
         # Under the named opt-out run_spawn carries (without it ro refuses, above).
@@ -2364,7 +2377,8 @@ class TestUnknownIsNeverAbsent(unittest.TestCase):
         wt = Path(self.tmp) / "armed-wt"
         wt.mkdir(exist_ok=True)
         settings = Path(self.tmp) / "armed-settings.json"
-        settings.write_text(subprocess.run(["sh", str(HOOK), "--settings", str(wt)], capture_output=True,
+        ro_flag = ["--readonly"] if extra.get("PROFILE") == "ro" else []
+        settings.write_text(subprocess.run(["sh", str(HOOK), "--settings", str(wt), *ro_flag], capture_output=True,
                                            text=True, check=True).stdout)
         env = {k: v for k, v in self.lane(**extra).items() if k not in UNVERIFIED_OK}
         env["ORCA_DENY_HOOK_SETTINGS"] = str(settings)

@@ -33,6 +33,7 @@ from .base import (
     ProviderError,
     RuntimeProvider,
     check_monotonic_profile,
+    env_get,
     fence_state,
     normalize_read,
     parse_json_strict,
@@ -48,6 +49,7 @@ from ._external import (
     local_worker_list,
     preserve_worker_head,
     record_fence,
+    resolve_worker_list_run,
     run_cli_text,
     show_from_row,
 )
@@ -227,6 +229,7 @@ class OverstoryProvider(RuntimeProvider):
 
     def worker_list(self, *, run: str | None = None, task: str | None = None, limit: int | None = None, **kwargs: Any) -> dict[str, Any]:
         """OUR dispatch rows; `ov status` only annotates `stage` (it also lists agents we never slung)."""
+        run = resolve_worker_list_run(self.state, run, include_remote=bool(kwargs.get("include_remote")))
         raw = self._ov(["ov", "status", "--json"])
         agents = raw.get("agents")
         if not isinstance(agents, list):
@@ -236,7 +239,7 @@ class OverstoryProvider(RuntimeProvider):
             for a in agents
             if isinstance(a, dict) and a.get("agentName")
         }
-        return local_worker_list(self.state, self.name, run=run, task=task, limit=limit, stages=stages, upstream=raw)
+        return local_worker_list(self.state, self.name, run=run, task=task, limit=limit, stages=stages, upstream=raw, **kwargs)
 
     def _inspect(self, agent_name: str) -> dict[str, Any]:
         return self._ov(["ov", "inspect", agent_name, "--json"])
@@ -290,34 +293,65 @@ class OverstoryProvider(RuntimeProvider):
         payload: str | None = None,
         run: str | None = None,
         attrs: dict[str, Any] | None = None,
+        retry_request: str | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        ov_type = "status" if msg_type == "info" else msg_type
-        if ov_type not in OV_MAIL_TYPES:
-            raise ProviderError("invalid_type", f"overstory mail has no type {msg_type!r} (want {', '.join(OV_MAIL_TYPES)})")
-        local = self.state.send_message(
+        eff_body = payload if payload is not None else (kwargs.get("body") if kwargs.get("body") is not None else subject)
+        eff_retry = (
+            retry_request
+            if retry_request is not None
+            else (str(attrs["retry-request"]) if isinstance(attrs, dict) and "retry-request" in attrs else None)
+        )
+
+        def _relay(eff_run: str) -> Any:
+            if self.state._worker_bound_run() and to and to not in ("orchestrator", "coordinator"):
+                with self.state._connect() as conn:
+                    owned = conn.execute(
+                        "SELECT 1 FROM dispatches WHERE backend = ? AND (dispatch_id = ? OR session_id = ? OR terminal_handle = ?) AND run_id = ? LIMIT 1",
+                        (self.name, to, to, to, eff_run),
+                    ).fetchone()
+                if owned is None:
+                    raise ProviderError(
+                        "cross_run_access",
+                        f"recipient {to!r} is not owned by run {eff_run!r}",
+                    )
+            ov_type = "status" if msg_type == "info" else msg_type
+            if ov_type not in OV_MAIL_TYPES:
+                raise ProviderError("invalid_type", f"overstory mail has no type {msg_type!r} (want {', '.join(OV_MAIL_TYPES)})")
+            argv = [
+                "ov", "mail", "send",
+                "--to", str(to or "orchestrator"),
+                "--subject", str(subject),
+                "--body", str(eff_body),
+                "--type", ov_type,
+                "--json",
+            ]
+            if sender:
+                argv += ["--from", str(sender)]
+            if eff_retry:
+                self.state.mark_request_contacted(eff_retry, contacted=True)
+            try:
+                return self._ov(argv)
+            except ProviderError as exc:
+                if eff_retry and exc.code.endswith(("_cli_missing", "_not_configured")):
+                    self.state.mark_request_contacted(eff_retry, contacted=False)
+                raise
+
+        setattr(_relay, "_manages_request_contact", True)
+        return self.state.send_message(
             subject=subject,
             msg_type=msg_type,
             to=to,
             outcome=outcome,
             sender=sender,
             payload=payload,
+            body=kwargs.get("body"),
             run=run,
             attrs=attrs,
+            reply_to=kwargs.get("reply_to"),
+            retry_request=retry_request,
+            upstream_fn=_relay,
         )
-        body = payload if payload is not None else subject
-        argv = [
-            "ov", "mail", "send",
-            "--to", str(to or "orchestrator"),
-            "--subject", str(subject),
-            "--body", str(body),
-            "--type", ov_type,
-            "--json",
-        ]
-        if sender:
-            argv += ["--from", str(sender)]
-        local["upstream"] = self._ov(argv)
-        return local
 
     def check_messages(
         self,
@@ -333,16 +367,45 @@ class OverstoryProvider(RuntimeProvider):
         retry_request: str | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        agent_name = terminal or "orchestrator"
-        if mode == "unread":
-            upstream = self._ov(["ov", "mail", "check", "--agent", str(agent_name), "--json"])
+        eff_run = self.state._resolve_caller_run(run, default_run="default") or "default"
+        bound = self.state._worker_bound_run()
+        if bound:
+            own_did = env_get("OPEN_FLEET_DISPATCH_ID", "ORCA_DISPATCH_ID", self.state.env, "")
+            with self.state._connect() as conn:
+                own_row = conn.execute(
+                    "SELECT dispatch_id FROM dispatches WHERE backend = ? AND dispatch_id = ? AND run_id = ? LIMIT 1",
+                    (self.name, own_did, bound),
+                ).fetchone()
+            if own_row is None:
+                raise ProviderError(
+                    "cross_run_access",
+                    f"launched worker {own_did!r} has no {self.name} mailbox in run {bound!r}",
+                )
+            agent_name = str(own_row["dispatch_id"])
         else:
-            # `ov mail check` marks everything it returns as read; peek/all must not consume mail.
-            argv = ["ov", "mail", "list", "--to", str(agent_name), "--json"]
-            if mode == "peek":
-                argv.insert(-1, "--unread")
-            upstream = self._ov(argv)
-        local = self.state.check_messages(
+            with self.state._connect() as conn:
+                self.state._mailbox_scope(conn, eff_run, self.state._resolve_terminal(terminal))
+            agent_name = terminal or "orchestrator"
+
+        def _upstream_check() -> dict[str, Any]:
+            if mode == "unread":
+                if retry_request:
+                    self.state.mark_request_contacted(retry_request, contacted=True)
+                try:
+                    upstream = self._ov(["ov", "mail", "check", "--agent", str(agent_name), "--json"])
+                except ProviderError as exc:
+                    if retry_request and exc.code.endswith(("_cli_missing", "_not_configured")):
+                        self.state.mark_request_contacted(retry_request, contacted=False)
+                    raise
+            else:
+                # `ov mail check` marks everything it returns as read; peek/all must not consume mail.
+                argv = ["ov", "mail", "list", "--to", str(agent_name), "--json"]
+                if mode == "peek":
+                    argv.insert(-1, "--unread")
+                upstream = self._ov(argv)
+            return {"upstreamMessages": upstream.get("messages", [])}
+
+        return self.state.check_messages(
             terminal=terminal,
             run=run,
             ack=ack,
@@ -352,9 +415,8 @@ class OverstoryProvider(RuntimeProvider):
             wait=wait,
             timeout_ms=timeout_ms,
             retry_request=retry_request,
+            upstream_fn=_upstream_check,
         )
-        local["upstreamMessages"] = upstream.get("messages", [])
-        return local
 
     def reply_message(
         self,
@@ -366,16 +428,32 @@ class OverstoryProvider(RuntimeProvider):
         retry_request: str | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        try:
-            return self.state.reply_message(msg_id=msg_id, body=body, run=run, sender=sender, retry_request=retry_request)
-        except ProviderError as exc:
-            if exc.code != "message_not_found":
+        def _upstream_reply() -> dict[str, Any]:
+            if self.state._worker_bound_run():
+                raise ProviderError("cross_run_access", "launched worker cannot reply to unverified upstream mail id")
+            # Not a local id: an Overstory mail id from `upstreamMessages`.
+            argv = ["ov", "mail", "reply", str(msg_id), "--body", str(body), "--json"]
+            if sender:
+                argv[-1:-1] = ["--from", str(sender)]
+            if retry_request:
+                self.state.mark_request_contacted(retry_request, contacted=True)
+            try:
+                upstream = self._ov(argv)
+            except ProviderError as exc:
+                if retry_request and exc.code.endswith(("_cli_missing", "_not_configured")):
+                    self.state.mark_request_contacted(retry_request, contacted=False)
                 raise
-        # Not a local id: an Overstory mail id from `upstreamMessages`.
-        argv = ["ov", "mail", "reply", str(msg_id), "--body", str(body), "--json"]
-        if sender:
-            argv[-1:-1] = ["--from", str(sender)]
-        return {"replied": True, "id": msg_id, "scope": "upstream", "upstream": self._ov(argv)}
+            return {"replied": True, "id": msg_id, "scope": "upstream", "upstream": upstream}
+
+        setattr(_upstream_reply, "_manages_request_contact", True)
+        return self.state.reply_message(
+            msg_id=msg_id,
+            body=body,
+            run=run,
+            sender=sender,
+            retry_request=retry_request,
+            upstream_fn=_upstream_reply,
+        )
 
     # --- Worktree operations ---
     def worktree_list(self, *, repo: str | None = None, limit: int | None = None, **kwargs: Any) -> dict[str, Any]:
@@ -389,6 +467,16 @@ class OverstoryProvider(RuntimeProvider):
         if not selector:
             # `ov worktree clean` has no selector: it would remove EVERY finished worktree.
             raise ProviderError("invalid_selector", "overstory worktree rm requires an explicit agent name, branch or path")
+        bound = self.state._worker_bound_run()
+        if bound:
+            sel_check = os.path.realpath(selector) if os.path.isabs(selector) else selector
+            with self.state._connect() as conn:
+                owned_wt = conn.execute(
+                    "SELECT 1 FROM dispatches WHERE backend = ? AND (dispatch_id = ? OR worktree = ? OR worktree = ?) AND run_id = ? LIMIT 1",
+                    (self.name, selector, selector, sel_check, bound),
+                ).fetchone()
+            if owned_wt is None:
+                raise ProviderError("cross_run_access", f"overstory worktree {selector!r} is not owned by run {bound!r}")
         items = self.worktree_list()["worktrees"]
         sel_real = os.path.realpath(selector) if os.path.isabs(selector) else None
         match = next(

@@ -309,28 +309,71 @@ class JCodeSwarmProvider(ExternalDispatchMixin, RuntimeProvider):
         payload: str | None = None,
         run: str | None = None,
         attrs: dict[str, Any] | None = None,
+        retry_request: str | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        local = self.state.send_message(
-            subject=subject, msg_type=msg_type, to=to, outcome=outcome, sender=sender,
-            payload=payload, run=run, attrs=attrs,
+        eff_body = payload if payload is not None else (kwargs.get("body") if kwargs.get("body") is not None else subject)
+        eff_retry = (
+            retry_request
+            if retry_request is not None
+            else (str(attrs["retry-request"]) if isinstance(attrs, dict) and "retry-request" in attrs else None)
         )
-        body = payload if payload is not None else subject
-        target: str | None = None
-        broadcast = to in ("all", "broadcast", "*")
-        if to and not broadcast:
-            with self.state._connect() as conn:
-                row = conn.execute(
-                    "SELECT session_id FROM dispatches WHERE backend = ? AND (dispatch_id = ? OR terminal_handle = ?)",
-                    (self.name, to, to),
-                ).fetchone()
-            target = str(row["session_id"]) if row else None
-        if broadcast or target:
-            local["upstream"] = self._request(
-                "comm_message", from_session=self._coordinator(), message=f"[{msg_type}] {subject}\n{body}",
-                to_session=target,
-            )
-        return local
+
+        def _relay(eff_run: str) -> Any:
+            bound = self.state._worker_bound_run()
+            broadcast = to in ("all", "broadcast", "*")
+            if broadcast and bound:
+                raise ProviderError("cross_run_access", "launched worker cannot broadcast across runs")
+            if to and not broadcast and bound:
+                with self.state._connect() as conn:
+                    foreign = conn.execute(
+                        "SELECT run_id FROM dispatches WHERE backend = ? AND (dispatch_id = ? OR terminal_handle = ?) AND run_id != ? LIMIT 1",
+                        (self.name, to, to, eff_run),
+                    ).fetchone()
+                if foreign:
+                    raise ProviderError(
+                        "cross_run_access",
+                        f"recipient {to!r} belongs to run {foreign['run_id']!r}, not {eff_run!r}",
+                    )
+            target: str | None = None
+            if to and not broadcast:
+                with self.state._connect() as conn:
+                    row = conn.execute(
+                        "SELECT session_id FROM dispatches WHERE backend = ? AND run_id = ? AND (dispatch_id = ? OR terminal_handle = ?)",
+                        (self.name, eff_run, to, to),
+                    ).fetchone()
+                target = str(row["session_id"]) if row else None
+            if broadcast or target:
+                coord = self._coordinator()
+                if eff_retry:
+                    self.state.mark_request_contacted(eff_retry, contacted=True)
+                try:
+                    return self._request(
+                        "comm_message", from_session=coord, message=f"[{msg_type}] {subject}\n{eff_body}",
+                        to_session=target,
+                    )
+                except ProviderError as exc:
+                    if eff_retry and exc.code.endswith(("_socket_unknown", "_not_configured")):
+                        self.state.mark_request_contacted(eff_retry, contacted=False)
+                    raise
+            return self.state._NO_UPSTREAM
+
+        setattr(_relay, "_manages_request_contact", True)
+
+        return self.state.send_message(
+            subject=subject,
+            msg_type=msg_type,
+            to=to,
+            outcome=outcome,
+            sender=sender,
+            payload=payload,
+            body=kwargs.get("body"),
+            run=run,
+            attrs=attrs,
+            reply_to=kwargs.get("reply_to"),
+            retry_request=retry_request,
+            upstream_fn=_relay,
+        )
 
     def check_messages(self, **kwargs: Any) -> dict[str, Any]:
         return self.state.check_messages(**kwargs)
@@ -346,7 +389,7 @@ class JCodeSwarmProvider(ExternalDispatchMixin, RuntimeProvider):
 
     # --- Worker observation & fencing ---
     def worker_list(self, **kwargs: Any) -> dict[str, Any]:
-        return self._list_local(run=kwargs.get("run"), task=kwargs.get("task"), limit=kwargs.get("limit"))
+        return self._list_local(**kwargs)
 
     def worker_show(self, *, dispatch_id: str = "", **kwargs: Any) -> dict[str, Any]:
         row = self._dispatch_row(dispatch_id)

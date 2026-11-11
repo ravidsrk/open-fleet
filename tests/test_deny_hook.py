@@ -1822,15 +1822,16 @@ class TestScriptShape(unittest.TestCase):
         # through `sh -c`. A space-free path stays byte-identical (shlex.quote adds nothing).
         spaced = self.tmp / "a b$dir"
         spaced.mkdir()
-        hook_copy = spaced / "deny-hook.sh"
-        hook_copy.write_bytes(HOOK.read_bytes())
-        hook_copy.chmod(0o755)
+        raw_hook_copy = spaced / "deny-hook.sh"
+        raw_hook_copy.write_bytes(HOOK.read_bytes())
+        raw_hook_copy.chmod(0o755)
         wt = self.tmp / "unit"
         wt.mkdir()
-        r = subprocess.run(["sh", str(hook_copy), "--settings", str(wt)],
+        r = subprocess.run(["sh", str(raw_hook_copy), "--settings", str(wt)],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         command = json.loads(r.stdout)["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        hook_copy = Path(os.path.realpath(raw_hook_copy))
         self.assertEqual(shlex.split(command), [str(hook_copy)],
                          "the command must parse back to exactly the hook path")
         self.assertNotEqual(command, str(hook_copy),
@@ -2831,16 +2832,49 @@ class TestVerifySettingsRunsOnlyThisHook(unittest.TestCase):
         self.assertEqual(self._verify(self._with_command(f"sh {link}")).returncode, 0)
 
     def test_the_registered_shell_is_the_shell_the_probes_run(self):
-        # PR #707 review (security): the shell token kept only its basename, so a registration
-        # naming an interpreter INSIDE the worktree passed the hook's byte check while the probes
-        # ran the coordinator's shell and the harness later ran the worker's. An explicit path is
-        # probed as registered, and may not lie in the boundary or be anything but an executable.
+        # PR #707 review (security) + C18 (#750): an explicit interpreter path is probed as
+        # registered, and may not lie in the boundary, traverse a symlink in a writable or
+        # in-boundary directory (post-verification symlink-swap variant), or be worker-controlled
+        # or writable.
         inside = self.wt / "sh"
         inside.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         inside.chmod(0o755)
         r = self._verify(self._with_command(f"{inside} {HOOK}"))
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("inside the worktree boundary", r.stderr)
+
+        # Post-verification symlink-swap inside the worktree: symlink in wt -> /bin/sh.
+        inside_link = self.wt / "bash"
+        inside_link.symlink_to("/bin/sh")
+        r = self._verify(self._with_command(f"{inside_link} {HOOK}"))
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("inside the worktree boundary", r.stderr)
+
+        # Worker-owned/writable interpreter outside the worktree (even 0555): must never be run.
+        marker = self.tmp / "INTERP_RAN"
+        outside_owned = self.tmp / "owned-bin" / "sh"
+        outside_owned.parent.mkdir()
+        outside_owned.write_text(f"#!/bin/sh\ntouch {marker}\nexec /bin/sh \"$@\"\n", encoding="utf-8")
+        outside_owned.chmod(0o555)
+        outside_owned.parent.chmod(0o555)
+        try:
+            r = self._verify(self._with_command(f"{outside_owned} {HOOK}"))
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertIn("worker-controlled or writable", r.stderr)
+            self.assertFalse(marker.exists(), "worker-controlled interpreter was executed by --verify-settings")
+        finally:
+            outside_owned.parent.chmod(0o755)
+            outside_owned.chmod(0o755)
+
+        # Post-verification symlink-swap outside the worktree: symlink in writable dir -> /bin/sh.
+        swap_dir = self.tmp / "swap-bin"
+        swap_dir.mkdir()
+        swap_link = swap_dir / "sh"
+        swap_link.symlink_to("/bin/sh")
+        r = self._verify(self._with_command(f"{swap_link} {HOOK}"))
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("worker-controlled or writable", r.stderr)
+
         missing = self.tmp / "nowhere" / "bash"
         r = self._verify(self._with_command(f"{missing} {HOOK}"))
         self.assertEqual(r.returncode, 2, r.stderr)
@@ -3287,6 +3321,39 @@ class TestReadOnlyTierWriteFloor(HookBase):
         self.assertIn("OPEN_FLEET_HOOK_READONLY", text)
         self.assertIn("NOT a filesystem sandbox", text)
 
+    def test_sandbox_profile_ro_and_verify_settings_readonly_enforce_write_floor(self):
+        # C26 (#750): OPEN_FLEET_SANDBOX_PROFILE=ro activates the hook write floor, and
+        # --verify-settings --readonly refuses a registration that leaves in-worktree Bash writes open.
+        wt = self.tmp / "c26wt"
+        wt.mkdir()
+        env_ro_profile = {"OPEN_FLEET_SANDBOX_PROFILE": "ro", "ORCA_UNIT_WORKTREE": str(wt)}
+        block = self.decision(self.fire(event("Bash", command="echo x > in.txt"),
+                                        env_extra=env_ro_profile, cwd=wt))
+        self.assertIsNotNone(block)
+        self.assertEqual(block["permissionDecision"], "deny")
+        self.assertIn("READONLY", block["permissionDecisionReason"])
+
+        rw_settings = self.tmp / "rw-settings.json"
+        rw_settings.write_text(
+            subprocess.run(["sh", str(HOOK), "--settings", str(wt)],
+                           capture_output=True, text=True, check=True).stdout,
+            encoding="utf-8",
+        )
+        r_fail = subprocess.run(["sh", str(HOOK), "--verify-settings", str(rw_settings), "--readonly"],
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(r_fail.returncode, 2, r_fail.stderr)
+        self.assertIn("ro write floor is not live", r_fail.stderr)
+
+        ro_settings = self.tmp / "ro-settings.json"
+        ro_settings.write_text(
+            subprocess.run(["sh", str(HOOK), "--settings", str(wt), "--readonly"],
+                           capture_output=True, text=True, check=True).stdout,
+            encoding="utf-8",
+        )
+        r_ok = subprocess.run(["sh", str(HOOK), "--verify-settings", str(ro_settings), "--readonly"],
+                              capture_output=True, text=True, timeout=60)
+        self.assertEqual(r_ok.returncode, 0, r_ok.stderr)
+
 
 class TestRemainingAuditFindings(ReviewHookBase):
     """2026-10-29 audit, F3-F8: shapes the reader did not read (a fail-open launcher, a lease that
@@ -3457,20 +3524,23 @@ class TestAuditFindingsF1F2F7(ReviewHookBase):
             "busybox sed -e 'e git push --force origin main' f",
         ), bounded_modes=self.BOTH)
 
-    def test_busybox_install_before_a_shell_applet_is_judged_as_the_shell(self):
-        # #740: --install shifted the applet, so busybox --install sh -c BODY was allowed with its
-        # body never read. _peel_busybox skips --install (and -s) and judges the shell, failing
-        # closed. Real busybox takes the word after them as DIR; denying here over-denies.
-        self.expect("deny", (
-            "busybox --install sh -c 'git push --force origin main'",
-            "/bin/busybox --install sh -c 'git push --force origin main'",
-            "busybox --install -s sh -c 'git push --force origin main'",
-        ), bounded_modes=self.BOTH, reason="default branch")
-        # Negative control: no applet follows, so nothing is peeled and the decision is unchanged.
+    def test_busybox_install_does_not_peel_dir_operand_as_an_applet(self):
+        # D2 (#750): `busybox --install [-s] [DIR]` takes an optional target directory operand
+        # rather than an applet name; treating `DIR` as an applet falsely denied directories named
+        # after applets (or trailing arguments). Direct applet invocations still peel and deny.
         self.expect("allow", (
             "busybox --install -s /tmp/bin",
             "busybox --install",
+            "busybox --install -s sh",
+            "busybox --install -s tar",
+            "busybox --install rm",
+            "busybox --install awk",
+            "busybox --install -s install",
         ), bounded_modes=self.BOTH)
+        self.expect("deny", (
+            "busybox sh -c 'git push --force origin main'",
+            "/bin/busybox sh -c 'git push --force origin main'",
+        ), bounded_modes=self.BOTH, reason="default branch")
 
     def raw(self, payload):
         # A non-Claude tool name (local_shell, exec_command) is STRICT: it blocks with exit 2.

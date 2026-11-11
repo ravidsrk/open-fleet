@@ -62,9 +62,9 @@ python3 runtime/scripts/verify.py --manifest <m.json> \
 ```
 
 `--contract-source`, `--contract-digest` and `--nc-command` come from the COORDINATOR, out of band —
-never from the manifest, which the graded worker writes (#279). `--execute-nc` is REQUIRED in the two
-review-waiver lanes (`--lighting dark-eligible`, `--no-gh`), where the control is the only oracle
-left, and is the stronger form everywhere else. Record the run per `docs/runs/TEMPLATE.md`.
+never from the manifest (#279). `--execute-nc` is REQUIRED by default on mutation units (#750 C10, and
+always in waiver lanes); only `--allow-static-nc` on gh accepts static corroboration.
+Mutation tools quote the mutant diff in `negative_control.artifact`. Record per `docs/runs/TEMPLATE.md`.
 
 ## Completion
 

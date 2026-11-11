@@ -46,7 +46,13 @@ class Shape(unittest.TestCase):
         self.assertTrue(any("human" in e for e in errors))
 
     def test_bare_human_prefix_and_agent_roles_are_refused(self):
-        for by in ("human:", "human:agent", "human:coordinator", "human:Worker"):
+        reserved_literals = (
+            "agent", "ai", "anonymous", "auto", "automatic", "bot", "coordinator", "fleet",
+            "human", "model", "nobody", "none", "orca", "system", "unknown", "worker",
+        )
+        self.assertEqual(set(reserved_literals), set(qc._RESERVED_HUMAN_NAMES))
+        for by in ("human:", "human:agent", "human:coordinator", "human:Worker", "human:unknown",
+                   *(f"human:{role}" for role in reserved_literals)):
             _, errors = self.parse([entry(by=by)])
             self.assertTrue(errors, by)
 

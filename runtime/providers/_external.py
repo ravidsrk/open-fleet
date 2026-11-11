@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextvars
 import functools
+import inspect
 import json
 import os
 import subprocess
@@ -27,7 +28,7 @@ import re
 from typing import Callable
 
 from .base import ProviderError, fence_state, normalize_show, parse_json_strict
-from .local_state import LocalStateStore
+from .local_state import ACTIVE_REQUEST_PAYLOAD_SHA, LocalStateStore, request_payload_sha256
 from .posix import HOOK_ARTIFACTS, populated_gitlinks, run_git
 
 
@@ -156,23 +157,125 @@ def http_json(
 # worker may exist, so a failure keeps the request's claim. A ContextVar, so concurrent calls on
 # one adapter each read their own.
 _REACHED_RUNTIME: contextvars.ContextVar[bool] = contextvars.ContextVar("reached_runtime", default=False)
+_LAUNCH_CLAIM_CTX: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+    "launch_claim_ctx", default=None
+)
+
+
+def claim_local_task(
+    state: Any,
+    task_id: str | None,
+    run: str | None = None,
+) -> tuple[bool, str | None]:
+    """Transition a local task `ready -> dispatched`, enforcing Run ownership (#750 C28, C29)."""
+    if state is not None and hasattr(state, "_resolve_caller_run"):
+        run = state._resolve_caller_run(run, default_run=None)
+    if state is None or not task_id or not hasattr(state, "_connect"):
+        return False, run
+    now = time.time()
+    with state._connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT status, run_id FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if row is None:
+            conn.execute("ROLLBACK")
+            return False, run
+        if run is not None and row["run_id"] != run:
+            conn.execute("ROLLBACK")
+            raise ProviderError(
+                "cross_run_access",
+                f"task {task_id!r} belongs to run {row['run_id']!r}, not {run!r}",
+            )
+        if row["status"] != "ready":
+            conn.execute("ROLLBACK")
+            raise ProviderError(
+                "task_not_startable",
+                f"task {task_id!r} has status {row['status']!r} (must be 'ready')",
+                {"taskId": task_id, "status": row["status"]},
+            )
+        cur = conn.execute(
+            "UPDATE tasks SET status = 'dispatched', updated_at = ? WHERE id = ? AND status = 'ready'",
+            (now, task_id),
+        )
+        if cur.rowcount != 1:
+            conn.execute("ROLLBACK")
+            raise ProviderError("task_not_startable", f"task {task_id!r} is no longer 'ready'")
+        conn.execute("COMMIT")
+        return True, str(row["run_id"] or "default")
+
+
+def release_local_task(state: Any, task_id: str | None) -> None:
+    """Restore a claimed local task to `ready` when upstream launch fails before recording (#750 C29)."""
+    if state is None or not task_id or not hasattr(state, "_connect"):
+        return
+    with state._connect() as conn:
+        conn.execute(
+            "UPDATE tasks SET status = 'ready', updated_at = ? WHERE id = ? AND status = 'dispatched'",
+            (time.time(), task_id),
+        )
+
+
+def _ensure_ctx_task_claimed() -> None:
+    ctx = _LAUNCH_CLAIM_CTX.get()
+    if ctx is not None and not ctx.get("checked"):
+        ctx["checked"] = True
+        claimed, eff_run = claim_local_task(ctx.get("state"), ctx.get("task_id"), ctx.get("run"))
+        ctx["claimed"] = claimed
+        ctx["effective_run"] = eff_run
 
 
 def _marking_runtime_contact(runner):
-    """`runner` that records the runtime was reached. A binary that was never found ran nothing."""
+    """`runner` that claims the local task and records the runtime was reached."""
 
     @functools.wraps(runner)
     def marked(*args, **kwargs):
+        _ensure_ctx_task_claimed()
+        ctx = _LAUNCH_CLAIM_CTX.get()
         before = _REACHED_RUNTIME.get()
+        if not before and ctx is not None:
+            st = ctx.get("state")
+            req_id = ctx.get("retry_request")
+            if req_id and st is not None and hasattr(st, "mark_request_contacted"):
+                st.mark_request_contacted(
+                    req_id,
+                    contacted=True,
+                    task_id=ctx.get("task_id") if ctx.get("claimed") else None,
+                )
         _REACHED_RUNTIME.set(True)
         try:
             return runner(*args, **kwargs)
         except FileNotFoundError:
             _REACHED_RUNTIME.set(before)
+            if not before and ctx is not None:
+                st = ctx.get("state")
+                req_id = ctx.get("retry_request")
+                if req_id and st is not None and hasattr(st, "mark_request_contacted"):
+                    st.mark_request_contacted(req_id, contacted=False)
+            raise
+        except ProviderError as exc:
+            if exc.code.endswith(("_not_configured", "_cli_missing")):
+                _REACHED_RUNTIME.set(before)
+                if not before and ctx is not None:
+                    st = ctx.get("state")
+                    req_id = ctx.get("retry_request")
+                    if req_id and st is not None and hasattr(st, "mark_request_contacted"):
+                        st.mark_request_contacted(req_id, contacted=False)
             raise
 
     marked._marks_runtime_contact = True
     return marked
+
+
+def ensure_runner_marks_contact(provider: Any) -> contextvars.Token[bool]:
+    """Ensure `provider._runner` records runtime contact and return a fresh `_REACHED_RUNTIME` token."""
+    runner = getattr(provider, "_runner", None)
+    if callable(runner) and getattr(runner, "_marks_runtime_contact", False) is not True:
+        provider._runner = _marking_runtime_contact(runner)
+    return _REACHED_RUNTIME.set(not callable(runner))
+
+
+def runtime_was_reached() -> bool:
+    """Whether the current call has handed anything to its upstream runtime."""
+    return bool(_REACHED_RUNTIME.get())
 
 
 def release_claim_on_failure(worker_start):
@@ -188,21 +291,72 @@ def release_claim_on_failure(worker_start):
     @functools.wraps(worker_start)
     def wrapper(self, *args, **kwargs):
         retry_request = kwargs.get("retry_request")
+        try:
+            bound = inspect.signature(worker_start).bind_partial(self, *args, **kwargs)
+            bound.apply_defaults()
+            payload_args = {
+                k: v for k, v in bound.arguments.items() if k not in ("self", "retry_request", "kwargs")
+            }
+            if "kwargs" in bound.arguments and isinstance(bound.arguments["kwargs"], dict):
+                payload_args.update(bound.arguments["kwargs"])
+        except (TypeError, ValueError):
+            payload_args = {k: v for k, v in kwargs.items() if k != "retry_request"}
+        payload_sha = request_payload_sha256(payload_args)
+        state_obj = getattr(self, "state", None)
+        resolved_run = payload_args.get("run")
+        if state_obj is not None and hasattr(state_obj, "_resolve_caller_run"):
+            resolved_run = state_obj._resolve_caller_run(resolved_run, default_run=None)
+            tid = payload_args.get("task_id")
+            if tid and hasattr(state_obj, "_connect"):
+                with state_obj._connect() as conn:
+                    t_row = conn.execute("SELECT run_id FROM tasks WHERE id = ?", (tid,)).fetchone()
+                if t_row is not None and resolved_run is not None and t_row["run_id"] != resolved_run:
+                    raise ProviderError(
+                        "cross_run_access",
+                        f"task {tid!r} belongs to run {t_row['run_id']!r}, not {resolved_run!r}",
+                    )
         runner = getattr(self, "_runner", None)
         if callable(runner) and getattr(runner, "_marks_runtime_contact", False) is not True:
             self._runner = _marking_runtime_contact(runner)
         # An adapter with no `_runner` cannot say whether it launched: its claim is kept.
         token = _REACHED_RUNTIME.set(not callable(runner))
+        sha_token = ACTIVE_REQUEST_PAYLOAD_SHA.set(payload_sha)
+        claim_ctx = {
+            "state": state_obj,
+            "task_id": payload_args.get("task_id"),
+            "run": resolved_run,
+            "retry_request": retry_request,
+            "checked": False,
+            "claimed": False,
+            "effective_run": resolved_run,
+            "recorded": False,
+        }
+        ctx_token = _LAUNCH_CLAIM_CTX.set(claim_ctx)
         try:
             return worker_start(self, *args, **kwargs)
         except BaseException:
-            if retry_request and not _REACHED_RUNTIME.get():
-                row = self.state.request_row(retry_request)
-                if (row and row.get("state") == "pending" and not row.get("response_json")
-                        and int(row.get("claim_pid") or 0) == os.getpid()):
-                    self.state.release_request(retry_request)
+            if claim_ctx.get("claimed") and not claim_ctx.get("recorded") and not _REACHED_RUNTIME.get():
+                release_local_task(claim_ctx.get("state"), claim_ctx.get("task_id"))
+            if retry_request and state_obj is not None:
+                row = state_obj.request_row(retry_request)
+                if row and row.get("state") == "pending" and not row.get("response_json"):
+                    if not _REACHED_RUNTIME.get():
+                        if int(row.get("claim_pid") or 0) == os.getpid():
+                            state_obj.release_request(retry_request)
+                    elif hasattr(state_obj, "mark_request_contacted") and (
+                        int(row.get("contacted_runtime") or 0) != 0
+                        or int(row.get("claim_pid") or 0) == os.getpid()
+                    ):
+                        state_obj.mark_request_contacted(
+                            retry_request,
+                            contacted=True,
+                            task_id=claim_ctx.get("task_id") if claim_ctx.get("claimed") else None,
+                            settled_ambiguous=True,
+                        )
             raise
         finally:
+            _LAUNCH_CLAIM_CTX.reset(ctx_token)
+            ACTIVE_REQUEST_PAYLOAD_SHA.reset(sha_token)
             _REACHED_RUNTIME.reset(token)
 
     return wrapper
@@ -217,6 +371,11 @@ class ExternalDispatchMixin:
     def _dispatch_row(self, dispatch_id: str) -> Any:
         if not dispatch_id:
             raise ProviderError("dispatch_not_found", "no --dispatch id given")
+        bound = (
+            self.state._resolve_caller_run(None, default_run=None)
+            if hasattr(self.state, "_resolve_caller_run")
+            else None
+        )
         with self.state._connect() as conn:
             row = conn.execute(
                 "SELECT * FROM dispatches WHERE dispatch_id = ? AND backend = ?",
@@ -224,6 +383,12 @@ class ExternalDispatchMixin:
             ).fetchone()
         if not row:
             raise ProviderError("dispatch_not_found", f"{self.name}: dispatch {dispatch_id!r} not found")
+        row_run = str(row["run_id"] or "default")
+        if bound and row_run != bound:
+            raise ProviderError(
+                "cross_run_access",
+                f"dispatch {dispatch_id!r} belongs to run {row_run!r}, not {bound!r}",
+            )
         return row
 
     @staticmethod
@@ -247,20 +412,19 @@ class ExternalDispatchMixin:
         effective: dict[str, Any],
         session_id: str | None = None,
     ) -> None:
-        now = time.time()
-        with self.state._connect() as conn:
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO dispatches(
-                    dispatch_id, task_id, run_id, worktree, agent, profile,
-                    terminal_handle, state, terminal_state, backend, launch_effective, session_id, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'ready', 'active', ?, ?, ?, ?, ?)
-                """,
-                (
-                    dispatch_id, task_id, run or "default", worktree, agent, profile, handle,
-                    self.name, json.dumps(effective), session_id or dispatch_id, now, now,
-                ),
-            )
+        insert_dispatch(
+            self.state,
+            dispatch_id=dispatch_id,
+            task_id=task_id,
+            run=run,
+            worktree=worktree,
+            agent=agent,
+            profile=profile,
+            handle=handle,
+            backend=self.name,
+            effective=effective,
+            session_id=session_id or dispatch_id,
+        )
 
     def _patch_dispatch(self, dispatch_id: str, *, worktree: str | None = None, effective: dict[str, Any] | None = None) -> None:
         row = self._dispatch_row(dispatch_id)
@@ -293,23 +457,27 @@ class ExternalDispatchMixin:
             raw=raw,
         )
 
-    def _list_local(self, *, run: str | None = None, task: str | None = None, limit: int | None = None) -> dict[str, Any]:
-        q = "SELECT * FROM dispatches WHERE backend = ?"
-        params: list[Any] = [self.name]
-        if run:
-            q += " AND run_id = ?"
-            params.append(run)
-        if task:
-            q += " AND task_id = ?"
-            params.append(task)
-        q += " ORDER BY created_at ASC"
-        if limit:
-            q += " LIMIT ?"
-            params.append(int(limit))
-        with self.state._connect() as conn:
-            rows = conn.execute(q, params).fetchall()
-        workers = [self._show_row(r)["worker"] for r in rows]
-        return {"workers": workers, "scope": {"source": self.name}, "page": {"nextCursor": None}}
+    def _list_local(
+        self,
+        *,
+        run: str | None = None,
+        task: str | None = None,
+        terminal_state: str | None = None,
+        include_remote: bool = False,
+        limit: int | None = None,
+        cursor: str | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        return local_worker_list(
+            self.state,
+            self.name,
+            run=run,
+            task=task,
+            terminal_state=terminal_state,
+            include_remote=include_remote,
+            limit=limit,
+            cursor=cursor,
+        )
 
 
 def env_flag(value: str | None) -> bool:
@@ -485,8 +653,23 @@ def insert_dispatch(
     effective: dict[str, Any],
     session_id: str | None = None,
 ) -> None:
+    _ensure_ctx_task_claimed()
+    ctx = _LAUNCH_CLAIM_CTX.get()
+    effective_run = (
+        state._resolve_caller_run(run, default_run=None)
+        if hasattr(state, "_resolve_caller_run")
+        else run
+    )
+    if ctx is not None:
+        ctx["recorded"] = True
+        if effective_run is None and ctx.get("effective_run"):
+            effective_run = ctx["effective_run"]
     now = time.time()
     with state._connect() as conn:
+        if effective_run is None and task_id:
+            t_row = conn.execute("SELECT run_id FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if t_row and t_row["run_id"]:
+                effective_run = str(t_row["run_id"])
         conn.execute(
             """
             INSERT OR REPLACE INTO dispatches(
@@ -497,7 +680,7 @@ def insert_dispatch(
             (
                 dispatch_id,
                 task_id or "",
-                run or "default",
+                effective_run or "default",
                 worktree or "",
                 agent,
                 profile,
@@ -511,10 +694,23 @@ def insert_dispatch(
         )
 
 
+def resolve_worker_list_run(
+    state: LocalStateStore,
+    run: str | None,
+    *,
+    include_remote: bool = False,
+) -> str | None:
+    eff_run = state._resolve_caller_run(run, default_run=None) if hasattr(state, "_resolve_caller_run") else run
+    if include_remote and hasattr(state, "_worker_bound_run") and state._worker_bound_run():
+        raise ProviderError("cross_run_access", "launched worker cannot list unfiltered remote workers across runs")
+    return eff_run
+
+
 def load_dispatch(state: LocalStateStore, dispatch_id: str, backend: str) -> dict[str, Any]:
     """The locally recorded dispatch for `backend`, with `launch_effective` decoded."""
     if not dispatch_id:
         raise ProviderError("dispatch_not_found", "no dispatch id given")
+    bound = state._resolve_caller_run(None, default_run=None) if hasattr(state, "_resolve_caller_run") else None
     with state._connect() as conn:
         row = conn.execute(
             "SELECT * FROM dispatches WHERE dispatch_id = ? AND backend = ?",
@@ -523,6 +719,12 @@ def load_dispatch(state: LocalStateStore, dispatch_id: str, backend: str) -> dic
     if not row:
         raise ProviderError("dispatch_not_found", f"{backend}: dispatch {dispatch_id!r} not found")
     rec = dict(row)
+    row_run = str(rec.get("run_id") or "default")
+    if bound and row_run != bound:
+        raise ProviderError(
+            "cross_run_access",
+            f"dispatch {dispatch_id!r} belongs to run {row_run!r}, not {bound!r}",
+        )
     try:
         rec["effective"] = json.loads(rec.get("launch_effective") or "{}")
     except json.JSONDecodeError:
@@ -554,21 +756,94 @@ def show_from_row(row: dict[str, Any], *, stage: str | None = None, raw: Any = N
     )
 
 
+def _filter_upstream_records(upstream: Any, page_rows: list[dict[str, Any]]) -> Any:
+    """Filter raw upstream records to the dispatches returned in `page_rows` (#750 C37)."""
+    if upstream is None:
+        return None
+    page_ids = {str(r.get("dispatch_id") or "") for r in page_rows if r.get("dispatch_id")}
+    session_ids = {str(r.get("session_id") or "") for r in page_rows if r.get("session_id")}
+    addresses: set[tuple[str, str]] = set()
+    workspace_ids: set[str] = set()
+    thread_ids: set[str] = set()
+    for r in page_rows:
+        try:
+            eff = json.loads(r.get("launch_effective") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            eff = {}
+        if isinstance(eff, dict):
+            if eff.get("address"):
+                addresses.add((str(eff.get("address")), str(eff.get("beadId") or "")))
+            if eff.get("workspaceId"):
+                workspace_ids.add(str(eff.get("workspaceId")))
+            if eff.get("threadId"):
+                thread_ids.add(str(eff.get("threadId")))
+    if isinstance(upstream, list):
+        return [
+            p
+            for p in upstream
+            if isinstance(p, dict)
+            and (
+                (f"{p.get('rig')}/{p.get('name')}", str(p.get("issue") or "")) in addresses
+                or str(p.get("id") or "") in page_ids
+                or str(p.get("name") or "") in page_ids
+            )
+        ]
+    if isinstance(upstream, dict):
+        out = dict(upstream)
+        if isinstance(out.get("items"), list):
+            out["items"] = [
+                it for it in out["items"] if isinstance(it, dict) and str(it.get("id") or "") in page_ids
+            ]
+        if isinstance(out.get("agents"), list):
+            out["agents"] = [
+                a for a in out["agents"] if isinstance(a, dict) and str(a.get("agentName") or "") in page_ids
+            ]
+        if isinstance(out.get("threads"), list):
+            valid_threads = page_ids | session_ids | thread_ids
+            out["threads"] = [
+                t for t in out["threads"] if isinstance(t, dict) and str(t.get("threadId") or "") in valid_threads
+            ]
+        if isinstance(out.get("workspaces"), list):
+            filtered_ws = []
+            for ws in out["workspaces"]:
+                if not isinstance(ws, dict):
+                    continue
+                ws_id = str(ws.get("id") or "")
+                terms = [
+                    t
+                    for t in (ws.get("terminals") or [])
+                    if isinstance(t, dict) and str(t.get("id") or "") in session_ids
+                ]
+                if ws_id in workspace_ids or terms:
+                    ws_copy = dict(ws)
+                    if "terminals" in ws_copy:
+                        ws_copy["terminals"] = terms
+                    filtered_ws.append(ws_copy)
+            out["workspaces"] = filtered_ws
+        return out
+    return upstream
+
+
 def local_worker_list(
     state: LocalStateStore,
     backend: str,
     *,
     run: str | None = None,
     task: str | None = None,
+    terminal_state: str | None = None,
+    include_remote: bool = False,
     limit: int | None = None,
+    cursor: str | None = None,
     stages: dict[str, str] | None = None,
     upstream: Any = None,
+    **kwargs: Any,
 ) -> dict[str, Any]:
     """A worker-list receipt built from OUR dispatch rows (the shape `worker_ops.format_list` reads).
 
     Upstream listings name workers open-fleet never dispatched (and reused slots); they may only
     annotate a row's `stage` (keyed by dispatch id), never become rows themselves.
     """
+    run = resolve_worker_list_run(state, run, include_remote=bool(include_remote))
     q = "SELECT * FROM dispatches WHERE backend = ?"
     params: list[Any] = [backend]
     if run:
@@ -577,15 +852,33 @@ def local_worker_list(
     if task:
         q += " AND task_id = ?"
         params.append(task)
-    q += " ORDER BY created_at ASC"
-    if limit:
-        q += " LIMIT ?"
-        params.append(int(limit))
+    if terminal_state:
+        q += " AND terminal_state = ?"
+        params.append(terminal_state)
+    q += " ORDER BY created_at ASC, dispatch_id ASC"
     with state._connect() as conn:
         rows = [dict(r) for r in conn.execute(q, params).fetchall()]
+    start_idx = 0
+    if cursor is not None and str(cursor) != "":
+        s_cur = str(cursor)
+        if s_cur.isascii() and s_cur.isdigit():
+            start_idx = int(s_cur)
+        else:
+            for idx, r in enumerate(rows):
+                if r.get("dispatch_id") == s_cur:
+                    start_idx = idx + 1
+                    break
+    total = len(rows)
+    if limit is not None and int(limit) > 0:
+        lim = int(limit)
+        page_rows = rows[start_idx : start_idx + lim]
+        next_cursor = str(start_idx + lim) if (start_idx + lim) < total else None
+    else:
+        page_rows = rows[start_idx:]
+        next_cursor = None
     stages = stages or {}
-    workers = [show_from_row(r, stage=stages.get(str(r["dispatch_id"])))["worker"] for r in rows]
-    out: dict[str, Any] = {"workers": workers, "scope": {"source": backend}, "page": {"nextCursor": None}}
+    workers = [show_from_row(r, stage=stages.get(str(r["dispatch_id"])))["worker"] for r in page_rows]
+    out: dict[str, Any] = {"workers": workers, "scope": {"source": backend}, "page": {"nextCursor": next_cursor}}
     if upstream is not None:
-        out["upstream"] = upstream
+        out["upstream"] = upstream if include_remote else _filter_upstream_records(upstream, page_rows)
     return out

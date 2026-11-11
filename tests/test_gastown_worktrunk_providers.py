@@ -429,6 +429,45 @@ class TestGastownProvider(_Base):
         self.assertEqual(replied["scope"], "upstream")
         self.assertEqual(runner.called("gt", "mail", "reply")[0], ["gt", "mail", "reply", "hq-1", "-m", "ack"])
 
+    def test_mail_retry_retains_post_contact_claims_and_replays_cached_inbox(self) -> None:
+        runner = self.scripted("/x")
+        runner.add(("gt", "mail", "inbox"), [{"id": "hq-cached", "subject": "once"}])
+        prov = self.make(runner)
+
+        first_check = prov.check_messages(terminal="mayor", retry_request="req-gt-check")
+        second_check = prov.check_messages(terminal="mayor", retry_request="req-gt-check")
+        self.assertEqual(first_check["upstreamInbox"], [{"id": "hq-cached", "subject": "once"}])
+        self.assertEqual(second_check["upstreamInbox"], [{"id": "hq-cached", "subject": "once"}])
+        self.assertEqual(len(runner.called("gt", "mail", "inbox")), 1)
+
+        runner.add(("gt", "mail", "send"), ProviderError("gastown_cli_missing", "gt missing"))
+        with self.assertRaises(ProviderError):
+            prov.send_message(subject="s", msg_type="info", to="mayor", payload="p", retry_request="req-gt-pre")
+        self.assertEqual(prov.request_show("req-gt-pre")["state"], "absent")
+
+        runner_lost = self.scripted("/x")
+        runner_lost.add(("gt", "mail", "send"), ProviderError("gastown_timeout", "gt mail send timed out"))
+        runner_lost.add(("gt", "mail", "reply"), ProviderError("gastown_timeout", "gt mail reply timed out"))
+        prov_lost = self.make(runner_lost)
+
+        with self.assertRaises(ProviderError):
+            prov_lost.send_message(subject="s", msg_type="info", to="mayor", payload="p", retry_request="req-gt-send")
+        self.assertTrue(prov_lost.request_show("req-gt-send").get("ambiguousContact"))
+        self.assertEqual(
+            prov_lost.send_message(subject="s", msg_type="info", to="mayor", payload="p", retry_request="req-gt-send"),
+            {"state": "pending", "requestId": "req-gt-send"},
+        )
+        self.assertEqual(len(runner_lost.called("gt", "mail", "send")), 1)
+
+        with self.assertRaises(ProviderError):
+            prov_lost.reply_message(msg_id="hq-up-1", body="ack", retry_request="req-gt-reply")
+        self.assertTrue(prov_lost.request_show("req-gt-reply").get("ambiguousContact"))
+        self.assertEqual(
+            prov_lost.reply_message(msg_id="hq-up-1", body="ack", retry_request="req-gt-reply"),
+            {"state": "pending", "requestId": "req-gt-reply"},
+        )
+        self.assertEqual(len(runner_lost.called("gt", "mail", "reply")), 1)
+
 
 # --------------------------------------------------------------------------------------
 # Worktrunk

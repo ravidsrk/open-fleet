@@ -1487,6 +1487,18 @@ class TestGrantProblemsUnits(unittest.TestCase):
         self.assertTrue(decisions.grant_problems(self._record(klass="taste")))
         self.assertTrue(decisions.grant_problems(self._record(why="no source")))
 
+    def test_read_side_human_grant_of_refuses_unknown_and_every_reserved_role(self):
+        reserved_literals = (
+            "agent", "ai", "anonymous", "auto", "automatic", "bot", "coordinator", "fleet",
+            "human", "model", "nobody", "none", "orca", "system", "unknown", "worker",
+        )
+        self.assertEqual(set(reserved_literals), set(decisions.RESERVED_HUMAN_NAMES))
+        for role in ("unknown", "UNKNOWN", *reserved_literals):
+            with self.subTest(role=role):
+                rec = self._record(why=f"deploy to production [source=human:{role}]")
+                self.assertEqual(decisions.human_grant_of(rec), (None, None, rec["why"]))
+                self.assertTrue(decisions.grant_problems(rec))
+
     def test_standing_drops_only_one_way_lines_a_pinned_key_does_not_verify(self):
         pub = decisions._ed25519().publickey(os.urandom(32))
         keep = [self._record(klass="mechanical", why="retired")]
@@ -1494,6 +1506,75 @@ class TestGrantProblemsUnits(unittest.TestCase):
         self.assertEqual(decisions.standing(keep + unsigned, pub), keep)
         # Unpinned, the marker is a record-format check: `active` lists what it always listed.
         self.assertEqual(decisions.standing(keep + unsigned), keep + unsigned)
+
+
+class TestNestedRepoNeverSubstitutesGrantAnchorC20(TestPinRefIsTheTrustAnchor):
+    """C20: an initialized submodule or nested `.git` directory inside an outer repository must
+    never substitute its own `.orca/human-grant-pubkey` or `--pin-ref` anchor."""
+
+    def test_nested_submodule_gitfile_and_nested_git_dir_are_refused(self):
+        rogue = os.urandom(32)
+        rogue_pub = self.ed.publickey(rogue).hex() + "\n"
+        payload = decisions.grant_payload(
+            "gate-sub", "approved", "deploy to production", "t-1",
+            ts="2026-09-01T00:00:00Z", klass="one-way",
+        )
+        sig = self.ed.signature(payload, rogue, self.ed.publickey(rogue)).hex()
+        forged_line = (
+            "2026-09-01T00:00:00Z · gate-sub · one-way · approved · "
+            f"deploy to production [source=human:lia sig={sig}] · t-1"
+        )
+
+        # Case 1: nested initialized submodule (.git file -> ../../.git/modules/sub)
+        sub_dir = Path(self.tmp) / "vendor" / "sub"
+        sub_dir.mkdir(parents=True)
+        mod_git = Path(self.tmp) / ".git" / "modules" / "sub"
+        subprocess.run(["git", "init", "-q", "--bare", str(mod_git)], check=True)
+        (sub_dir / ".git").write_text("gitdir: ../../.git/modules/sub\n", encoding="utf-8")
+        (sub_dir / ".orca").mkdir()
+        (sub_dir / ".orca" / "human-grant-pubkey").write_text(rogue_pub, encoding="utf-8")
+        sub_log = sub_dir / "DECISIONS.md"
+        sub_log.write_text("# DECISIONS\n\n" + forged_line + "\n", encoding="utf-8")
+
+        for extra in ((), ("--pin-ref", "refs/remotes/origin/main")):
+            r = subprocess.run(
+                [sys.executable, str(DECISIONS), "--file", str(sub_log), *extra, "check"],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+            self.assertIn("nested repository", r.stderr)
+
+        # Case 2: nested .git directory inside the outer repository
+        nested_dir = Path(self.tmp) / "vendor" / "nested"
+        nested_dir.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(nested_dir)], check=True)
+        (nested_dir / ".orca").mkdir()
+        (nested_dir / ".orca" / "human-grant-pubkey").write_text(rogue_pub, encoding="utf-8")
+        nested_log = nested_dir / "DECISIONS.md"
+        nested_log.write_text("# DECISIONS\n\n" + forged_line + "\n", encoding="utf-8")
+
+        r = subprocess.run(
+            [sys.executable, str(DECISIONS), "--file", str(nested_log), "check"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("nested repository", r.stderr)
+
+    def test_genuine_linked_worktree_inside_repo_still_resolves(self):
+        wt_dir = Path(self.tmp) / ".worktrees" / "wt-1"
+        self.git("worktree", "add", "-q", "-b", "wt-branch", str(wt_dir), "main")
+        wt_log = wt_dir / "docs" / "DECISIONS.md"
+        wt_log.parent.mkdir(parents=True, exist_ok=True)
+        wt_log.write_text(
+            "# DECISIONS\n\n" + self.signed("gate-wt", "approved", "2026-09-01T00:00:00Z") + "\n",
+            encoding="utf-8",
+        )
+        r = subprocess.run(
+            [sys.executable, str(DECISIONS), "--file", str(wt_log),
+             "--pin-ref", "refs/remotes/origin/main", "check"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
 
 if __name__ == "__main__":

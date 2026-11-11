@@ -93,9 +93,12 @@ NC_TOOLS = {"mutmut", "cosmic-ray", "stryker", "pitest", "cargo-mutants", "go-mu
             "hand"}  # hand = a hand-written mutant (boundary flip / negated condition / zeroed return, compile-preserving; the diff is quoted in the artifact)
 REVIEWER_MODES = {"cross-vendor", "same-vendor-fresh", "instructed-isolation"}
 LIGHTING_VALUES = {"lit", "dark-eligible"}
-# The two negative-control tools verify.py can REPLAY itself (#255). Any other tool under
-# --execute-nc is fail-closed: an unreplayable control is not an executed one.
-EXECUTABLE_NC_TOOLS = ("revert", "hand")
+# The negative-control tools verify.py can REPLAY itself (#255, #750 C11): `revert` restores
+# base_sha paths (or range-reverts), and `hand` plus the six mutation tools apply the unified diff
+# quoted in negative_control.artifact. Any tool without a replayable control under --execute-nc is
+# fail-closed: an unreplayable control is not an executed one.
+EXECUTABLE_NC_TOOLS = ("revert", "hand", "mutmut", "cosmic-ray", "stryker", "pitest",
+                       "cargo-mutants", "go-mutesting")
 # Criterion ids in a frozen source: hyphenated (AC-1, SC-12, REQ-3) or compact (AC1, SC12). A JSON
 # source may instead declare an explicit criterion_ids array, which is unambiguous and PREFERRED —
 # write frozen contracts as JSON where you can.
@@ -1038,9 +1041,957 @@ class _Authority:
     @classmethod
     def nc_env(cls):
         """The scrubbed environment the EXECUTED CONTROL runs under (h409 F-6): the ambient
-        floor only — no GH_*/GITHUB_*, no ORCA_*, no GIT_*, nothing else the verifier holds."""
-        return {k: v for k, v in os.environ.items()
-                if k in cls.AMBIENT_KEEP or k.startswith(cls.AMBIENT_KEEP_PREFIX)}
+        floor only — no GH_*/GITHUB_*, no ORCA_*, no GIT_*, nothing else the verifier holds.
+        Relative and empty PATH entries are dropped so worktree/cwd binaries cannot shadow PATH."""
+        env = {k: v for k, v in os.environ.items()
+               if k in cls.AMBIENT_KEEP or k.startswith(cls.AMBIENT_KEEP_PREFIX)}
+        if "PATH" in env:
+            env["PATH"] = os.pathsep.join(
+                p for p in env["PATH"].split(os.pathsep) if p and os.path.isabs(p))
+        return env
+
+    @classmethod
+    def unreplayable_tool(cls, m, nc, tool):
+        """True when a mutation-tool control under --execute-nc quotes no unified diff to replay."""
+        if tool in ("revert", "hand"):
+            return False
+        art = nc.get("artifact")
+        if not (isinstance(art, str) and art):
+            return True
+        raw, err = read_artifact(m, art)
+        if err or raw is None:
+            return True
+        return not bool(_extract_diff(raw.decode("utf-8", "replace")))
+
+    _SHELL_NAMES = frozenset({
+        "sh", "bash", "rbash", "dash", "zsh", "rzsh", "ksh", "rksh", "ash", "hush", "csh", "tcsh",
+    })
+    _SHELL_RE = re.compile(
+        r"(?:sh|bash|rbash|dash|zsh|rzsh|ksh|rksh|mksh|pdksh|yash|posh|ash|hush|csh|tcsh)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"
+    )
+    _MULTICALL_BOX_RE = re.compile(r"(?:busybox|toybox|sbase-box|ubase-box)(?:[.-][A-Za-z0-9_.-]+)?")
+    _MUX_RE = re.compile(
+        r"(?:(?:g?sed|gnused|[gmn]?awk|deno|bun)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"
+        r"|(?:busybox|toybox|sbase-box|ubase-box)(?:[.-][A-Za-z0-9_.-]+)?"
+        r"|ld\.so(?:\.[0-9]+)?|ld-linux[A-Za-z0-9_.-]*|ld-musl[A-Za-z0-9_.-]*"
+        r"|proxychains[0-9]*)"
+    )
+
+    @classmethod
+    def _is_shell_name(cls, name):
+        return name in cls._SHELL_NAMES or bool(cls._SHELL_RE.fullmatch(name))
+
+    @classmethod
+    def _is_mux_exe(cls, name):
+        return name in cls._NC_FORBID_MUX_EXES or bool(cls._MUX_RE.fullmatch(name))
+
+    @classmethod
+    def _exec_family(cls, name):
+        if cls._MULTICALL_BOX_RE.fullmatch(name):
+            return "multicall_box"
+        if cls._is_mux_exe(name):
+            return "mux_wrapper"
+        if name in ("env", "genv"):
+            return "wrap:env"
+        if name in ("nice", "gnice"):
+            return "wrap:nice"
+        if name in ("timeout", "gtimeout"):
+            return "wrap:timeout"
+        if name in ("nohup", "gnohup"):
+            return "wrap:nohup"
+        if name in ("command", "builtin"):
+            return f"wrap:{name}"
+        if re.fullmatch(r"(?:csh|tcsh|r?zsh)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", name):
+            return "shell:non_posix"
+        if cls._is_shell_name(name):
+            return "shell:posix"
+        for k, pat in (
+            ("interp:python", r"(?:python|pypy)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"),
+            ("interp:node", r"node(?:js)?(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"),
+            ("interp:perl", r"perl(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"),
+            ("interp:ruby", r"ruby(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"),
+            ("interp:php", r"php(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"),
+            ("interp:lua", r"lua(?:jit)?(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"),
+            ("interp:Rscript", r"Rscript(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"),
+            ("runner:pytest", r"(?:pytest|py\.test)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"),
+            ("runner:make", r"g?make(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"),
+            ("runner:grep", r"(?:[efg]?grep)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"),
+            ("runner:rg", r"(?:rg|ripgrep)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?"),
+        ):
+            if re.fullmatch(pat, name):
+                return k
+        return None
+    _SAFE_SHELL_O_OPTIONS = frozenset({
+        "allexport", "braceexpand", "errexit", "errtrace", "functrace",
+        "hashall", "histexpand", "monitor", "noclobber", "noexec",
+        "noglob", "notify", "nounset", "physical", "pipefail", "posix",
+        "verbose", "xtrace",
+    })
+    _NC_FORBID_ENV_VARS = frozenset({
+        "PATH", "IFS", "CDPATH", "ENV", "BASH_ENV",
+        "SHELLOPTS", "BASHOPTS", "BASH_LOADABLES_PATH", "BASH_COMPAT",
+        "POSIXLY_CORRECT", "ZDOTDIR", "FPATH", "GLOBIGNORE", "EXECIGNORE",
+        "PROMPT_COMMAND", "PS0", "PS4",
+        "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "GLIBC_TUNABLES",
+        "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH",
+        "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONSAFEPATH",
+        "PYTHONPYCACHEPREFIX", "PYTHONWARNINGS", "PYTHONINSPECT",
+        "PYTHONUSERBASE", "VIRTUAL_ENV",
+        "NODE_OPTIONS", "NODE_PATH", "NODE_REPL_EXTERNAL_MODULE",
+        "DENO_DIR", "BUN_INSTALL",
+        "PERL5OPT", "PERL5LIB", "PERLLIB",
+        "RUBYOPT", "RUBYLIB", "GEM_HOME", "GEM_PATH", "BUNDLE_GEMFILE",
+        "AWKPATH", "AWKLIBPATH",
+        "PHPRC", "PHP_INI_SCAN_DIR",
+        "R_PROFILE", "R_PROFILE_USER", "R_ENVIRON", "R_ENVIRON_USER",
+        "R_LIBS", "R_LIBS_USER", "R_LIBS_SITE",
+        "HOME", "TMPDIR", "TMP", "TEMP", "XDG_CONFIG_HOME", "GH_CONFIG_DIR",
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+    })
+    _NC_FORBID_ENV_PREFIXES = (
+        "GIT_", "ORCA_", "OPEN_FLEET_", "GH_", "GITHUB_",
+        "LD_", "DYLD_", "LUA_", "BASH_FUNC_",
+        "PYTHON", "NODE_", "PERL", "RUBY", "GEM_", "BUNDLE_",
+        "DENO_", "BUN_", "AWK", "PHP", "R_",
+    )
+    _NC_FORBID_MUX_EXES = frozenset({
+        "busybox", "toybox", "sbase-box", "ubase-box",
+        "xargs", "gxargs", "find", "gfind", "stdbuf", "setsid", "flock", "chrt", "ionice",
+        "taskset", "prlimit", "choom", "uclampset", "numactl", "eatmydata", "chronic",
+        "script", "expect", "screen", "tmux", "ssh",
+        "su", "sudo", "doas", "pkexec", "runuser", "dzdo", "pfexec",
+        "chroot", "arch-chroot", "fakeroot", "fakechroot", "nsenter", "unshare",
+        "bwrap", "firejail", "proot", "time", "parallel", "watch",
+        "strace", "ltrace", "gdb", "lldb", "perf", "valgrind",
+        "torsocks", "tsocks", "proxychains", "proxychains4", "catchsegv",
+        "fish", "elvish", "nu", "nushell", "xonsh", "pwsh", "powershell", "rc", "es",
+        "sed", "gsed", "ssed", "awk", "gawk", "mawk", "nawk", "bawk", "deno", "bun",
+        "rg", "ripgrep", "ag", "ack", "fd", "fdfind", "fzf", "ugrep", "ug",
+        "tar", "gtar", "bsdtar", "sort", "gsort", "split", "gsplit", "m4", "gm4",
+    })
+
+    @classmethod
+    def _env_var_forbidden(cls, var_name):
+        if "[" in var_name or "]" in var_name:
+            return True
+        up = var_name.upper()
+        if up in cls._NC_FORBID_ENV_VARS:
+            return True
+        return up.startswith(cls._NC_FORBID_ENV_PREFIXES)
+
+    @classmethod
+    def _parse_shell_script_operand(cls, tok, rest):
+        """Parse shell argv tail `rest` and return `(script_op, err)` enforcing staged repo-relative path."""
+        if re.fullmatch(r"(?:csh|tcsh|r?zsh)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", Path(tok).name):
+            return None, f"proof executable {tok!r} invokes non-POSIX shell or zsh startup files; fail-closed (#750 C19)"
+        si = 0
+        while si < len(rest):
+            arg = rest[si]
+            if arg in ("--", "-"):
+                si += 1
+                break
+            if not arg.startswith(("-", "+")) or arg == "+":
+                break
+            if arg == "-c" or (arg.startswith("-") and not arg.startswith("--") and "c" in arg[1:]):
+                return None, (f"proof executable {tok!r} invokes a shell -c command string, "
+                              "whose inner commands are unverified (#750 C19)")
+            if arg.startswith("--"):
+                if arg in ("--posix", "--norc", "--noprofile"):
+                    si += 1
+                    continue
+                return None, (f"proof executable {tok!r} uses unsupported shell option {arg!r}; "
+                              "fail-closed (#750 C19)")
+            if arg in ("-O", "+O"):
+                return None, (f"proof executable {tok!r} {arg} alters shell lookup/parsing; "
+                              "fail-closed (#750 C19)")
+            if arg in ("-o", "+o"):
+                if si + 1 >= len(rest) or rest[si + 1] not in cls._SAFE_SHELL_O_OPTIONS:
+                    return None, (f"proof executable {tok!r} {arg} missing or unsupported option; "
+                                  "fail-closed (#750 C19)")
+                si += 2
+                continue
+            short = arg[1:]
+            if arg.startswith("-") and any(ch in short for ch in ("l", "i", "s", "r")):
+                return None, (f"proof executable {tok!r} invokes interactive/login/stdin shell mode; "
+                              "fail-closed (#750 C19)")
+            if any(ch not in "abefhmnuvxBCHP" for ch in short):
+                return None, (f"proof executable {tok!r} uses unsupported shell option {arg!r}; "
+                              "fail-closed (#750 C19)")
+            if "o" in short or "O" in short:
+                if not (short.endswith(("o", "O")) and (short.count("o") + short.count("O") == 1)) or si + 1 >= len(rest):
+                    return None, f"proof executable {tok!r} uses ambiguous -o option cluster (#750 C19)"
+                si += 2
+                continue
+            si += 1
+        if si >= len(rest):
+            return None, (f"proof executable {tok!r} invokes shell without a script operand; "
+                          "fail-closed (#750 C19)")
+        script_op = rest[si]
+        if "/" not in script_op or os.path.isabs(script_op) or ".." in Path(script_op).parts:
+            return None, (f"proof executable {tok!r} uses bare or external shell script operand "
+                          f"{script_op!r}; require a staged repo-relative path containing '/'; "
+                          "fail-closed (#750 C19)")
+        return script_op, None
+
+    @classmethod
+    def _check_rel_operand(cls, tok, op, label="script"):
+        if not op or op == "-" or os.path.normpath(op) == "-" or os.path.isabs(op) or ".." in Path(op).parts:
+            return f"proof executable {tok!r} targets external {label} {op!r} outside the staged commit; fail-closed (#750 C19)"
+        return None
+
+    @classmethod
+    def _parse_target_operands(cls, tok, rest):
+        """Validate non-shell interpreter/runner options in `rest` and return `(staged_rel_files, err)`."""
+        name = Path(tok).name
+        staged = []
+        program = name
+        scan_idx = 0
+        if re.fullmatch(r"(?:python|pypy)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", name):
+            pi = 0
+            while pi < len(rest) and rest[pi] in {
+                "-B", "-E", "-I", "-O", "-OO", "-s", "-S", "-u", "-q",
+            }:
+                pi += 1
+            if pi >= len(rest):
+                return None, f"proof executable {tok!r} missing module or script target; fail-closed (#750 C19)"
+            if rest[pi].startswith("-m"):
+                mod = (rest[pi + 1] if pi + 1 < len(rest) else "") if rest[pi] == "-m" else rest[pi][2:]
+                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", mod):
+                    return None, f"proof executable {tok!r} uses invalid -m module {mod!r}; fail-closed (#750 C19)"
+                scan_idx = pi + 2 if rest[pi] == "-m" else pi + 1
+                if mod in ("pytest", "unittest"):
+                    program = mod
+                else:
+                    mod_root = mod.split(".", 1)[0]
+                    forbid_mods = (
+                        (set(getattr(sys, "stdlib_module_names", ())) | set(sys.builtin_module_names)) - {"unittest"}
+                    ) | {"pip", "setuptools", "wheel", "virtualenv", "nox", "tox", "coverage", "ipython", "IPython"}
+                    if mod_root in forbid_mods:
+                        return None, (
+                            f"unsupported proof command: {tok!r} invokes module runner '-m {mod}'; "
+                            "only '-m pytest', '-m unittest', or a staged repo module is permitted (#750 C19)"
+                        )
+                    if "-I" in rest[:pi]:
+                        return None, (
+                            f"unsupported proof command: {tok!r} cannot combine '-I' with repo module '-m {mod}'; "
+                            "fail-closed (#750 C19)"
+                        )
+                    program = "py_module"
+            else:
+                if rest[pi] == "--":
+                    pi += 1
+                if pi >= len(rest) or rest[pi].startswith("-"):
+                    bad_opt = rest[pi] if pi < len(rest) else "--"
+                    return None, (f"proof executable {tok!r} uses unsupported interpreter option "
+                                  f"{bad_opt!r} or missing script; fail-closed (#750 C19)")
+                err = cls._check_rel_operand(tok, rest[pi], "script")
+                if err:
+                    return None, err
+                staged.append(rest[pi])
+                scan_idx = pi + 1
+        elif re.fullmatch(r"(?:node(?:js)?|ruby|perl|php|lua(?:jit)?|Rscript)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", name):
+            pi = 1 if rest[:1] == ["--"] else 0
+            if pi >= len(rest) or rest[pi].startswith("-"):
+                bad_opt = rest[pi] if pi < len(rest) else ""
+                return None, (f"proof executable {tok!r} uses unsupported interpreter option "
+                              f"{bad_opt!r} or missing script; fail-closed (#750 C19)")
+            if name.startswith("node") and rest[pi] in ("inspect", "debug"):
+                return None, f"proof executable {tok!r} invokes debugger subcommand {rest[pi]!r}; fail-closed (#750 C19)"
+            err = cls._check_rel_operand(tok, rest[pi], "script")
+            if err:
+                return None, err
+            staged.append(rest[pi])
+            scan_idx = pi + 1
+        elif re.fullmatch(r"g?make(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", name):
+            mi = 0
+            while mi < len(rest):
+                a = rest[mi]
+                if a in ("-f", "--file", "--makefile"):
+                    if mi + 1 >= len(rest):
+                        return None, f"proof executable {tok!r} {a} missing makefile operand; fail-closed (#750 C19)"
+                    err = cls._check_rel_operand(tok, rest[mi + 1], "makefile")
+                    if err:
+                        return None, err
+                    staged.append(rest[mi + 1])
+                    mi += 2
+                elif a.startswith(("--file=", "--makefile=")):
+                    val = a.split("=", 1)[1]
+                    err = cls._check_rel_operand(tok, val, "makefile")
+                    if err:
+                        return None, err
+                    staged.append(val)
+                    mi += 1
+                elif a.startswith("-f") and len(a) > 2:
+                    val = a[2:]
+                    err = cls._check_rel_operand(tok, val, "makefile")
+                    if err:
+                        return None, err
+                    staged.append(val)
+                    mi += 1
+                elif a.startswith("-") or "=" in a:
+                    return None, f"proof executable {tok!r} uses unsupported make argument {a!r}; fail-closed (#750 C19)"
+                else:
+                    mi += 1
+            return staged, None
+        elif re.fullmatch(r"(?:pytest|py\.test)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", name):
+            program = "pytest"
+        elif re.fullmatch(r"(?:[efg]?grep)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", name):
+            program = "grep"
+
+        if program == "unittest":
+            ui, u_after, u_pos = scan_idx, False, []
+            while ui < len(rest):
+                ua = rest[ui]
+                if not u_after and ua == "--":
+                    u_after = True
+                    ui += 1
+                    continue
+                if u_after or not ua.startswith("-"):
+                    u_pos.append(ua)
+                    ui += 1
+                    continue
+                if ua in ("-s", "--start-directory", "-t", "--top-level-directory"):
+                    if ui + 1 >= len(rest):
+                        return None, f"proof executable {tok!r} {ua} missing directory operand; fail-closed (#750 C19)"
+                    err = cls._check_rel_operand(tok, rest[ui + 1], "unittest directory")
+                    if err:
+                        return None, err
+                    ui += 2
+                    continue
+                if ua.startswith(("--start-directory=", "--top-level-directory=")):
+                    err = cls._check_rel_operand(tok, ua.split("=", 1)[1], "unittest directory")
+                    if err:
+                        return None, err
+                    ui += 1
+                    continue
+                if ua.startswith(("-s", "-t")) and len(ua) > 2:
+                    err = cls._check_rel_operand(tok, ua[2:], "unittest directory")
+                    if err:
+                        return None, err
+                    ui += 1
+                    continue
+                if ua in ("-p", "--pattern", "-k"):
+                    if ui + 1 >= len(rest):
+                        return None, f"proof executable {tok!r} {ua} missing operand; fail-closed (#750 C19)"
+                    ui += 2
+                    continue
+                if ua.startswith(("--pattern=", "-p", "-k")) and len(ua) > 2:
+                    ui += 1
+                    continue
+                if len(ua) > 1 and ua[0] == "-" and ua[1] != "-" and any(ch in ua[1:] for ch in ("s", "t", "p", "k")):
+                    return None, f"proof executable {tok!r} uses ambiguous unittest option cluster {ua!r}; fail-closed (#750 C19)"
+                ui += 1
+            if u_pos[:1] == ["discover"]:
+                for d_dir in u_pos[1:2] + u_pos[3:4]:
+                    err = cls._check_rel_operand(tok, d_dir, "unittest directory")
+                    if err:
+                        return None, err
+            else:
+                for u_op in u_pos:
+                    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", u_op):
+                        err = cls._check_rel_operand(tok, u_op, "unittest target")
+                        if err:
+                            return None, err
+            return staged, None
+
+        value_opts = ("-f",) + (("-c",) if program == "pytest" else ())
+        long_opts = ("--config", "--config-file", "--file")
+        saw_grep_pat = False
+        grep_pos = []
+        i = scan_idx
+        while i < len(rest):
+            a = rest[i]
+            if a == "--":
+                break
+            if program == "pytest":
+                if (
+                    a in ("-o", "-p", "--override-ini", "--rootdir", "--confcutdir", "--basetemp", "--import-mode", "--pyargs")
+                    or a.startswith(("--override-ini=", "--rootdir=", "--confcutdir=", "--basetemp=", "--import-mode="))
+                    or (len(a) > 1 and a[0] == "-" and a[1] != "-" and any(ch in a[1:] for ch in ("o", "p")))
+                ):
+                    return None, f"proof executable {tok!r} uses dynamic pytest config/plugin option {a!r}; fail-closed (#750 C19)"
+                if a in ("-k", "-m", "-W", "--maxfail"):
+                    if i + 1 >= len(rest):
+                        return None, f"proof executable {tok!r} {a} missing operand; fail-closed (#750 C19)"
+                    i += 2
+                    continue
+                if a.startswith(("-k", "-m", "-W")) and len(a) > 2:
+                    i += 1
+                    continue
+                if len(a) > 1 and a[0] == "-" and a[1] != "-" and any(ch in a[1:] for ch in ("k", "m", "W")):
+                    return None, f"proof executable {tok!r} uses ambiguous pytest option cluster {a!r}; fail-closed (#750 C19)"
+            if program == "grep":
+                if a in ("-e", "--regexp"):
+                    if i + 1 >= len(rest):
+                        return None, f"proof executable {tok!r} {a} missing pattern; fail-closed (#750 C19)"
+                    saw_grep_pat = True
+                    i += 2
+                    continue
+                if a.startswith("--regexp=") or (a.startswith("-e") and len(a) > 2):
+                    saw_grep_pat = True
+                    i += 1
+                    continue
+            if a.startswith(tuple(opt + "=" for opt in long_opts)):
+                val = a.split("=", 1)[1]
+                err = cls._check_rel_operand(tok, val, "config")
+                if err:
+                    return None, err
+                staged.append(val)
+                if program == "grep":
+                    saw_grep_pat = True
+            elif a in long_opts:
+                if i + 1 >= len(rest):
+                    return None, f"proof executable {tok!r} {a} missing operand; fail-closed (#750 C19)"
+                err = cls._check_rel_operand(tok, rest[i + 1], "config")
+                if err:
+                    return None, err
+                staged.append(rest[i + 1])
+                if program == "grep":
+                    saw_grep_pat = True
+                i += 1
+            elif a in value_opts:
+                if i + 1 >= len(rest):
+                    return None, f"proof executable {tok!r} {a} missing operand; fail-closed (#750 C19)"
+                err = cls._check_rel_operand(tok, rest[i + 1], "config")
+                if err:
+                    return None, err
+                staged.append(rest[i + 1])
+                if program == "grep":
+                    saw_grep_pat = True
+                i += 1
+            elif a.startswith(value_opts) and len(a) > 2:
+                val = a[2:]
+                err = cls._check_rel_operand(tok, val, "config")
+                if err:
+                    return None, err
+                staged.append(val)
+                if program == "grep":
+                    saw_grep_pat = True
+            elif len(a) > 1 and a[0] == "-" and a[1] != "-" and any(opt[1] in a[1:] for opt in value_opts):
+                return None, f"proof executable {tok!r} uses ambiguous option cluster {a!r}; fail-closed (#750 C19)"
+            elif program == "pytest" and not a.startswith("-"):
+                p_part = a.split("::", 1)[0]
+                err = cls._check_rel_operand(tok, p_part, "test path")
+                if err:
+                    return None, err
+            elif program == "py_module":
+                if a.startswith("-"):
+                    return None, (
+                        f"unsupported proof command: {tok!r} passes unsupported option {a!r} to '-m {mod}'; "
+                        "fail-closed (#750 C19)"
+                    )
+                err = cls._check_rel_operand(tok, a, "operand")
+                if err:
+                    return None, err
+                staged.append(a)
+            elif program == "grep" and not a.startswith("-"):
+                grep_pos.append(a)
+            i += 1
+        if i < len(rest) and rest[i] == "--":
+            if program == "pytest":
+                for post_a in rest[i + 1:]:
+                    p_part = post_a.split("::", 1)[0]
+                    err = cls._check_rel_operand(tok, p_part, "test path")
+                    if err:
+                        return None, err
+            elif program == "py_module":
+                for post_a in rest[i + 1:]:
+                    err = cls._check_rel_operand(tok, post_a, "operand")
+                    if err:
+                        return None, err
+                    staged.append(post_a)
+            elif program == "grep":
+                grep_pos.extend(rest[i + 1:])
+        if program == "grep":
+            file_ops = grep_pos if saw_grep_pat else grep_pos[1:]
+            for g_file in file_ops:
+                err = cls._check_rel_operand(tok, g_file, "file")
+                if err:
+                    return None, err
+        return staged, None
+
+    @classmethod
+    def _python_module_target(cls, argv):
+        """Return dotted `-m <mod>` target when `argv` runs Python module mode outside pytest/unittest."""
+        indexed, err = cls._unwrap_nc_indexed(argv)
+        if err or not indexed:
+            return None
+        target_idx, target_tok = indexed[-1]
+        tail = argv[target_idx + 1:]
+        if not re.fullmatch(r"(?:python|pypy)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", Path(target_tok).name):
+            return None
+        pi = 0
+        while pi < len(tail) and tail[pi] in {"-B", "-E", "-I", "-O", "-OO", "-s", "-S", "-u", "-q"}:
+            pi += 1
+        if pi >= len(tail) or not tail[pi].startswith("-m"):
+            return None
+        mod = (tail[pi + 1] if pi + 1 < len(tail) else "") if tail[pi] == "-m" else tail[pi][2:]
+        return None if (not mod or mod in ("pytest", "unittest")) else mod
+
+    @classmethod
+    def _staged_script_operands(cls, argv):
+        """Return repo-relative script/config operands that must exist and remain invariant in each phase."""
+        indexed, err = cls._unwrap_nc_indexed(argv)
+        if err or not indexed:
+            return []
+        target_idx, target_tok = indexed[-1]
+        tail = argv[target_idx + 1:]
+        if cls._is_shell_name(Path(target_tok).name):
+            sh_op, s_err = cls._parse_shell_script_operand(target_tok, tail)
+            return [] if (s_err or sh_op is None) else [sh_op]
+        ops, t_err = cls._parse_target_operands(target_tok, tail)
+        return [] if (t_err or not ops) else ops
+
+    @classmethod
+    def _verify_staged_rel_file(cls, repo_dir, rel_path):
+        """Verify `rel_path` stays strictly inside `repo_dir` across relative hops (never checking
+        host ancestors above `repo_dir`) and is a non-group/world-writable regular file."""
+        try:
+            repo_real = Path(repo_dir).resolve(strict=True)
+            norm_rel = os.path.normpath(rel_path)
+            if os.path.isabs(rel_path) or norm_rel in ("", ".") or ".." in Path(norm_rel).parts:
+                return None, f"proof input {rel_path!r} escapes the staged commit; fail-closed (#750 C19)"
+            cur = repo_real
+            for part in Path(norm_rel).parts:
+                if part in ("", "."):
+                    continue
+                cur = cur / part
+                lst = os.lstat(cur)
+                if stat.S_ISLNK(lst.st_mode):
+                    cur = cur.resolve(strict=True)
+                    if cur != repo_real and repo_real not in cur.parents:
+                        return None, (f"proof input {rel_path!r} resolves via symlink outside "
+                                      "the staged commit; fail-closed (#750 C19)")
+            final_real = cur.resolve(strict=True)
+            st = os.stat(final_real)
+            if (
+                final_real == repo_real
+                or repo_real not in final_real.parents
+                or not stat.S_ISREG(st.st_mode)
+                or (st.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
+            ):
+                return None, (f"proof input {rel_path!r} is missing, writable, or escapes "
+                              "the staged commit; fail-closed (#750 C19)")
+            return hashlib.sha256(final_real.read_bytes()).hexdigest(), None
+        except (OSError, RuntimeError) as exc:
+            return None, (f"proof input {rel_path!r} does not exist in staged commit ({exc}); "
+                          "fail-closed (#750 C19)")
+
+    @classmethod
+    def _shell_script_operand(cls, argv):
+        """Return the repo-relative shell script operand when `argv` invokes a shell, else `None`."""
+        indexed, err = cls._unwrap_nc_indexed(argv)
+        if err or not indexed:
+            return None
+        target_idx, target_tok = indexed[-1]
+        if not cls._is_shell_name(Path(target_tok).name):
+            return None
+        script_op, s_err = cls._parse_shell_script_operand(target_tok, argv[target_idx + 1:])
+        return None if s_err else script_op
+
+    @classmethod
+    def _unwrap_nc_indexed(cls, argv):
+        """Extract `[(argv_idx, tok), ...]` across wrappers, failing closed on lookup/env/shell bypasses."""
+        indexed = []
+        idx = 0
+        while idx < len(argv):
+            tok = argv[idx]
+            name = Path(tok).name
+            if tok.startswith("-") or name.startswith("-"):
+                return None, (f"proof executable {tok!r} starts with '-', triggering login-shell startup "
+                              "or ambiguous option dispatch; fail-closed (#750 C19)")
+            if cls._is_mux_exe(name):
+                return None, (f"proof executable {tok!r} multiplexes inner commands whose targets "
+                              "cannot be statically pinned; fail-closed (#750 C19)")
+            indexed.append((idx, tok))
+            rest = argv[idx + 1:]
+            if cls._is_shell_name(name):
+                _, sh_err = cls._parse_shell_script_operand(tok, rest)
+                if sh_err:
+                    return None, sh_err
+                break
+            idx += 1
+            if name in ("env", "genv"):
+                while idx < len(argv):
+                    a = argv[idx]
+                    if a == "--":
+                        idx += 1
+                        break
+                    if a in ("-", "-i", "--ignore-environment"):
+                        return None, "env -i/--ignore-environment alters PATH lookup context; fail-closed (#750 C19)"
+                    if not a.startswith("-"):
+                        break
+                    if a in ("-S", "--split-string") or a.startswith("--split-string="):
+                        return None, "env -S/--split-string performs runtime word splitting; fail-closed (#750 C19)"
+                    if a in ("-C", "--chdir") or a.startswith("--chdir="):
+                        return None, "env -C/--chdir alters working-directory lookup context; fail-closed (#750 C19)"
+                    if a in ("-P", "--default-path") or a.startswith("--default-path="):
+                        return None, "env -P/--default-path alters PATH lookup context; fail-closed (#750 C19)"
+                    if a in ("-u", "--unset") or a.startswith("--unset="):
+                        if a.startswith("--unset="):
+                            uvar = a.split("=", 1)[1]
+                            idx += 1
+                        elif idx + 1 < len(argv):
+                            uvar = argv[idx + 1]
+                            idx += 2
+                        else:
+                            return None, "env -u/--unset missing variable name; fail-closed (#750 C19)"
+                        if not uvar or cls._env_var_forbidden(uvar):
+                            return None, f"env unset {uvar!r} alters executable lookup context; fail-closed (#750 C19)"
+                        continue
+                    if a.startswith("--"):
+                        if a in ("--null", "--debug", "--list-signal-handling") or a.startswith(
+                            ("--block-signal", "--default-signal", "--ignore-signal")
+                        ):
+                            idx += 1
+                            continue
+                        return None, f"env option {a!r} is unsupported; fail-closed (#750 C19)"
+                    short = a[1:]
+                    si = 0
+                    consumed_next = False
+                    while si < len(short):
+                        ch = short[si]
+                        rem = short[si + 1:]
+                        if ch in ("0", "v"):
+                            si += 1
+                            continue
+                        if ch == "i":
+                            return None, "env -i alters PATH lookup context; fail-closed (#750 C19)"
+                        if ch in ("S", "C", "P"):
+                            return None, f"env -{ch} alters execution/lookup context; fail-closed (#750 C19)"
+                        if ch == "u":
+                            if rem:
+                                uvar = rem
+                            elif idx + 1 < len(argv):
+                                uvar = argv[idx + 1]
+                                consumed_next = True
+                            else:
+                                return None, "env -u missing variable name; fail-closed (#750 C19)"
+                            if not uvar or cls._env_var_forbidden(uvar):
+                                return None, f"env -u {uvar!r} alters executable lookup context; fail-closed (#750 C19)"
+                            break
+                        return None, f"env option -{ch} is unsupported; fail-closed (#750 C19)"
+                    idx += 2 if consumed_next else 1
+                while idx < len(argv) and "=" in argv[idx]:
+                    lhs = argv[idx].split("=", 1)[0]
+                    if not lhs or cls._env_var_forbidden(lhs):
+                        return None, f"env assignment {lhs!r} alters executable lookup context; fail-closed (#750 C19)"
+                    idx += 1
+                if idx >= len(argv):
+                    return None, "env wrapper has no target proof command; fail-closed (#750 C19)"
+            elif name == "command":
+                while idx < len(argv) and argv[idx].startswith("-") and len(argv[idx]) > 1:
+                    if argv[idx] == "--":
+                        idx += 1
+                        break
+                    return None, f"command option {argv[idx]!r} alters lookup/execution; fail-closed (#750 C19)"
+                if idx >= len(argv):
+                    return None, "command wrapper has no target proof command; fail-closed (#750 C19)"
+            elif name in ("nohup", "gnohup"):
+                while idx < len(argv) and argv[idx].startswith("-") and len(argv[idx]) > 1:
+                    if argv[idx] == "--":
+                        idx += 1
+                        break
+                    return None, f"nohup option {argv[idx]!r} is unsupported; fail-closed (#750 C19)"
+                if idx >= len(argv):
+                    return None, "nohup wrapper has no target proof command; fail-closed (#750 C19)"
+            elif name in ("nice", "gnice"):
+                while idx < len(argv) and argv[idx].startswith("-") and len(argv[idx]) > 1:
+                    opt = argv[idx]
+                    if opt == "--":
+                        idx += 1
+                        break
+                    if opt in ("-n", "--adjustment"):
+                        if idx + 1 >= len(argv):
+                            return None, f"nice {opt} missing adjustment value; fail-closed (#750 C19)"
+                        idx += 2
+                    elif opt.startswith(("-n", "--adjustment=")) or re.match(r"^--?[0-9]+$", opt):
+                        idx += 1
+                    else:
+                        return None, f"nice option {opt!r} is unsupported; fail-closed (#750 C19)"
+                if idx >= len(argv):
+                    return None, "nice wrapper has no target proof command; fail-closed (#750 C19)"
+            elif name in ("timeout", "gtimeout"):
+                while idx < len(argv) and argv[idx].startswith("-") and len(argv[idx]) > 1:
+                    opt = argv[idx]
+                    if opt == "--":
+                        idx += 1
+                        break
+                    if opt in ("-k", "--kill-after", "-s", "--signal"):
+                        if idx + 1 >= len(argv):
+                            return None, f"timeout {opt} missing argument; fail-closed (#750 C19)"
+                        idx += 2
+                    elif opt in ("-v", "--verbose", "--foreground", "--preserve-status") or opt.startswith(
+                        ("-k", "--kill-after=", "-s", "--signal=")
+                    ):
+                        idx += 1
+                    elif not opt.startswith("--") and opt[1:].endswith(("k", "s")) and all(
+                        c == "v" for c in opt[1:-1]
+                    ):
+                        if idx + 1 >= len(argv):
+                            return None, f"timeout {opt} missing argument; fail-closed (#750 C19)"
+                        idx += 2
+                    else:
+                        return None, f"timeout option {opt!r} is unsupported; fail-closed (#750 C19)"
+                if idx + 1 >= len(argv):
+                    return None, "timeout wrapper missing duration or target proof command; fail-closed (#750 C19)"
+                idx += 1  # duration operand
+            else:
+                _, t_err = cls._parse_target_operands(tok, rest)
+                if t_err:
+                    return None, t_err
+                break
+        return indexed, None
+
+    @classmethod
+    def _unwrap_nc_tokens(cls, argv):
+        """Extract all wrapper and target executable tokens from `argv`, refusing shell `-c`."""
+        indexed, err = cls._unwrap_nc_indexed(argv)
+        if err or indexed is None:
+            return None, err
+        return [tok for _, tok in indexed], None
+
+    @classmethod
+    def _verify_exec_file_and_shebang(cls, resolved, label, roots, search_path, _depth=0):
+        """Verify executable `resolved` and any `#!` interpreter chain, returning `(chain, err)`."""
+        if _depth > 4:
+            return None, f"proof executable {label!r} exceeds shebang nesting depth; fail-closed (#750 C19)"
+        try:
+            abs_path = os.path.abspath(resolved)
+            nodes = list(cls._nodes(abs_path))
+            real = Path(abs_path).resolve(strict=True)
+            st = os.stat(real)
+            if not stat.S_ISREG(st.st_mode) or not os.access(real, os.X_OK):
+                return None, f"proof executable {label!r} is not an executable regular file ({real})"
+            if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                return None, (f"proof executable {label!r} ({real}) is group- or world-writable; "
+                              "fail-closed (#750 C19)")
+            for n, nst in nodes:
+                if stat.S_ISLNK(nst.st_mode):
+                    continue
+                if (nst.st_mode & (stat.S_IWGRP | stat.S_IWOTH)) and not (
+                        stat.S_ISDIR(nst.st_mode) and (nst.st_mode & stat.S_ISVTX)):
+                    return None, (f"proof executable {label!r} resolves through writable node {n}; "
+                                  "fail-closed (#750 C19)")
+            raw_bytes = real.read_bytes()
+            digest = hashlib.sha256(raw_bytes).hexdigest()
+        except (OSError, RuntimeError) as exc:
+            return None, f"proof executable {label!r} cannot be verified ({exc})"
+        for r in roots:
+            if real == r or r in real.parents or any(n == r or r in n.parents for n, _ in nodes):
+                return None, (f"proof executable {label!r} resolves inside the repository "
+                              f"worktree ({real}); fail-closed")
+        hop_sig = tuple((str(n), stat.S_IFMT(nst.st_mode), nst.st_dev, nst.st_ino)
+                        for n, nst in nodes)
+        self_rec = (abs_path, str(real), st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, digest, hop_sig)
+        if not raw_bytes.startswith(b"#!"):
+            return (self_rec,), None
+        nl = raw_bytes.find(b"\n")
+        first_line = raw_bytes[2:nl] if nl != -1 else raw_bytes[2:]
+        if b"\r" in first_line or b"\x00" in first_line or (nl == -1 and len(raw_bytes) > 255) or len(first_line) > 253:
+            return None, f"proof executable {label!r} has malformed or CR-terminated shebang; fail-closed (#750 C19)"
+        line_str = first_line.decode("utf-8", errors="surrogateescape").strip(" \t")
+        parts = re.split(r"[ \t]+", line_str, maxsplit=1) if line_str else []
+        interp = parts[0] if parts else ""
+        interp_arg = parts[1].strip(" \t") if len(parts) > 1 else ""
+        if not interp or not interp.startswith("/"):
+            return None, f"proof executable {label!r} uses relative or empty shebang interpreter {interp!r}; fail-closed (#750 C19)"
+        sub_chain, sub_err = cls._verify_exec_file_and_shebang(
+            interp, f"{label}#!{interp}", roots, search_path, _depth + 1
+        )
+        if sub_err:
+            return None, sub_err
+        i_base = Path(interp).name
+        i_real_base = Path(sub_chain[0][1]).name
+        eff_i_real_base = (
+            i_base
+            if (cls._MULTICALL_BOX_RE.fullmatch(i_real_base) and not cls._MULTICALL_BOX_RE.fullmatch(i_base))
+            else i_real_base
+        )
+        interp_names = {i_base, eff_i_real_base}
+        if (
+            cls._is_mux_exe(i_base)
+            or cls._is_mux_exe(eff_i_real_base)
+            or (interp_names & {"nice", "gnice", "timeout", "gtimeout", "nohup", "gnohup", "command", "builtin"})
+            or any(re.fullmatch(r"(?:csh|tcsh)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", n) for n in interp_names)
+            or (i_base != "sh" and any(re.fullmatch(r"r?zsh(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", n) for n in interp_names))
+        ):
+            return None, (f"proof executable {label!r} uses multiplexer or wrapper shebang {interp!r}; "
+                          "fail-closed (#750 C19)")
+        if interp_names & {"env", "genv"}:
+            if not interp_arg or interp_arg.startswith("-") or "=" in interp_arg or any(c in interp_arg for c in " \t"):
+                return None, (f"proof executable {label!r} shebang env argument {interp_arg!r} "
+                              "alters lookup or splits options; fail-closed (#750 C19)")
+            if "/" in interp_arg and not os.path.isabs(interp_arg):
+                return None, (f"proof executable {label!r} uses relative shebang env target {interp_arg!r}; "
+                              "fail-closed (#750 C19)")
+            env_resolved = interp_arg if os.path.isabs(interp_arg) else shutil.which(interp_arg, path=search_path)
+            if not env_resolved:
+                return None, (f"proof executable {label!r} shebang env target {interp_arg!r} "
+                              "cannot be resolved on the scrubbed PATH; fail-closed (#750 C19)")
+            env_chain, env_err = cls._verify_exec_file_and_shebang(
+                env_resolved, f"{label}#!env:{interp_arg}", roots, search_path, _depth + 1
+            )
+            if env_err:
+                return None, env_err
+            e_base = Path(interp_arg).name
+            e_real_base = Path(env_chain[0][1]).name
+            eff_e_real_base = (
+                e_base
+                if (cls._MULTICALL_BOX_RE.fullmatch(e_real_base) and not cls._MULTICALL_BOX_RE.fullmatch(e_base))
+                else e_real_base
+            )
+            e_names = {e_base, eff_e_real_base}
+            if (
+                cls._is_mux_exe(e_base)
+                or cls._is_mux_exe(eff_e_real_base)
+                or (e_names & {"env", "genv", "nice", "gnice", "timeout", "gtimeout", "nohup", "gnohup", "command", "builtin"})
+                or any(re.fullmatch(r"(?:csh|tcsh)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", n) for n in e_names)
+                or (e_base != "sh" and any(re.fullmatch(r"r?zsh(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", n) for n in e_names))
+            ):
+                return None, (f"proof executable {label!r} shebang env target {interp_arg!r} "
+                              "resolves to multiplexer or wrapper; fail-closed (#750 C19)")
+            return (self_rec, *sub_chain, *env_chain), None
+        if interp_arg and not cls._shebang_arg_allowed(interp_names, interp_arg):
+            return None, (f"proof executable {label!r} shebang option {interp_arg!r} "
+                          "cannot be statically pinned; fail-closed (#750 C19)")
+        return (self_rec, *sub_chain), None
+
+    @staticmethod
+    def _shebang_arg_allowed(interp_names, interp_arg):
+        if not interp_arg:
+            return True
+        if any(re.fullmatch(r"(?:python|pypy)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", n) for n in interp_names):
+            return bool(re.fullmatch(r"-[BEIOPSsuq]+", interp_arg))
+        if any(re.fullmatch(r"(?:sh|bash|dash|ash|ksh|mksh|yash)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", n) for n in interp_names):
+            return bool(re.fullmatch(r"-[abefhmnuvxBCEHP]+", interp_arg))
+        if any(re.fullmatch(r"perl(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", n) for n in interp_names):
+            return bool(re.fullmatch(r"-[wTt]+", interp_arg))
+        if any(re.fullmatch(r"(?:[gmnb]?awk|sed|[gs]sed)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", n) for n in interp_names):
+            return interp_arg == "-f"
+        return False
+
+    @classmethod
+    def nc_exec_identity(cls, argv, top=None, path_env=None, expected=None, when=None):
+        """Resolve and fingerprint the proof executable(s) in `argv` (#750 C19).
+        Refuses executables that cannot be resolved on the scrubbed PATH, invoke shell `-c`, are
+        group/world-writable, or have any path/symlink hop inside the target or evidence worktree
+        or a group/world-writable non-sticky directory. Returns (records, err)."""
+        if not argv:
+            return None, "negative_control.command is empty after parsing"
+        indexed, wrap_err = cls._unwrap_nc_indexed(argv)
+        if wrap_err or indexed is None:
+            return None, wrap_err
+        search_path = cls.nc_env().get("PATH", "") if path_env is None else path_env
+        roots = []
+        for root in (top, _toplevel(), _evidence_toplevel()):
+            if root:
+                try:
+                    r = Path(root).resolve()
+                except OSError:
+                    continue
+                if r != Path(r.anchor):
+                    roots.append(r)
+        records = []
+        for argv_idx, tok in indexed:
+            if "/" in tok and not os.path.isabs(tok):
+                return None, (f"proof executable {tok!r} uses a relative path containing '/'; "
+                              "fail-closed (#750 C19)")
+            resolved = tok if os.path.isabs(tok) else shutil.which(tok, path=search_path)
+            if not resolved:
+                return None, f"proof executable {tok!r} cannot be resolved on the scrubbed PATH"
+            chain, chain_err = cls._verify_exec_file_and_shebang(resolved, tok, roots, search_path)
+            if chain_err:
+                return None, chain_err
+            tok_base = Path(tok).name
+            real_base = Path(chain[0][1]).name
+            eff_real_base = (
+                tok_base
+                if (cls._MULTICALL_BOX_RE.fullmatch(real_base) and not cls._MULTICALL_BOX_RE.fullmatch(tok_base))
+                else real_base
+            )
+            real_fam = cls._exec_family(eff_real_base)
+            tok_fam = cls._exec_family(tok_base)
+            sh_emulated_zsh = (
+                tok_base == "sh"
+                and real_fam == "shell:non_posix"
+                and bool(re.fullmatch(r"r?zsh(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", eff_real_base))
+            )
+            if real_fam is not None and real_fam != tok_fam and not sh_emulated_zsh:
+                return None, (f"proof executable {tok!r} resolves to {chain[0][1]!r} ({real_fam}) "
+                              "via alias; invoke the canonical tool name so operands are verified (#750 C19)")
+            records.append((argv_idx, tok, *chain[0], chain[1:]))
+        out = tuple(records)
+        if expected is not None and out != expected:
+            return None, f"proof executable changed {when} phase; fail-closed"
+        return out, None
+
+    @staticmethod
+    def quiet_oss_authorized(source, digest):
+        """True only when the digest-verified coordinator JSON contract explicitly authorizes
+        the oss-contribute quiet-PR lane (`mission == 'oss-contribute'` or `allow_quiet_oss: true`)."""
+        if not (source and digest):
+            return False
+        raw, err = read_source(source)
+        if err or raw is None or sha256_of(raw) != _norm_digest(digest):
+            return False
+        try:
+            doc = json_contract(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return False
+        if not isinstance(doc, dict):
+            return False
+        return doc.get("mission") == "oss-contribute" or doc.get("allow_quiet_oss") is True
+
+    @classmethod
+    def quiet_oss_review(cls, m, reviews, head, author, equivalent, review_shas,
+                         corroborated, nc_executed, oss_authorized=False):
+        """#750 C15: an oss-contribute unit parked `awaiting-maintainer-merge` targets an upstream
+        repository the fleet does not control, so upstream OWNER/MEMBER/COLLABORATOR approval may be
+        absent while feedback is quiet. Accept it on the gh lane ONLY when the coordinator's
+        digest-bound contract authorizes `oss-contribute`, the manifest declares
+        `awaiting-maintainer-merge`, no upstream reviewer has a standing CHANGES_REQUESTED veto on
+        this content, `review.artifact` is readable and binds `head_sha`, and the negative control
+        was EXECUTED."""
+        if not oss_authorized:
+            return False, []
+        parked = m.get("parked") if isinstance(m.get("parked"), list) else []
+        is_quiet_oss = any(isinstance(p, dict) and p.get("reason") == "awaiting-maintainer-merge"
+                           for p in parked)
+        if not is_quiet_oss:
+            return False, []
+        ok_shas = {head} | ({equivalent} if equivalent else set())
+        relevant = ok_shas | set(review_shas or ())
+        latest_by_user = {}
+        for rev in reviews or []:
+            if rev.get("commit_id") in relevant:
+                latest_by_user[(rev.get("user") or {}).get("login")] = rev
+        non_author = [rev for who, rev in latest_by_user.items() if author is None or who != author]
+        if any(rev.get("state") == "CHANGES_REQUESTED" for rev in non_author):
+            return False, []
+        art = (m.get("review") or {}).get("artifact")
+        if not (isinstance(art, str) and art):
+            return False, []
+        raw, err = read_artifact(m, art)
+        if err or raw is None or (head and head not in raw.decode("utf-8", "replace")):
+            return False, []
+        if not corroborated or not nc_executed:
+            return False, []
+        return True, [
+            "NOTE: oss-contribute quiet PR (awaiting-maintainer-merge) — coordinator contract "
+            "authorizes oss-contribute, no upstream CHANGES_REQUESTED veto, internal "
+            "review.artifact bound to head_sha, and negative control EXECUTED"
+        ]
+
+    @staticmethod
+    def unexecuted_nc_note(is_mut, nc_executed, fatal):
+        """#750 C10: disclose when a mutation unit's negative control was only statically
+        corroborated from its artifact rather than executed."""
+        if is_mut and not nc_executed and not fatal:
+            return ["NOTE: negative control corroborated from artifact only (--execute-nc not set) "
+                    "— static corroboration, not an executed control"]
+        return []
 
     @classmethod
     def git_env(cls):
@@ -1264,7 +2215,7 @@ class _Authority:
 
 
 def check_review(m, repo, is_mutation, no_gh=False, corroborated=False, dispatch_lighting=None,
-                 nc_executed=False):
+                 nc_executed=False, allow_static_nc=True, oss_authorized=False):
     """3. A mutation unit needs an INDEPENDENT review at head_sha. Default: an APPROVED GitHub review
     looked up on GitHub (a worker-set reviewed_sha is not evidence). Fail-closed.
 
@@ -1339,11 +2290,20 @@ def check_review(m, repo, is_mutation, no_gh=False, corroborated=False, dispatch
     if err:
         return [f"mutation unit: cannot establish INDEPENDENT APPROVED review: {err}"]
     if not review_ok(reviews, head, author, also_sha=equivalent, equivalent_shas=review_shas):
+        oss_ok, oss_notes = _Authority.quiet_oss_review(
+            m, reviews, head, author, equivalent, review_shas, corroborated, nc_executed,
+            oss_authorized=oss_authorized)
+        if oss_ok:
+            return authority + oss_notes
         return [f"mutation unit: no INDEPENDENT APPROVED review at head_sha on {repo}#{number} "
                 f"(the PR author's own approval, superseded reviews, and approvals from accounts "
                 f"whose author_association is not one of "
                 f"{sorted(_Authority.INDEPENDENT_REVIEWER_ASSOCIATIONS)} do not count; a review at "
                 f"reviewed_sha only counts when reviewed_wtree binds its tree to the head's)"]
+    if not nc_executed and not allow_static_nc:
+        return authority + ["mutation unit: negative control was NOT executed — pass --execute-nc "
+                            "(and --nc-command) so the control is re-run, or pass --allow-static-nc "
+                            "to accept artifact-only corroboration explicitly (#750 C10)"]
     return authority  # [] or the advisory NOTEs (h409 F-1/F-2)
 
 
@@ -1544,8 +2504,13 @@ def _command_oracle_paths(command):
             return None
         inputs.append(argv[0])
     program = Path(argv[0]).name
-    python = re.fullmatch(r"(?:python(?:[0-9.]+)?|pypy[0-9]*)", program)
-    interpreter = python or program in {"sh", "bash", "zsh", "node", "ruby", "perl"}
+    python = re.fullmatch(r"(?:python|pypy)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", program)
+    interpreter = python or bool(
+        re.fullmatch(
+            r"(?:sh|bash|dash|zsh|ksh|mksh|pdksh|yash|posh|ash|node(?:js)?|ruby|perl|php|lua(?:jit)?|Rscript)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?",
+            program,
+        )
+    )
     module = None
     # Where the sweep below starts: the option list it reads belongs to the program, and for an
     # interpreter that is the SCRIPT, whose arguments begin after the script name.
@@ -1560,7 +2525,16 @@ def _command_oracle_paths(command):
         arg = argv[i]
         if python and arg.startswith("-m"):
             name = (argv[i + 1] if i + 1 < len(argv) else "") if arg == "-m" else arg[2:]
-            if not re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", name):
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", name):
+                return None
+            mod_root = name.split(".", 1)[0]
+            if mod_root != "unittest" and (
+                mod_root in getattr(sys, "stdlib_module_names", ())
+                or mod_root in sys.builtin_module_names
+                or mod_root in {"pip", "setuptools", "wheel", "virtualenv", "nox", "tox", "coverage", "ipython", "IPython"}
+            ):
+                return None
+            if name not in ("pytest", "unittest") and "-I" in argv[1:i]:
                 return None
             module = name.replace(".", "/")
             scan_from = i + 2 if arg == "-m" else i + 1
@@ -1574,6 +2548,8 @@ def _command_oracle_paths(command):
                 i += 1
             if i >= len(argv) or argv[i].startswith("-"):
                 return None  # inline programs, preload options and stdin are not parsed
+            if program.startswith("node") and argv[i] in ("inspect", "debug"):
+                return None
             inputs.append(argv[i])
             scan_from = i + 1
     elif program in {"make", "gmake"}:
@@ -1638,7 +2614,11 @@ def _command_oracle_paths(command):
                 continue
         paths.add(candidate.as_posix())
     if module:
-        paths.update((module + ".py", module + "/__main__.py", module + "/__init__.py"))
+        mod_parts = module.split("/")
+        for k in range(1, len(mod_parts) + 1):
+            prefix = "/".join(mod_parts[:k])
+            paths.update((prefix + ".py", prefix + "/__init__.py"))
+        paths.add(module + "/__main__.py")
     return paths
 
 
@@ -1783,7 +2763,7 @@ def _is_oracle_path(path, nc_command=None, head=None):
             argv = argv[2:] if argv[1:2] == ["--"] else argv[1:]
         prog = Path(argv[0]).name if argv else ""
         runner, rest = ("pytest", argv[1:]) if prog == "pytest" else (None, [])
-        if re.fullmatch(r"(?:python(?:[0-9.]+)?|pypy[0-9]*)", prog):
+        if re.fullmatch(r"(?:python|pypy)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", prog):
             i = 1
             while i < len(argv) and argv[i] in {"-B", "-E", "-I", "-O", "-OO", "-s", "-S", "-u", "-q"}:
                 i += 1
@@ -1824,7 +2804,7 @@ def _is_oracle_path(path, nc_command=None, head=None):
             opt.setdefault("p", []).extend(ops[2:3])
         elif runner == "unittest":
             for op in ops:
-                if re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", op):
+                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", op):
                     # A dotted operand names a module, a class or a method
                     # (`checks.add_check.TestAdd.test_add`): the oracle is the deepest prefix that
                     # is a module at head_sha, not the whole dotted path read as a file. With no
@@ -2595,7 +3575,7 @@ def execute_negative_control(m, nc_command=None):
             return f"could not check out the {phase} commit: {gerr.strip()}"
         return None
 
-    def _phase_run(top, head, commit, phase, argv):
+    def _phase_run(top, head, commit, phase, argv, pinned_exec=None, extra_staged_ops=(), absent_mod_paths=()):
         """Run the bound command once in a FRESH repository at `commit`, under a FRESH empty
         HOME and TMPDIR. Returns (rc, stdout, stderr), or (None, None, err) when no repo was made.
 
@@ -2612,7 +3592,45 @@ def execute_negative_control(m, nc_command=None):
             err = _stage_phase_repo(top, head, commit, repo, phase)
             if err:
                 return None, None, err
-            return _run_at(repo, argv, timeout=NC_TIMEOUT_S, env=env)
+            staged_ops = list(dict.fromkeys([*_Authority._staged_script_operands(argv), *extra_staged_ops]))
+            pre_op_digests = {}
+            for s_op in staged_ops:
+                s_digest, s_err = _Authority._verify_staged_rel_file(repo, s_op)
+                if s_err:
+                    return None, None, s_err
+                pre_op_digests[s_op] = s_digest
+            for abs_rel in absent_mod_paths:
+                if os.path.lexists(os.path.join(repo, abs_rel)):
+                    return None, None, (f"proof module shadow {abs_rel!r} appeared before {phase}; "
+                                        "fail-closed (#750 C19)")
+            exec_argv = list(argv)
+            if pinned_exec is not None:
+                _, exec_err = _Authority.nc_exec_identity(
+                    argv, top, env.get("PATH", ""), pinned_exec, f"before {phase}")
+                if exec_err:
+                    return None, None, exec_err
+                for rec in pinned_exec:
+                    slot_idx, pinned_abs = rec[0], rec[2]
+                    if 0 <= slot_idx < len(exec_argv) and not os.path.isabs(exec_argv[slot_idx]):
+                        exec_argv[slot_idx] = pinned_abs
+            rc, out, errout = _run_at(repo, exec_argv, timeout=NC_TIMEOUT_S, env=env)
+            for s_op, want_digest in pre_op_digests.items():
+                post_digest, post_s_err = _Authority._verify_staged_rel_file(repo, s_op)
+                if post_s_err:
+                    return None, None, post_s_err
+                if post_digest != want_digest:
+                    return None, None, (f"proof input {s_op!r} changed during {phase}; "
+                                        "fail-closed (#750 C19)")
+            for abs_rel in absent_mod_paths:
+                if os.path.lexists(os.path.join(repo, abs_rel)):
+                    return None, None, (f"proof module shadow {abs_rel!r} appeared during {phase}; "
+                                        "fail-closed (#750 C19)")
+            if pinned_exec is not None:
+                _, post_err = _Authority.nc_exec_identity(
+                    argv, top, env.get("PATH", ""), pinned_exec, f"during {phase}")
+                if post_err:
+                    return None, None, post_err
+            return rc, out, errout
         finally:
             shutil.rmtree(holder, ignore_errors=True)
 
@@ -2620,7 +3638,7 @@ def execute_negative_control(m, nc_command=None):
     # (tests/test_reshape_width_verify.py) holds verify.py's top-level surface fixed.
     nc = m.get("negative_control") or {}
     tool = nc.get("tool")
-    if tool not in EXECUTABLE_NC_TOOLS:
+    if tool not in EXECUTABLE_NC_TOOLS or _Authority.unreplayable_tool(m, nc, tool):
         return False, [f"--execute-nc: no replay is implemented for negative_control.tool {tool!r} "
                        f"— only {list(EXECUTABLE_NC_TOOLS)} can be re-executed here; fail-closed "
                        "(#255)"]
@@ -2636,6 +3654,59 @@ def execute_negative_control(m, nc_command=None):
     argv, err = _nc_command(nc, nc_command)
     if err:
         return False, [f"--execute-nc: {err}"]
+    pinned_exec, exec_err = _Authority.nc_exec_identity(argv, top)
+    if exec_err:
+        return False, [f"--execute-nc: {exec_err}"]
+    extra_staged_ops, absent_mod_paths = [], []
+    py_mod = _Authority._python_module_target(argv)
+    if py_mod is not None:
+        mod_parts = py_mod.split(".")
+        mod_rel = "/".join(mod_parts)
+        entry_cands = [f"{mod_rel}.py", f"{mod_rel}/__main__.py"]
+        pkg_cands = [f"{'/'.join(mod_parts[:k])}/__init__.py" for k in range(1, len(mod_parts) + 1)]
+        all_cands = list(dict.fromkeys([*entry_cands, *pkg_cands]))
+        ls_rc, ls_out, _ = _run(
+            [_Authority.git_bin(), "-C", top, "--literal-pathspecs", "ls-tree", "-r", "-z", head, "--", *all_cands],
+            timeout=10, env=_Authority.git_env())
+        tracked_mods = {}
+        if ls_rc == 0 and ls_out:
+            for rec_line in ls_out.split("\0"):
+                if not rec_line or "\t" not in rec_line:
+                    continue
+                meta, rel_p = rec_line.split("\t", 1)
+                parts_m = meta.split()
+                if parts_m and parts_m[0] in ("100644", "100755"):
+                    tracked_mods[rel_p] = parts_m[0]
+        if not any(ec in tracked_mods for ec in entry_cands):
+            return False, [f"--execute-nc: unsupported proof command: module '-m {py_mod}' is not a tracked "
+                           "regular file in head_sha; fail-closed (#750 C19)"]
+        if f"{mod_rel}/__main__.py" not in tracked_mods and f"{mod_rel}/__init__.py" in tracked_mods:
+            return False, [f"--execute-nc: unsupported proof command: package '{mod_rel}/__init__.py' "
+                           f"shadows '{mod_rel}.py' without __main__.py; fail-closed (#750 C19)"]
+        req_pkgs = [
+            f"{'/'.join(mod_parts[:k])}/__init__.py"
+            for k in range(
+                1,
+                len(mod_parts) + (1 if f"{mod_rel}/__main__.py" in tracked_mods else 0),
+            )
+        ]
+        if any(rp not in tracked_mods for rp in req_pkgs):
+            return False, [f"--execute-nc: unsupported proof command: package hierarchy for '-m {py_mod}' "
+                           "is missing tracked __init__.py in head_sha; fail-closed (#750 C19)"]
+        extra_staged_ops = [c for c in all_cands if c in tracked_mods]
+        sib_cands = [f"{'/'.join(mod_parts[:k])}.py" for k in range(1, len(mod_parts))]
+        absent_mod_paths = [c for c in [*all_cands, *sib_cands] if c not in tracked_mods]
+    for st_op in _Authority._staged_script_operands(argv):
+        norm_st_op = Path(os.path.normpath(st_op)).as_posix()
+        if os.path.isabs(st_op) or norm_st_op in ("", ".") or ".." in Path(norm_st_op).parts:
+            return False, [f"--execute-nc: proof input {st_op!r} is not a tracked "
+                           "regular file in head_sha; fail-closed (#750 C19)"]
+        ls_rc, ls_out, _ = _run(
+            [_Authority.git_bin(), "-C", top, "--literal-pathspecs", "ls-tree", head, "--", norm_st_op],
+            timeout=10, env=_Authority.git_env())
+        if ls_rc != 0 or not ls_out.strip() or ls_out.strip().split(None, 1)[0] not in ("100644", "100755"):
+            return False, [f"--execute-nc: proof input {st_op!r} is not a tracked "
+                           "regular file in head_sha; fail-closed (#750 C19)"]
     try:
         mutant, err = _prepare_control(top, head, m, nc, tool, nc_command)
     except _Authority.DriverQueryFailed as fail:
@@ -2647,7 +3718,9 @@ def execute_negative_control(m, nc_command=None):
         return False, [f"--execute-nc: {err}"]
     msgs = []
     for phase, commit in (("clean", head), ("control", mutant), ("clean", head)):
-        rc, out, errout = _phase_run(top, head, commit, phase, argv)
+        rc, out, errout = _phase_run(
+            top, head, commit, phase, argv, pinned_exec, extra_staged_ops, absent_mod_paths
+        )
         if rc is None:
             return False, [f"--execute-nc: {errout}"]
         tail = (errout.strip() or out.strip())[-300:]
@@ -2755,13 +3828,13 @@ def check_negative_control(m, is_mutation, execute=False, nc_command=None):
             elif oracle:
                 errs.append(f"range revert changes test paths or runner oracle inputs {sorted(oracle)}; "
                             "name only production negative_control.paths")
-    elif tool == "hand":
-        # The same bind, one tool over. `hand` declares its target in the quoted diff rather than
-        # in paths[], and checking that the artifact merely CONTAINS diff-shaped text left the
-        # decoy open: a narrated manifest could quote a diff against a file the change never
-        # touched, or an unrelated hunk, and offer its RED as evidence (PR #308 review, P1).
-        # Caught only under --execute-nc before, which is the identical asymmetry #306 closed
-        # for `revert` — the executed lane covering for the narrated one.
+    elif tool in EXECUTABLE_NC_TOOLS:
+        # The same bind, one tool over. `hand` (and any mutation tool that quotes its mutant diff)
+        # declares its target in the quoted diff rather than in paths[], and checking that the
+        # artifact merely CONTAINS diff-shaped text left the decoy open: a narrated manifest could
+        # quote a diff against a file the change never touched, or an unrelated hunk, and offer its
+        # RED as evidence (PR #308 review, P1). Caught only under --execute-nc before, which is the
+        # identical asymmetry #306 closed for `revert` — the executed lane covering for the narrated one.
         quoted = _extract_diff(content)
         # Only when the manifest actually pins its SHAs. A mutation manifest that does not is
         # already refused by check_real_commits, which owns that fact; repeating the refusal here
@@ -3265,7 +4338,7 @@ def check_retention_receipt(m, pubkey_ref=None):
 # a record carrying the signer's _PROFILE_FIELDS (#590) verifies too (2026-10-23 review, P2-2).
 _DISPATCH_FIELDS = ("manifest_id", "contract_digest", "unit_class", "lighting",
                     "nc_paths", "nc_command", "nc_artifact_sha256",
-                    "no_gh", "lane", "execute_nc", "base_sha")
+                    "no_gh", "lane", "execute_nc", "allow_static_nc", "base_sha")
 # The LANE flags (review P2): --no-gh waives the GitHub review, --lane decides Lane-0 refusal and
 # dark-eligibility's Lane-A requirement, and --execute-nc is what turns the control from text into
 # a fact. All three reach verify.py through argv / the worker-settable ORCA_* env, so on a
@@ -3309,8 +4382,9 @@ class _Transcript:
     TOOLCHAIN = ("verify.py", "_verify_sig.py", "diff_scope.py", "ed25519.py", "dispatch-sign.py",
                  "inventory.py", "gitexec.py")
     ARGS = ("contract_source", "contract_digest", "repo", "base", "symbol", "execute_nc",
-            "unit_class", "no_gh", "lighting", "lane", "dispatch_record", "dispatch_pubkey",
-            "nc_command", "git_dir", "evidence_root", "provenance", "retention_pubkey")
+            "allow_static_nc", "unit_class", "no_gh", "lighting", "lane", "dispatch_record",
+            "dispatch_pubkey", "nc_command", "git_dir", "evidence_root", "provenance",
+            "retention_pubkey")
 
     @staticmethod
     @functools.lru_cache(maxsize=1)
@@ -3444,7 +4518,7 @@ def _manifest_nc_values(m):
 
 
 def check_dispatch_provenance(m, contract_digest, unit_class, lighting, record_ref, pubkey_ref,
-                              no_gh=False, lane=None, execute_nc=False):
+                              no_gh=False, lane=None, execute_nc=False, allow_static_nc=False):
     """13. #135: verify a coordinator-signed dispatch record so a run's contract_digest / unit_class /
     lighting / lane flags (--lane, --no-gh, --execute-nc) can be checked against what the
     coordinator actually authorized. This is a SOUNDNESS
@@ -3515,7 +4589,9 @@ def check_dispatch_provenance(m, contract_digest, unit_class, lighting, record_r
     # unbound waiver; --execute-nc only makes a run stricter, so its absence is what must be bound:
     # a record that signs it requires it. A signed value of either that the run contradicts is a
     # substitution, in whichever direction.
-    for field, used, waiver in (("no_gh", bool(no_gh), True), ("execute_nc", bool(execute_nc), False)):
+    for field, used, waiver in (("no_gh", bool(no_gh), True),
+                                ("execute_nc", bool(execute_nc), False),
+                                ("allow_static_nc", bool(allow_static_nc), True)):
         signed = record.get(field)
         if signed is None:
             if used and waiver:
@@ -3621,7 +4697,7 @@ def check_replay_request(m, is_mutation, execute_nc, nc_command):
         return []
     nc = m.get("negative_control") or {}
     tool = nc.get("tool")
-    if tool not in EXECUTABLE_NC_TOOLS:
+    if tool not in EXECUTABLE_NC_TOOLS or _Authority.unreplayable_tool(m, nc, tool):
         return [f"--execute-nc: no replay is implemented for negative_control.tool {tool!r} "
                 f"— only {list(EXECUTABLE_NC_TOOLS)} can be re-executed here; fail-closed (#255)"]
     _, err = _nc_command(nc, nc_command)
@@ -3631,7 +4707,7 @@ def check_replay_request(m, is_mutation, execute_nc, nc_command):
 def verify(manifest_path, contract_source=None, contract_digest=None, repo=None,
            base=None, symbol=None, execute_nc=False, unit_class=None, no_gh=False, lighting=None,
            dispatch_record=None, dispatch_pubkey=None, nc_command=None, lane=None, judged=None,
-           retention_pubkey=None):
+           retention_pubkey=None, allow_static_nc=False):
     """Return (fatal_errors, notes). fatal_errors non-empty => exit 2. A `judged` dict receives
     the manifest bytes this run loaded (`judged["raw"]`), for the transcript to bind to.
     `retention_pubkey` is the coordinator's trust key for the retention receipt (#608)."""
@@ -3666,7 +4742,8 @@ def verify(manifest_path, contract_source=None, contract_digest=None, repo=None,
     if dispatch_record and dispatch_pubkey and (lane is None or lighting is None):
         verdict = check_dispatch_provenance(m, contract_digest, unit_class, lighting,
                                             dispatch_record, dispatch_pubkey, no_gh=no_gh,
-                                            lane=lane, execute_nc=execute_nc)
+                                            lane=lane, execute_nc=execute_nc,
+                                            allow_static_nc=allow_static_nc)
         rec_text, rec_err = read_source(dispatch_record)
         if all(line.startswith("NOTE:") for line in verdict) and not rec_err:
             try:
@@ -3689,7 +4766,8 @@ def verify(manifest_path, contract_source=None, contract_digest=None, repo=None,
         lambda: check_base_binding(m, base, execute_nc),
         lambda: check_dispatch_provenance(m, contract_digest, unit_class, lighting,
                                           dispatch_record, dispatch_pubkey,
-                                          no_gh=no_gh, lane=lane, execute_nc=execute_nc),
+                                          no_gh=no_gh, lane=lane, execute_nc=execute_nc,
+                                          allow_static_nc=allow_static_nc),
         lambda: check_class_downgrade(m, unit_class, dispatch_record, dispatch_pubkey),
         lambda: check_freshness(m),
         lambda: check_commands(m, is_mut, nc_command),
@@ -3707,10 +4785,14 @@ def verify(manifest_path, contract_source=None, contract_digest=None, repo=None,
         collect((lambda: nc_errs,))
     except Exception as exc:
         fatal.append(f"malformed manifest: {type(exc).__name__} in the negative-control check ({exc})")
+    oss_authorized = _Authority.quiet_oss_authorized(contract_source, contract_digest)
     collect((
-        lambda: check_review(m, repo, is_mut, no_gh, corroborated, lighting, nc_executed),
+        lambda: check_review(m, repo, is_mut, no_gh, corroborated, lighting, nc_executed,
+                             allow_static_nc=allow_static_nc or (execute_nc and bool(fatal)),
+                             oss_authorized=oss_authorized),
         lambda: check_symbol_on_base(symbol, base),
     ))
+    notes.extend(_Authority.unexecuted_nc_note(is_mut, nc_executed, fatal))
     return (fatal, notes), None
 
 
@@ -3760,9 +4842,13 @@ def main(argv=None):
     ap.add_argument("--execute-nc", action="store_true",
                     help="EXECUTE the negative control (#255): apply it in a throwaway worktree at "
                          "head_sha, require the bound command to exit non-zero there and 0 at "
-                         "clean head_sha. Requires --nc-command (#279). REQUIRED by the "
-                         "review-waiver lanes (--lighting dark-eligible / --no-gh), which have no "
-                         "other oracle (#256)")
+                         "clean head_sha. Requires --nc-command (#279). REQUIRED by default on "
+                         "mutation units (#750 C10) and unconditionally in review-waiver lanes "
+                         "(--lighting dark-eligible / --no-gh / awaiting-maintainer-merge) (#256)")
+    ap.add_argument("--allow-static-nc", action="store_true",
+                    help="explicitly waive --execute-nc on an independently GitHub-reviewed "
+                         "mutation unit and accept artifact-only negative-control corroboration "
+                         "(disclosed as a NOTE; never honored in review-waiver lanes; #750 C10)")
     ap.add_argument("--base", default=None, help="integration base branch (for ancestry)")
     ap.add_argument("--symbol", default=None, help="a unit symbol to grep on the base")
     ap.add_argument("--unit-class", default=None,
@@ -3880,7 +4966,8 @@ def main(argv=None):
                            repo, args.base, args.symbol, args.execute_nc,
                            args.unit_class, args.no_gh, args.lighting,
                            args.dispatch_record, args.dispatch_pubkey, args.nc_command,
-                           lane=args.lane, judged=judged, retention_pubkey=args.retention_pubkey)
+                           lane=args.lane, judged=judged, retention_pubkey=args.retention_pubkey,
+                           allow_static_nc=args.allow_static_nc)
     drift = sorted(name for name, sha in _Transcript.hash_files().items() if sha != toolchain[name])
     drifted = ([f"toolchain changed during this run: {drift} no longer hash as they did when the "
                 "verifier started — worker code (the executed control) ran in between, so the "

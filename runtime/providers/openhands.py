@@ -49,7 +49,7 @@ from .base import (
 )
 from .local_state import LocalStateStore
 from ._external import release_claim_on_failure
-from ._external import insert_dispatch, load_dispatch, local_worker_list, record_fence, show_from_row
+from ._external import insert_dispatch, load_dispatch, local_worker_list, record_fence, resolve_worker_list_run, show_from_row
 from ._external import credentialed_request, origin
 
 RO_ALLOWED_TOOLS = ["glob", "grep", "planning_file_editor"]
@@ -455,6 +455,7 @@ class OpenHandsProvider(RuntimeProvider):
 
     def worker_list(self, *, run: str | None = None, task: str | None = None, limit: int | None = None, **kwargs: Any) -> dict[str, Any]:
         """OUR dispatch rows; the server's search (every conversation on it) only annotates `stage`."""
+        run = resolve_worker_list_run(self.state, run, include_remote=bool(kwargs.get("include_remote")))
         raw = self._request("GET", "/api/conversations/search?limit=100")
         items = raw.get("items")
         if not isinstance(items, list):
@@ -464,7 +465,7 @@ class OpenHandsProvider(RuntimeProvider):
             for it in items
             if isinstance(it, dict) and it.get("id")
         }
-        return local_worker_list(self.state, self.name, run=run, task=task, limit=limit, stages=stages, upstream=raw)
+        return local_worker_list(self.state, self.name, run=run, task=task, limit=limit, stages=stages, upstream=raw, **kwargs)
 
     def worker_show(self, *, dispatch_id: str = "", **kwargs: Any) -> dict[str, Any]:
         row = load_dispatch(self.state, dispatch_id, self.name)
@@ -531,8 +532,8 @@ class OpenHandsProvider(RuntimeProvider):
     def task_list(self, **kwargs: Any) -> dict[str, Any]:
         return self.state.task_list(**kwargs)
 
-    def send_message(self, **kwargs: Any) -> dict[str, Any]:
-        return self.state.send_message(**kwargs)
+    def send_message(self, *, retry_request: str | None = None, **kwargs: Any) -> dict[str, Any]:
+        return self.state.send_message(retry_request=retry_request, **kwargs)
 
     def check_messages(self, **kwargs: Any) -> dict[str, Any]:
         return self.state.check_messages(**kwargs)

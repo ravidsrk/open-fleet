@@ -1668,5 +1668,331 @@ class TestRoCompletionReadsTheFinalAnswer(unittest.TestCase):
         self.assertIsNone(self.read(_done(), DISP, "kilo"))
 
 
+class TestPosixAdversarialRemediation750(PosixRealProcessBase):
+    """#750 C1, C6, C9, C28, C32, C37, C38, C40: POSIX provider & worker_ops regressions."""
+
+    def test_c1_and_c40_terminal_and_worker_read_cursor_limit_source_and_truncation(self):
+        self.fake_agent("claude", "exit 0")
+        t = self.prov.task_create(spec="read test")["task"]["id"]
+        ws = self.prov.worker_start(task_id=t, worktree="new-child", agent="claude", profile="ro")
+        disp_id = ws["dispatchId"]
+        handle = ws["agentTerminalHandle"]
+        self.assertTrue(self.wait_monitor_done(disp_id))
+        with self.prov.state._connect() as conn:
+            row = conn.execute("SELECT lane_dir FROM dispatches WHERE dispatch_id = ?", (disp_id,)).fetchone()
+            lane_dir = Path(row["lane_dir"])
+        ev = lane_dir / "events.jsonl"
+        ev.write_text("\n".join(f"line-{i}" for i in range(6)) + "\n", encoding="utf-8")
+
+        # C40: cursor=0 renders as CURSOR=0 in worker_ops.format_read and TRUNCATED=yes in terminal_ops.format_read
+        worker_ops = importlib.import_module("runtime.scripts.worker_ops")
+        terminal_ops = importlib.import_module("runtime.scripts.terminal_ops")
+        tr0_res = self.prov.terminal_read(terminal=handle, cursor=0, limit=0)
+        tr0 = tr0_res["terminal"]
+        self.assertEqual(tr0["cursor"], 0)
+        self.assertEqual(tr0["source"], "stream")
+        self.assertTrue(tr0["truncated"])
+        term_rendered = "\n".join(terminal_ops.format_read(tr0_res))
+        self.assertIn("SOURCE=stream", term_rendered)
+        self.assertIn("TRUNCATED=yes", term_rendered)
+
+        zero_page = self.prov.worker_read(dispatch_id=disp_id, source="terminal", cursor=0, limit=0)
+        self.assertEqual(zero_page["cursor"], 0)
+        self.assertTrue(zero_page["truncated"])
+        rendered = "\n".join(worker_ops.format_read(zero_page))
+        self.assertIn("CURSOR=0", rendered)
+        self.assertIn("SOURCE=terminal", rendered)
+
+        # C1: forward pagination with cursor + limit neither repeats nor skips lines
+        p1 = self.prov.terminal_read(terminal=handle, cursor=0, limit=2)["terminal"]
+        self.assertEqual(p1["tail"], ["line-0", "line-1"])
+        self.assertEqual(p1["cursor"], 2)
+        self.assertTrue(p1["truncated"])
+
+        p2 = self.prov.terminal_read(terminal=handle, cursor=p1["cursor"], limit=2)["terminal"]
+        self.assertEqual(p2["tail"], ["line-2", "line-3"])
+        self.assertEqual(p2["cursor"], 4)
+        self.assertTrue(p2["truncated"])
+
+        p3 = self.prov.terminal_read(terminal=handle, cursor=p2["cursor"], limit=2)["terminal"]
+        self.assertEqual(p3["tail"], ["line-4", "line-5"])
+        self.assertEqual(p3["cursor"], 6)
+        self.assertFalse(p3["truncated"])
+
+        # C40: worker_read honors cursor and limit and reports truncated accurately
+        wr1 = self.prov.worker_read(dispatch_id=disp_id, source="terminal", cursor=1, limit=3)
+        self.assertEqual(wr1["terminal"]["tail"], ["line-1", "line-2", "line-3"])
+        self.assertEqual(wr1["cursor"], 4)
+        self.assertTrue(wr1["truncated"])
+
+        wr2 = self.prov.worker_read(dispatch_id=disp_id, source="terminal", cursor=4, limit=3)
+        self.assertEqual(wr2["terminal"]["tail"], ["line-4", "line-5"])
+        self.assertEqual(wr2["cursor"], 6)
+        self.assertFalse(wr2["truncated"])
+
+    def test_c6_paperclip_and_openhands_denylist_stripped_across_spawn_mux_and_inherited_server(self):
+        six_keys = (
+            "OPEN_FLEET_PAPERCLIP_API_KEY",
+            "ORCA_PAPERCLIP_API_KEY",
+            "OPEN_FLEET_OPENHANDS_SESSION_API_KEY",
+            "ORCA_OPENHANDS_SESSION_API_KEY",
+            "OPEN_FLEET_OPENHANDS_LLM_API_KEY",
+            "ORCA_OPENHANDS_LLM_API_KEY",
+        )
+        for k in six_keys:
+            self.assertIn(k, self.posix.WORKER_ENV_DENYLIST)
+
+        out = Path(self.tmp.name) / "c6-env.txt"
+        echo_expr = "".join(f"[${k}]" for k in six_keys)
+        self.fake_agent("claude", f'echo "{echo_expr}" > "{out}"')
+        for k in six_keys:
+            self.env[k] = f"secret-{k}"
+        self.prov = self.providers.get_provider("posix", env=self.env)
+
+        # 1. Spawn & mux worker_env.json path
+        _, ws = self.start(profile="rw")
+        disp = ws["dispatchId"]
+        self.assertTrue(_wait_for(out.is_file, timeout=30))
+        self.assertTrue(self.wait_monitor_done(disp))
+        self.assertEqual(out.read_text().strip(), "[]" * len(six_keys))
+
+        with self.prov.state._connect() as conn:
+            lane_dir = Path(conn.execute("SELECT lane_dir, worktree FROM dispatches WHERE dispatch_id = ?", (disp,)).fetchone()["lane_dir"])
+        worker_env = json.loads((lane_dir / "worker_env.json").read_text(encoding="utf-8"))
+        for k in six_keys:
+            self.assertNotIn(k, worker_env)
+
+        # 2. Inherited-server path: run_worker.py strips all 6 from its own os.environ
+        out.unlink(missing_ok=True)
+        with self.prov.state._connect() as conn:
+            conn.execute("UPDATE dispatches SET state = 'ready', monitor_pid = 0, monitor_started_at = NULL WHERE dispatch_id = ?", (disp,))
+        inherited_env = {**os.environ, "PATH": self.env["PATH"], **{k: f"inherited-{k}" for k in six_keys}}
+        subprocess.run([sys.executable, "-I", str(lane_dir / "run_worker.py")], env=inherited_env, cwd=ws["worker"]["worktree"], timeout=60, check=True)
+        self.assertTrue(out.is_file())
+        self.assertEqual(out.read_text().strip(), "[]" * len(six_keys))
+
+    def test_c9_sync_sandbox_git_tampered_head_deletes_ref_and_raises(self):
+        wt = Path(self.prov.worktree_create("wt-c9")["worktree"]["path"])
+        lane = Path(self.tmp.name) / "lane-c9"
+        lane.mkdir()
+        meta = self.posix.prepare_sandbox_git(str(wt), lane)
+        sandbox_git = Path(meta["sandbox_git"])
+        _git("--git-dir", str(sandbox_git), "-c", "user.email=t@x", "-c", "user.name=T",
+             "commit", "--allow-empty", "-m", "c1", cwd=wt)
+        head1 = _git("--git-dir", str(sandbox_git), "rev-parse", "HEAD", cwd=wt).stdout.strip()
+        _git("--git-dir", str(sandbox_git), "-c", "user.email=t@x", "-c", "user.name=T",
+             "commit", "--allow-empty", "-m", "c2", cwd=wt)
+        head2 = _git("--git-dir", str(sandbox_git), "rev-parse", "HEAD", cwd=wt).stdout.strip()
+        # Reset sandbox HEAD to head1; during fetch, flip sandbox HEAD to head2 so fetched != new_head
+        _git("--git-dir", str(sandbox_git), "update-ref", "HEAD", head1, cwd=wt)
+        real_git_ok = self.posix._git_ok
+
+        def racing_git_ok(args, desc="", **kw):
+            if desc == "fetch sandbox commits":
+                _git("--git-dir", str(sandbox_git), "update-ref", "HEAD", head2, cwd=wt)
+            return real_git_ok(args, desc, **kw)
+
+        with mock.patch.object(self.posix, "_git_ok", side_effect=racing_git_ok):
+            with self.assertRaises(self.posix.ProviderError) as ctx:
+                self.posix.sync_sandbox_git(meta, "disp_c9")
+        self.assertEqual(ctx.exception.code, "sandbox_git_tampered")
+        # Verify the mismatched ref was deleted from common_dir
+        ref_check = _git("--git-dir", meta["common_dir"], "rev-parse", "--verify", "refs/open-fleet/sandbox/disp_c9",
+                         cwd=self.repo, check=False)
+        self.assertNotEqual(ref_check.returncode, 0)
+
+    def test_c28_posix_worker_start_and_dispatch_inject_refuse_cross_run(self):
+        self.fake_agent("claude", "exit 0")
+        self.prov.state.run_create(run="run-1", sender="coord-1")
+        self.prov.state.run_create(run="run-2", sender="coord-2")
+        t1 = self.prov.task_create(spec="in run 1", run="run-1")["task"]["id"]
+        with self.assertRaises(self.posix.ProviderError) as ctx:
+            self.prov.worker_start(task_id=t1, worktree="new-child", agent="claude", profile="ro", run="run-2")
+        self.assertEqual(ctx.exception.code, "cross_run_access")
+
+        ws = self.prov.worker_start(task_id=t1, worktree="new-child", agent="claude", profile="ro", run="run-1")
+        self.assertTrue(self.wait_monitor_done(ws["dispatchId"]))
+        t2 = self.prov.task_create(spec="in run 2", run="run-2")["task"]["id"]
+        with self.assertRaises(self.posix.ProviderError) as ctx:
+            self.prov.dispatch_inject(task_id=t1, to_handle=ws["agentTerminalHandle"], run="run-2")
+        self.assertEqual(ctx.exception.code, "cross_run_access")
+        with self.assertRaises(self.posix.ProviderError) as ctx:
+            self.prov.dispatch_inject(task_id=t2, to_handle=ws["agentTerminalHandle"], run="run-2")
+        self.assertEqual(ctx.exception.code, "cross_run_access")
+
+        unreg_term = self.prov.terminal_create(title="unsupervised")["terminal"]["handle"]
+        t1_next = self.prov.task_create(spec="in run 1 next", run="run-1")["task"]["id"]
+        bound_prov = self.providers.get_provider(
+            "posix",
+            env={**self.env, "OPEN_FLEET_DISPATCH_ID": ws["dispatchId"]},
+        )
+        for bad_op in (
+            lambda: bound_prov.terminal_create(title="escaped"),
+            lambda: bound_prov.terminal_read(unreg_term),
+            lambda: bound_prov.terminal_send(unreg_term, "hi"),
+            lambda: bound_prov.dispatch_inject(task_id=t1_next, to_handle=unreg_term),
+        ):
+            with self.assertRaises(self.posix.ProviderError) as bctx:
+                bad_op()
+            self.assertEqual(bctx.exception.code, "cross_run_access")
+        self.assertEqual(
+            [t["handle"] for t in bound_prov.terminal_list()["terminals"]],
+            [ws["agentTerminalHandle"]],
+        )
+
+    def test_c32_send_body_flag_and_fence_retry_request_idempotency(self):
+        from unittest import mock
+
+        self.fake_agent("claude", "exit 0")
+        # orchestration send --body maps to payload and --retry-request commits message + request
+        # atomically via LocalStateStore._save_request_in_tx (never the two-tx save_request fallback).
+        with mock.patch.object(
+            self.prov.state,
+            "save_request",
+            side_effect=AssertionError("CLI send must commit retry_request in-tx, not via separate save_request"),
+        ):
+            s1 = self.prov.dispatch(
+                ["orchestration", "send", "--subject", "sub", "--type", "info", "--to", "coordinator",
+                 "--body", "hello-body", "--retry-request", "req-send-1"],
+            )
+            s2 = self.prov.dispatch(
+                ["orchestration", "send", "--subject", "sub", "--type", "info", "--to", "coordinator",
+                 "--body", "hello-body", "--retry-request", "req-send-1"],
+            )
+        self.assertEqual(s1["messageId"], s2["messageId"])
+        msgs = self.prov.check_messages(terminal="coordinator")["messages"]
+        self.assertEqual(len(msgs), 1)
+        self.assertEqual(msgs[0]["payload"], "hello-body")
+        self.prov.check_messages(terminal="coordinator", ack=s1["deliveryId"])
+
+        # Crash before COMMIT rolls back BOTH message and request; retry delivers once.
+        orig_save_in_tx = self.prov.state._save_request_in_tx
+        with mock.patch.object(self.prov.state, "_save_request_in_tx", side_effect=RuntimeError("boom-pre-commit")):
+            with self.assertRaisesRegex(RuntimeError, "boom-pre-commit"):
+                self.prov.dispatch(
+                    ["orchestration", "send", "--subject", "sub-crash", "--type", "info", "--to", "coordinator",
+                     "--body", "crash-body", "--retry-request", "req-send-crash"],
+                )
+        self.assertEqual(self.prov.check_messages(terminal="coordinator")["messages"], [])
+        self.assertEqual(self.prov.request_show("req-send-crash")["state"], "absent")
+        recovered = self.prov.dispatch(
+            ["orchestration", "send", "--subject", "sub-crash", "--type", "info", "--to", "coordinator",
+             "--body", "crash-body", "--retry-request", "req-send-crash"],
+        )
+        self.assertIsNotNone(orig_save_in_tx)
+        msgs_after = self.prov.check_messages(terminal="coordinator")["messages"]
+        self.assertEqual([m["id"] for m in msgs_after], [recovered["messageId"]])
+
+        # worker-stop with --retry-request deduplicates and rejects changed verb
+        t = self.prov.task_create(spec="fence retry")["task"]["id"]
+        ws = self.prov.worker_start(task_id=t, worktree="new-child", agent="claude", profile="ro")
+        self.assertTrue(self.wait_monitor_done(ws["dispatchId"]))
+        f1 = self.prov.dispatch(
+            ["orchestration", "worker-stop", "--dispatch", ws["dispatchId"], "--retry-request", "req-fence-1"],
+        )
+        f2 = self.prov.dispatch(
+            ["orchestration", "worker-stop", "--dispatch", ws["dispatchId"], "--retry-request", "req-fence-1"],
+        )
+        self.assertEqual(f1["dispatchId"], f2["dispatchId"])
+        with self.assertRaises(self.posix.ProviderError) as ctx:
+            self.prov.dispatch(
+                ["orchestration", "worker-abandon", "--dispatch", ws["dispatchId"], "--retry-request", "req-fence-1"],
+            )
+        self.assertEqual(ctx.exception.code, "request_mismatch")
+
+    def test_c37_worker_list_filters_terminal_state_and_paginates(self):
+        self.fake_agent("claude", "exit 0")
+        ids = []
+        for i in range(3):
+            tid = self.prov.task_create(spec=f"w-{i}")["task"]["id"]
+            ws = self.prov.worker_start(task_id=tid, worktree="new-child", agent="claude", profile="ro")
+            ids.append(ws["dispatchId"])
+            self.assertTrue(self.wait_monitor_done(ws["dispatchId"]))
+        self.prov.worker_fence(verb="stop", dispatch_id=ids[0])
+
+        # Filter by terminal_state via CLI dispatch
+        stopped = self.prov.dispatch(["orchestration", "worker-list", "--terminal-state", "stopped"])
+        self.assertEqual([w["dispatchId"] for w in stopped["workers"]], [ids[0]])
+
+        # Paginate with cursor + limit
+        page1 = self.prov.worker_list(limit=2)
+        self.assertEqual(len(page1["workers"]), 2)
+        self.assertIsNotNone(page1["page"]["nextCursor"])
+        page2 = self.prov.worker_list(cursor=page1["page"]["nextCursor"], limit=2)
+        self.assertEqual(len(page2["workers"]), 1)
+        self.assertIsNone(page2["page"]["nextCursor"])
+        self.assertEqual(
+            {w["dispatchId"] for w in page1["workers"] + page2["workers"]},
+            set(ids),
+        )
+
+    def test_c38_inbox_permissions_and_purge_on_fence(self):
+        import stat
+        self.fake_agent("claude", "exit 0")
+        tid = self.prov.task_create(spec="inbox test")["task"]["id"]
+        ws = self.prov.worker_start(task_id=tid, worktree="new-child", agent="claude", profile="ro")
+        self.assertTrue(self.wait_monitor_done(ws["dispatchId"]))
+        wt = Path(ws["worker"]["worktree"])
+        old_umask = os.umask(0)
+        try:
+            self.prov._deliver_terminal_input(
+                {
+                    "handle": ws["agentTerminalHandle"],
+                    "worktree": str(wt),
+                    "backend": "dry-run",
+                    "state": "running",
+                    "log_path": "",
+                },
+                "secret prompt",
+            )
+        finally:
+            os.umask(old_umask)
+        of_dir = wt / ".open-fleet"
+        inbox = of_dir / "inbox.jsonl"
+        self.assertTrue(inbox.exists())
+        self.assertEqual(stat.S_IMODE(of_dir.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(inbox.stat().st_mode), 0o600)
+
+        # Stopping the worker purges .open-fleet/inbox.jsonl without leaking file descriptors
+        import fcntl
+
+        def _open_fd_count() -> int:
+            cnt = 0
+            for fd_num in range(256):
+                try:
+                    fcntl.fcntl(fd_num, fcntl.F_GETFD)
+                    cnt += 1
+                except OSError:
+                    pass
+            return cnt
+
+        self.prov.worker_fence(verb="stop", dispatch_id=ws["dispatchId"])
+        self.assertFalse(inbox.exists())
+        fds_before = _open_fd_count()
+        for _ in range(5):
+            of_dir.mkdir(mode=0o700, exist_ok=True)
+            inbox.write_text('{"text":"x"}\n', encoding="utf-8")
+            self.prov._purge_private_inbox(str(wt))
+            self.assertFalse(inbox.exists())
+        self.assertEqual(_open_fd_count(), fds_before)
+
+    def test_c28_and_c40_terminal_send_run_isolation_and_strict_read_cursor_validation(self) -> None:
+        t_a = self.prov.task_create(spec="task a", run="run-a")["task"]["id"]
+        ws_a = self.prov.worker_start(task_id=t_a, agent="claude", profile="rw", prompt="work a", run="run-a")
+        term_a = ws_a["agentTerminalHandle"]
+        with self.assertRaises(self.posix.ProviderError) as ctx:
+            self.prov.terminal_send(term_a, "cross-run", run="run-b")
+        self.assertEqual(ctx.exception.code, "cross_run_access")
+
+        for bad in (-1, "-5", "abc", "²", "١", True):
+            with self.assertRaises(self.posix.ProviderError) as ctx:
+                self.prov.worker_read(ws_a["dispatchId"], cursor=bad)
+            self.assertEqual(ctx.exception.code, "invalid_argument")
+            with self.assertRaises(self.posix.ProviderError) as ctx:
+                self.prov.worker_read(ws_a["dispatchId"], limit=bad)
+            self.assertEqual(ctx.exception.code, "invalid_argument")
+        self.prov.worker_fence(verb="stop", dispatch_id=ws_a["dispatchId"])
+
+
 if __name__ == "__main__":
     unittest.main()

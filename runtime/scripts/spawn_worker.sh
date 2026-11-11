@@ -1216,12 +1216,12 @@ if [ "$PROFILE" = "danger" ]; then
     "$ORCA_BIN" vm recipe doctor "$recipe" ${ROUTE_ARGS[@]+"${ROUTE_ARGS[@]}"} > "$doctor_out" 2> "$doctor_out.stderr" || doctor_rc=$?
   fi
   if [ "$doctor_rc" -ne 0 ]; then
-    echo "SPAWN=REFUSED task=${task} \`${ORCA_BIN} vm recipe doctor ${recipe}\` exited ${doctor_rc} — the sandbox did not come up clean: $(cat "$doctor_out" "$doctor_out.stderr" | head -c 300 | inert_text)" >&2
+    echo "SPAWN=REFUSED task=${task} \`${ORCA_BIN} vm recipe doctor ${recipe}\` exited ${doctor_rc} — the sandbox did not come up clean: $( (cat "$doctor_out" "$doctor_out.stderr" | head -c 300 || true) | inert_text)" >&2
     rm -f "$doctor_out"
     exit 2
   fi
   if ! python3 -I "$HERE/sandbox_doctor.py" "$doctor_out" "$recipe" 2>/dev/null; then
-    echo "SPAWN=REFUSED task=${task} recipe doctor for '${recipe}' is not clear — sandbox-policy.md: clear means no fail AND no warn (ok:true alone proves nothing): $(python3 -I "$HERE/sandbox_doctor.py" "$doctor_out" "$recipe" 2>&1 >/dev/null | head -c 200 | inert_text)" >&2
+    echo "SPAWN=REFUSED task=${task} recipe doctor for '${recipe}' is not clear — sandbox-policy.md: clear means no fail AND no warn (ok:true alone proves nothing): $( (python3 -I "$HERE/sandbox_doctor.py" "$doctor_out" "$recipe" 2>&1 >/dev/null | head -c 200 || true) | inert_text)" >&2
     rm -f "$doctor_out"
     exit 2
   fi
@@ -1566,6 +1566,7 @@ PY
         fi ;;
     esac
     [ -z "$_vs_wt" ] || _vs_args+=(--boundary "$_vs_wt")
+    [ "$PROFILE" != "ro" ] || _vs_args+=(--readonly)
     if ! _arming=$(sh "$HERE/deny-hook.sh" --verify-settings "$DENY_HOOK_SETTINGS" ${_vs_args[@]+"${_vs_args[@]}"} 2>&1); then
       echo "SPAWN=REFUSED task=${task} deny-hook not armed: ${_arming} — wire it (deny-hook.sh --settings <worktree>) or unset ORCA_DENY_HOOK_SETTINGS to proceed UNVERIFIED" >&2
       exit 2
@@ -1956,10 +1957,13 @@ if eff is not None:
     print("LAUNCH_EFFECTIVE=" + _f(eff if isinstance(eff, str) else json.dumps(eff, sort_keys=True)))
 PY
 )
-  verdict_line=$(printf '%s\n' "$ws_out" | head -n 1)
+  verdict_line=${ws_out%%$'\n'*}
   verdict=${verdict_line#VERDICT=}
   verdict=${verdict%% *}
-  payload=$(printf '%s\n' "$ws_out" | tail -n +2)
+  case "$ws_out" in
+    *$'\n'*) payload=${ws_out#*$'\n'} ;;
+    *) payload="" ;;
+  esac
   # Fail CLOSED on a nonzero call whose receipt named neither a code nor a state: a missing
   # binary, a truncated write, or a host that answered in some shape we do not parse must never
   # read as READY just because the parser found nothing to object to.

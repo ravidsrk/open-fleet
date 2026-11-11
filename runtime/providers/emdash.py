@@ -38,7 +38,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from ._external import release_claim_on_failure
+from ._external import _ensure_ctx_task_claimed, release_claim_on_failure
 from ._external import ExternalDispatchMixin, env_lookup, foreign_dirty_paths, preserve_worker_head, real_worktree, run_cli_text
 from .base import (
     ProviderError,
@@ -221,6 +221,18 @@ class EmdashProvider(ExternalDispatchMixin, RuntimeProvider):
                 "whose HEAD and uncommitted work cannot be checked",
                 {"path": path},
             )
+        bound = self.state._resolve_caller_run(None, default_run=None)
+        if bound:
+            with self.state._connect() as conn:
+                owned = conn.execute(
+                    "SELECT 1 FROM dispatches WHERE backend = ? AND worktree = ? AND run_id = ? LIMIT 1",
+                    (self.name, wt_path, bound),
+                ).fetchone()
+            if owned is None:
+                raise ProviderError(
+                    "cross_run_access",
+                    f"emdash worktree {wt_path!r} is not owned by run {bound!r}",
+                )
         preserved = preserve_worker_head(self._git, wt_path, f"emdash-{selector}")
         dirty = foreign_dirty_paths(self._git, wt_path)
         if dirty and not force:
@@ -274,6 +286,7 @@ class EmdashProvider(ExternalDispatchMixin, RuntimeProvider):
         if profile == "ro" and agent != "claude":
             raise ProviderError("unsupported_profile", f"emdash: no verified read-only extraArgs for provider {agent!r} (only claude)")
         task_prompt = self.resolve_task_prompt(task_id, prompt)
+        _ensure_ctx_task_claimed()
 
         upstream_wt = None
         if worktree in ("", "new-child", "new-top-level"):
@@ -350,14 +363,31 @@ class EmdashProvider(ExternalDispatchMixin, RuntimeProvider):
         lines = data["text"].splitlines()
         return (lines[-int(limit):] if limit else lines), (snap.get("sequence") if isinstance(snap, dict) else None)
 
+    def _check_conversation_access(self, cid: str) -> None:
+        bound = self.state._resolve_caller_run(None, default_run=None)
+        if not bound:
+            return
+        with self.state._connect() as conn:
+            same = conn.execute(
+                "SELECT 1 FROM dispatches WHERE backend = ? AND (dispatch_id = ? OR session_id = ? OR terminal_handle = ?) AND run_id = ? LIMIT 1",
+                (self.name, cid, cid, f"emdash:{cid}", bound),
+            ).fetchone()
+        if same is None:
+            raise ProviderError(
+                "cross_run_access",
+                f"emdash conversation {cid!r} is not owned by run {bound!r}",
+            )
+
     def terminal_send(self, *, terminal: str = "", text: str = "", enter: bool = True, **kwargs: Any) -> dict[str, Any]:
         cid = self._conversation(terminal)
+        self._check_conversation_access(cid)
         data = f"{text}\r" if enter else text
         raw = self._call("tuiAgents.sendInput", {"conversationId": cid, "data": data})
         return {"terminal": terminal, "sent": True, "upstream": raw}
 
     def terminal_read(self, *, terminal: str = "", cursor: int | None = None, limit: int | None = None, screen: bool = False, **kwargs: Any) -> dict[str, Any]:
         cid = self._conversation(terminal)
+        self._check_conversation_access(cid)
         lines, seq = self._output_tail(cid, limit)
         return normalize_read("terminal", lines=lines, cursor=seq, handle=f"emdash:{cid}")
 
@@ -387,7 +417,7 @@ class EmdashProvider(ExternalDispatchMixin, RuntimeProvider):
                 "reason": reason, "upstream": raw}
 
     def worker_list(self, **kwargs: Any) -> dict[str, Any]:
-        return self._list_local(run=kwargs.get("run"), task=kwargs.get("task"), limit=kwargs.get("limit"))
+        return self._list_local(**kwargs)
 
     def worker_show(self, *, dispatch_id: str = "", **kwargs: Any) -> dict[str, Any]:
         return self._show_row(self._dispatch_row(dispatch_id))
@@ -402,8 +432,8 @@ class EmdashProvider(ExternalDispatchMixin, RuntimeProvider):
     def task_list(self, **kwargs: Any) -> dict[str, Any]:
         return self.state.task_list(**kwargs)
 
-    def send_message(self, **kwargs: Any) -> dict[str, Any]:
-        return self.state.send_message(**kwargs)
+    def send_message(self, *, retry_request: str | None = None, **kwargs: Any) -> dict[str, Any]:
+        return self.state.send_message(retry_request=retry_request, **kwargs)
 
     def check_messages(self, **kwargs: Any) -> dict[str, Any]:
         return self.state.check_messages(**kwargs)

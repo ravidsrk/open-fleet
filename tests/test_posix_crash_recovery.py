@@ -194,7 +194,7 @@ class CrashRecoveryBase(unittest.TestCase):
         self.addCleanup(self._no_tripwire_hit)
         self.addCleanup(self._kill_all)
         self.agent("sleeper")
-        self.task = self.restart().task_create(spec="inert work")["task"]["id"]
+        self.task = self.restart().task_create(spec="inert work", run="run-r04")["task"]["id"]
 
     # --- fixtures ---
     def agent(self, kind):
@@ -1306,7 +1306,7 @@ class TestClosedGateSkipsTheSyncGrace(CrashRecoveryBase):
                 if m["subject"].startswith(f"worker_died:{dispatch_id}")]
 
     def test_stop_and_abandon_of_a_never_launched_dispatch_do_not_wait_the_grace(self):
-        tasks = {"stop": self.task, "abandon": self.restart().task_create(spec="inert work 2")["task"]["id"]}
+        tasks = {"stop": self.task, "abandon": self.restart().task_create(spec="inert work 2", run="run-r04")["task"]["id"]}
         for verb, task in tasks.items():
             info = self.unlaunched_danger(task_id=task)
             prov = self.restart()
@@ -1536,6 +1536,60 @@ class TestOrphanedWorkerIsStopped(CrashRecoveryBase):
         self.assertEqual(states["disp_reused"], "died", "a live pid that is not this lane's monitor is a vanished monitor")
         self.assertIsNone(other.poll(), "a group whose members work elsewhere is never signalled")
         self.assertTrue(_alive(other.pid))
+
+    def test_cross_run_worker_cannot_reconcile_or_replay_another_runs_launch(self):
+        ProviderError = self.providers.ProviderError
+        get_provider = self.providers.get_provider
+
+        prov = self.restart()
+        run_a_task = prov.task_create(spec="run A work", run="run-A")["task"]["id"]
+        disp_a = prov.worker_start(
+            task_id=run_a_task,
+            worktree="new-child",
+            agent="claude",
+            run="run-A",
+            retry_request="req-run-a",
+        )
+        self.addCleanup(lambda: prov.worker_fence("stop", disp_a["dispatchId"]))
+
+        info_b = self.crash_at("intent_claimed", retry_request="req-run-b")
+        intent_b = info_b["intentId"]
+        self.assertIsNone(prov.state.launch_intent(intent_b)["outcome"], "precondition: run-r04 intent is open")
+
+        worker_env = dict(self.env)
+        worker_env["OPEN_FLEET_DISPATCH_ID"] = disp_a["dispatchId"]
+        worker_a = get_provider("posix", env=worker_env)
+
+        # 1. Omitting `run` on `worker_start` for run-r04's task raises `cross_run_access` WITHOUT reconciling intent_b.
+        with self.assertRaises(ProviderError) as err_start:
+            worker_a.worker_start(task_id=self.task, worktree="new-child", agent="claude")
+        self.assertEqual(err_start.exception.code, "cross_run_access")
+        self.assertIsNone(
+            prov.state.launch_intent(intent_b)["outcome"],
+            "cross-run worker_start must not reconcile run-r04's dead launch intent",
+        )
+
+        # 2. Replaying run-r04's pending `retry_request` also raises `cross_run_access` WITHOUT reconciling intent_b.
+        with self.assertRaises(ProviderError) as err_replay:
+            worker_a.worker_start(
+                task_id=self.task,
+                worktree="new-child",
+                agent="claude",
+                retry_request="req-run-b",
+            )
+        self.assertEqual(err_replay.exception.code, "cross_run_access")
+        self.assertIsNone(
+            prov.state.launch_intent(intent_b)["outcome"],
+            "cross-run retry_request must not reconcile run-r04's pending launch intent",
+        )
+
+        # 3. `launch_reconcile` from worker_a leaves foreign open intents untouched and rejects explicit foreign intent.
+        self.assertEqual(worker_a.launch_reconcile()["count"], 0)
+        self.assertIsNone(prov.state.launch_intent(intent_b)["outcome"])
+        with self.assertRaises(ProviderError) as err_rec:
+            worker_a.launch_reconcile(intent=intent_b)
+        self.assertEqual(err_rec.exception.code, "cross_run_access")
+        self.assertIsNone(prov.state.launch_intent(intent_b)["outcome"])
 
 
 if __name__ == "__main__":

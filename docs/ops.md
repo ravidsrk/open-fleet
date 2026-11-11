@@ -41,18 +41,21 @@ instead by the owner's disposition (#595, below).
 
 ## CI runners
 
-Since #735 (2026-10-29), most jobs run on AWS CodeBuild-hosted GitHub Actions runners. A job
-asks for one with `runs-on: codebuild-gha-open-fleet-${{ github.run_id }}-${{ github.run_attempt }}`.
-The label names the CodeBuild project, and the run ID and attempt make each job's runner
-single-use. List them with `rg -n codebuild-gha-open-fleet .github/workflows`.
+Since #735 (2026-10-29), #749 (2026-10-31) and #752 (2026-11-11), ten workflow jobs run on AWS
+CodeBuild-hosted GitHub Actions runners
+(`runs-on: codebuild-gha-open-fleet-${{ github.run_id }}-${{ github.run_attempt }}`), four jobs
+run on `runs-on: ubuntu-latest`, and nine jobs target `runs-on: instabox-medium`. The CodeBuild
+label names the CodeBuild project, and the run ID and attempt make each job's runner single-use.
+List all three sets with `rg -n 'runs-on:' .github/workflows`.
 
 | Runs on | Jobs | Why |
 |---|---|---|
-| CodeBuild | `guard` (guard.yml), `pinned-demo` (negative-control.yml), `from-scratch` (install.yml), `bind` (bind-check.yml), `pytest`, `ruff` and `migrate` (fixture-target-app.yml), `probe` (upstream-drift.yml), `health` (main-health.yml), `alert` (alert-on-failure.yml), `relay` and `verdict` (verdict-check.yml), `resolve` and `gate` (verdict-gate.yml) | the pilot's default |
-| GitHub-hosted `ubuntu-latest` | `tests`, `floor`, `checks`, `vfbench` and `vfbench_replay` (validate.yml) | they need a non-root user and system-custody git. CodeBuild runs as root, where the ownership-boundary tests would skip silently. |
-| GitHub-hosted | `gates` (validate.yml) | it combines the coverage recorded on the GitHub-hosted shards, and those paths are runner-specific |
-| GitHub-hosted | `smoke` (fixture-target-app.yml) | it pulls from Docker Hub, and CodeBuild's shared IPs hit the anonymous pull limit |
-| GitHub-hosted | `dist` (publish-dist.yml), `publish` (release.yml) | #735 left the release publishers where they were. They push the `dist` branch (with its `DIST-PROVENANCE.txt`) and create the GitHub Release, and the workflows record no further reason |
+| CodeBuild (`codebuild-gha-open-fleet-…`) | `guard` (guard.yml), `bind` (bind-check.yml), `pytest` (fixture-target-app.yml), `probe` (upstream-drift.yml), `health` (main-health.yml), `alert` (alert-on-failure.yml), `relay` and `verdict` (verdict-check.yml), `resolve` and `gate` (verdict-gate.yml) | the pilot's single-use runner jobs |
+| `ubuntu-latest` | `from-scratch` (install.yml), `pinned-demo` (negative-control.yml), `ruff` and `migrate` (fixture-target-app.yml) | moved off CodeBuild in #752 because `gha-open-fleet` allows 1 concurrent build (sibling CodeBuild jobs queued at once got HTTP 400) |
+| `instabox-medium` | `tests`, `floor`, `checks`, `vfbench` and `vfbench_replay` (validate.yml) | switched from `ubuntu-latest` in #749; the workflow comments note they need a non-root user and system-custody git (CodeBuild runs as root, where the ownership-boundary tests would skip silently) |
+| `instabox-medium` | `gates` (validate.yml) | switched from `ubuntu-latest` in #749; combines coverage recorded on the `tests` shards (path-sensitive) |
+| `instabox-medium` | `smoke` (fixture-target-app.yml) | switched from `ubuntu-latest` in #749; pulls from Docker Hub, and CodeBuild's shared IPs hit the anonymous pull limit |
+| `instabox-medium` | `dist` (publish-dist.yml), `publish` (release.yml) | switched from `ubuntu-latest` in #749; release publishers that push the `dist` branch (with its `DIST-PROVENANCE.txt`) and create the GitHub Release |
 
 A CodeBuild job sets up Python with `actions/setup-python` and then registers its `libpython`
 with `ldconfig` (the step named "register setup-python's libpython with ldconfig (CodeBuild
@@ -69,9 +72,11 @@ them.
 **Forks and contributors.** A pull request from a fork into this repository runs here, so its
 CodeBuild jobs use this project like any other PR, once a maintainer approves the run where
 the repository's fork-approval setting asks for it (it did for #741). A fork running CI in its own repository
-has no `gha-open-fleet` project, so those jobs sit in "Queued" until GitHub cancels them after
-24 hours. To run them there, change the fork's own copy of each `runs-on: codebuild-gha-open-fleet-…`
-line to `runs-on: ubuntu-latest`. The libpython step is a no-op where it is not needed. Never send
+without the `gha-open-fleet` CodeBuild project or a runner matching `instabox-medium` will have
+jobs requesting an unprovisioned label sit in "Queued" until GitHub cancels them after 24 hours.
+To run them in a fork's own repository on standard GitHub-hosted runners, change the fork's own
+copy of each `runs-on: codebuild-gha-open-fleet-…` and `runs-on: instabox-medium` line to
+`runs-on: ubuntu-latest`. The libpython step is a no-op where it is not needed. Never send
 that edit upstream: a PR that changes `.github/workflows/` from a fork fails `verdict-gate`
 (the grader rule above).
 

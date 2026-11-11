@@ -447,6 +447,13 @@ class TheFailureLinePrintsInert(unittest.TestCase):
                 self.assertNotIn(raw, out)
             self.assertEqual(len(out.strip().splitlines()), 1, out)
 
+    def test_c40_format_read_surfaces_truncated_header(self):
+        m = load()
+        lines_false = m.format_read({"source": "terminal", "cursor": 5, "terminal": {"tail": ["ok"], "truncated": False}})
+        self.assertIn("TRUNCATED=false", lines_false)
+        lines_true = m.format_read({"source": "terminal", "cursor": 5, "terminal": {"tail": ["ok"], "truncated": True}})
+        self.assertIn("TRUNCATED=true", lines_true)
+
 
 if __name__ == "__main__":
     unittest.main()

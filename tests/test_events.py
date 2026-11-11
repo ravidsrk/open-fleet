@@ -2058,6 +2058,48 @@ class TestProperties(Base):
                 self.assertEqual(launched, sorted(d for d, r in rows.items() if r in ("claimed", "exited")))
                 self.assertEqual(events.derive(recorded, "run_x")["record"]["conflicts"], 0)
 
+    def test_cross_run_event_id_conflict_surfaces_in_both_runs_and_taints_completeness_c42(self):
+        stream = list(scenario_clean())
+        # Add an event in another run that reuses an event_id from run-a ('local-state:dispatch:d1')
+        foreign_conflict = ev(
+            "dispatch.launched", "10:01:00", task="t1", dispatch="d1",
+            data={"agent": "codex"}, event_id="local-state:dispatch:d1",
+            producer="local_state", basis="occurred",
+            run="run-other", epoch=1, clock="host-a",
+        )
+        other_start = ev(
+            "run.start", "10:00:00", data={"coordinator": "coord-other"},
+            run="run-other", epoch=1, clock="host-a",
+        )
+        report_a = self.derive(stream + [other_start, foreign_conflict], run="run-a")
+        self.assertEqual(report_a["record"]["conflicts"], 1)
+        self.assertEqual(report_a["conflicts"][0]["event_id"], "local-state:dispatch:d1")
+        self.assertFalse(report_a["complete"])
+
+        # Also test when the foreign run comes FIRST in the log and run-a is second
+        report_a_second = self.derive([other_start, foreign_conflict] + stream, run="run-a")
+        self.assertEqual(report_a_second["record"]["conflicts"], 1)
+        self.assertEqual(report_a_second["conflicts"][0]["event_id"], "local-state:dispatch:d1")
+        self.assertFalse(report_a_second["complete"])
+
+    def test_blank_line_insertion_fails_verification_and_append_c43(self):
+        base_text = chain(scenario_clean()[:3])
+        lines = base_text.splitlines()
+        for label, mutated in (
+            ("leading blank line", "\n" + base_text),
+            ("interior blank line", lines[0] + "\n\n" + "\n".join(lines[1:]) + "\n"),
+            ("trailing blank line", base_text + "\n"),
+            ("whitespace-only line", lines[0] + "\n   \n" + "\n".join(lines[1:]) + "\n"),
+        ):
+            with self.subTest(label=label):
+                self.log.parent.mkdir(parents=True, exist_ok=True)
+                self.log.write_text(mutated, encoding="utf-8")
+                with self.assertRaises(events.EventsError):
+                    events.read_log(self.log)
+                with self.assertRaises(events.EventsError):
+                    events.append_events(self.log, scenario_clean()[3:4])
+                self.assertEqual(self.cli("verify").returncode, 3)
+
 
 if __name__ == "__main__":
     unittest.main()

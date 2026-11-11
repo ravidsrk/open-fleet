@@ -289,9 +289,9 @@ def content_problem(node, found):
         for tool in definitions if isinstance(definitions, list) else [definitions] if definitions is not None else []:
             kind = tool.get("type") if isinstance(tool, dict) else "malformed"
             if kind not in (None, "custom"):
-                return f"a {kind} tool is not the client's own: it is billed beyond the request's tokens"
+                return "a server-defined or malformed tool is not the client's own: it is billed beyond the request's tokens"
         if isinstance(node.get("type"), str) and DATED_TYPE_RE.search(node["type"]):
-            return f"a {node['type']} tool is not the client's own: it is billed beyond the request's tokens"
+            return "a dated server tool is not the client's own: it is billed beyond the request's tokens"
         source = node.get("source")
         if isinstance(source, dict):
             kind, media = source.get("type"), str(source.get("media_type") or "")
@@ -354,7 +354,9 @@ def _parse_facts(body):
     facts = {"why": why and short(why, 300), "mult": mult, "images": images, "model": None, "max_tokens": None,
              "fast": False}
     if isinstance(doc, dict):
-        facts.update(model=short(doc.get("model")), fast=doc.get("speed") == "fast")
+        raw_model = doc.get("model")
+        priced_model = raw_model if isinstance(raw_model, str) and model_key(raw_model) is not None else None
+        facts.update(model=priced_model, fast=doc.get("speed") == "fast")
         if not why:
             facts["max_tokens"] = doc["max_tokens"]
     return facts
@@ -512,29 +514,29 @@ def terms(doc):
     if not isinstance(doc, dict):
         return "the body is not a JSON object", 1.0, 0
     if extra := sorted(set(doc) - FIELDS):
-        return f"a field the broker cannot price: {', '.join(extra)}", 1.0, 0
+        return f"{len(extra)} field(s) the broker cannot price", 1.0, 0
     if model_key(doc.get("model")) is None:
-        return f"no price for model {doc.get('model')!r}: the broker runs only {', '.join(sorted(PRICES))}", 1.0, 0
+        return f"no price for the requested model: the broker runs only {', '.join(sorted(PRICES))}", 1.0, 0
     max_tokens = doc.get("max_tokens")
     if not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens <= 0:
         return "the body carries no positive integer max_tokens", 1.0, 0
     for tool in doc.get("tools") or []:
         kind = tool.get("type") if isinstance(tool, dict) else "malformed"
         if kind not in (None, "custom"):
-            return f"a {kind} tool is not the client's own: it is billed beyond the request's tokens", 1.0, 0
+            return "a server-defined or malformed tool is not the client's own: it is billed beyond the request's tokens", 1.0, 0
     if not isinstance(doc.get("context_management") or {}, dict):
         return "context_management is not an object", 1.0, 0
     for edit in (doc.get("context_management") or {}).get("edits") or []:
         kind = edit.get("type") if isinstance(edit, dict) else "malformed"
         if not (isinstance(kind, str) and kind.startswith("clear_")):
-            return f"a {kind} context edit runs inference beyond the request's tokens", 1.0, 0
+            return "a non-clear context edit runs inference beyond the request's tokens", 1.0, 0
     if doc.get("service_tier", "standard_only") != "standard_only":
-        return f"service tier {doc['service_tier']!r} is not priced", 1.0, 0
+        return "a non-standard_only service tier is not priced", 1.0, 0
     if doc.get("speed") not in (None, "standard", "fast"):
-        return f"speed {doc['speed']!r} is not priced", 1.0, 0
+        return "an unknown speed is not priced", 1.0, 0
     geo = doc.get("inference_geo")
     if geo is not None and (not isinstance(geo, str) or geo not in GEO):
-        return f"inference geography {geo!r} is not priced", 1.0, 0
+        return "an unknown inference geography is not priced", 1.0, 0
     found = {"images": 0}
     if why := content_problem([doc.get("system"), doc.get("messages")], found):
         return why, 1.0, 0
@@ -570,11 +572,81 @@ class Ledger:
         self.free_calls = self.free_bytes = 0
         self.dropped, self.faults, self.refused, self.written, self.catch_up = {}, {}, {}, {}, None
         self.lock = threading.Lock()
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
-        self.fh = os.fdopen(fd, "a", encoding="utf-8")
-        self.write({"event": "open", "cap_usd": cap_usd, "prices_usd_per_mtok": PRICES, "tiered": TIERED, "geo": GEO,
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        self.fh = os.fdopen(fd, "a+", encoding="utf-8")
+        try:
+            self._recover_existing()
+        except Exception:
+            self.fh.close()
+            raise
+        self.write({"event": "open", "cap_usd": self.cap, "prices_usd_per_mtok": PRICES, "tiered": TIERED, "geo": GEO,
                     "image_tokens": IMAGE_TOKENS,
                     "framing_tokens": FRAMING_TOKENS, "pid": os.getpid()})
+
+    def _recover_existing(self):
+        """Recover prior spend, unsettled reservations, call IDs and tallies on broker restart (C39)."""
+        self.fh.seek(0)
+        text = self.fh.read()
+        if not text:
+            return
+        if not text.endswith("\n"):
+            raise ValueError("corrupt spend ledger: missing trailing newline")
+        starts, settles = {}, {}
+        for raw in text[:-1].split("\n"):
+            if not raw or raw != raw.strip():
+                raise ValueError("corrupt spend ledger: blank or padded line")
+            doc = json.loads(raw)
+            if not isinstance(doc, dict) or not isinstance(doc.get("event"), str):
+                raise ValueError("corrupt spend ledger: line is not an event object")
+            call = doc.get("call")
+            if isinstance(call, int) and not isinstance(call, bool) and call > 0:
+                self.n = max(self.n, call)
+            ev = doc["event"]
+            if ev == "open":
+                prior_cap = doc.get("cap_usd")
+                if prior_cap is not None:
+                    if not isinstance(prior_cap, (int, float)) or isinstance(prior_cap, bool) or prior_cap < 0:
+                        raise ValueError("corrupt spend ledger: invalid cap_usd")
+                    self.cap = min(self.cap, float(prior_cap))
+            elif ev == "start":
+                if not isinstance(call, int) or isinstance(call, bool) or call <= 0 or call in starts:
+                    raise ValueError("corrupt spend ledger: invalid or duplicate start call id")
+                res = doc.get("reserved_usd")
+                if not isinstance(res, (int, float)) or isinstance(res, bool) or res < 0:
+                    raise ValueError("corrupt spend ledger: invalid reserved_usd")
+                starts[call] = float(res)
+            elif ev == "settle":
+                if not isinstance(call, int) or isinstance(call, bool) or call not in starts or call in settles:
+                    raise ValueError("corrupt spend ledger: invalid or duplicate settle call id")
+                cost = doc.get("cost_usd")
+                if not isinstance(cost, (int, float)) or isinstance(cost, bool) or cost < 0:
+                    raise ValueError("corrupt spend ledger: invalid cost_usd")
+                settles[call] = float(cost)
+            elif ev == "free":
+                calls, nbytes = doc.get("calls"), doc.get("bytes")
+                if isinstance(calls, int) and not isinstance(calls, bool):
+                    self.free_calls = max(self.free_calls, calls)
+                if isinstance(nbytes, int) and not isinstance(nbytes, bool):
+                    self.free_bytes = max(self.free_bytes, nbytes)
+            if isinstance(doc.get("free_calls"), int) and not isinstance(doc.get("free_calls"), bool):
+                self.free_calls = max(self.free_calls, doc["free_calls"])
+            if isinstance(doc.get("free_bytes"), int) and not isinstance(doc.get("free_bytes"), bool):
+                self.free_bytes = max(self.free_bytes, doc["free_bytes"])
+            for field, target in (("dropped", self.dropped), ("faults", self.faults), ("refused", self.refused)):
+                tally = doc.get(field)
+                if isinstance(tally, dict):
+                    for k, v in tally.items():
+                        if isinstance(v, int) and not isinstance(v, bool):
+                            target[str(k)] = max(target.get(str(k), 0), v)
+            if ev == "refuse" and not isinstance(doc.get("refused"), dict):
+                kind = str(doc.get("kind") or "terms")
+                self.refused[kind] = self.refused.get(kind, 0) + 1
+        # Settled calls charge their settled cost; unsettled prior starts charge their full
+        # worst-case reservation so restarting the broker cannot shed in-flight spend.
+        self.settled = sum(
+            settles[call] if call in settles else reserved
+            for call, reserved in starts.items()
+        )
 
     def write(self, entry):
         tally = {"free_calls": self.free_calls, "free_bytes": self.free_bytes} if self.free_calls else {}
@@ -759,7 +831,7 @@ class Broker(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
             return
-        self.ledger.refuse("path", f"GET {urllib.parse.urlsplit(self.path).path}")
+        self.ledger.refuse("path", "GET to an unforwarded path")
         self.fail(403, "permission_error", "only POST /v1/messages and /v1/messages/count_tokens are forwarded")
 
     def do_POST(self):
@@ -767,7 +839,7 @@ class Broker(BaseHTTPRequestHandler):
         path = target.path
         self.target = path + (f"?{target.query}" if target.query else "")  # what is forwarded: never a host
         if path not in (PRICED_PATH, FREE_PATH):
-            self.ledger.refuse("path", f"POST {path}")
+            self.ledger.refuse("path", "POST to an unforwarded path")
             return self.fail(403, "permission_error", "only POST /v1/messages and /v1/messages/count_tokens are forwarded")
         try:
             length = int(self.headers.get("Content-Length", ""))

@@ -49,8 +49,10 @@ anti-false-positive gate, and emits a GO / NO-GO verdict bound to the exact SHA 
 
 "Produce a trusted verdict without modifying code" is three things at once: a user-facing outcome,
 a PR gate, and a **permission boundary**. Every worker runs `PROFILE=ro`
-([`sandbox-policy`](../../runtime/sandbox-policy.md)) — read-only sandbox, plan-mode permissions —
-so the mission has no fix authority by construction, not by promise. A finding that wants a fix
+([`sandbox-policy`](../../runtime/sandbox-policy.md)) — read-only sandbox or shell-disabled tier
+where supported (`codex --sandbox read-only`, shell-stripped harnesses, disposable sandboxes), or
+plan-mode tool restrictions plus `deny-hook.sh` read-only write-floor defense-in-depth on
+shell-capable plan-mode tiers — so the mission carries no fix authority. A finding that wants a fix
 routes to [`ship-it`](ship-it.md) or [`clean-sweep`](clean-sweep.md); it never gets patched in
 place. Worker methodology comes from the upstream review packs (Matt's `code-review` two-axis,
 Addy's specialist lenses, gstack's review-army dispatch), composed at the mission level with one
@@ -142,9 +144,10 @@ moves past `reviewed_sha` leaves you holding an opinion about code that no longe
 One: posting the verdict to the PR is the run's only outward action, a one-way gate that needs a
 recorded human grant ([`gate-classification`](../../runtime/gate-classification.md)) — the report
 itself lands without one. Nothing else is held: the run mutates nothing. Workers run
-`PROFILE=ro`, report-only fleets preflight with `preflight.py --mode readonly`
-([`dispatch-lifecycle`](../../runtime/dispatch-lifecycle.md)), and the permission boundary is
-enforced below the model rather than requested of it.
+`PROFILE=ro` (with `OPEN_FLEET_HOOK_READONLY=1` wired into `deny-hook.sh` on POSIX/native launches,
+and provider tool-list restrictions where supported), report-only fleets preflight with
+`preflight.py --mode readonly` ([`dispatch-lifecycle`](../../runtime/dispatch-lifecycle.md)), and
+the permission boundary is enforced below the model where supported rather than requested of it.
 
 The human gate lives *after* the mission: acting on the verdict. Merging to the default branch
 stays a one-way door under [`gate-classification`](../../runtime/gate-classification.md) no matter

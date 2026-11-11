@@ -107,6 +107,48 @@ class AFailedLaunchReleasesItsClaim(ProviderTestBase):
         self.assertEqual(again, {"state": "pending", "requestId": "req-lost"})
         self.assertEqual(len(slings), 1, "a retry must not launch a second worker")
 
+    def test_ambiguous_launch_claim_survives_dead_claimer_until_explicit_takeover(self):
+        slings = []
+        reply_ok = False
+
+        def runner(argv, **_kw):
+            if argv[:3] == ["ov", "spec", "write"]:
+                return {"success": True, "path": "/repo/.overstory/specs/t1.md"}
+            if argv[:2] == ["ov", "sling"]:
+                slings.append(argv)
+                if reply_ok:
+                    return {"success": True, "agentName": "builder-1", "worktree": "/repo/.overstory/worktrees/b1"}
+                return {"success": True}  # malformed reply after launch reached upstream
+            raise AssertionError(argv)
+
+        prov = OverstoryProvider(state=self.state, runner=runner, env={})
+        with self.assertRaises(ProviderError):
+            prov.worker_start(task_id="nonlocal-task", agent="claude", profile="rw", prompt="Build",
+                              retry_request="req-cli-exit")
+        # Simulate short-lived CLI exit + PENDING_STALE_S expiry: dead PID and ancient timestamp.
+        with self.state._connect() as conn:
+            conn.execute(
+                "UPDATE requests SET claim_pid = 99999999, created_at = 1.0 WHERE request_id = 'req-cli-exit'"
+            )
+        shown = prov.request_show("req-cli-exit")
+        self.assertEqual(shown["state"], "pending")
+        self.assertTrue(shown.get("ambiguousContact"))
+        again = prov.worker_start(task_id="nonlocal-task", agent="claude", profile="rw", prompt="Build",
+                                  retry_request="req-cli-exit")
+        self.assertEqual(again, {"state": "pending", "requestId": "req-cli-exit"})
+        self.assertEqual(len(slings), 1, "dead CLI PID + stale age must not auto-reclaim an upstream-contacted launch")
+        held = prov.dispatch(["orchestration", "launch-reconcile", "--request", "req-cli-exit"])
+        self.assertEqual(held["reconciled"][0]["resolution"], "inspect_upstream_then_takeover")
+        self.assertIsNotNone(self.state.request_row("req-cli-exit"))
+        cleared = prov.dispatch(["orchestration", "launch-reconcile", "--request", "req-cli-exit", "--takeover"])
+        self.assertEqual(cleared["reconciled"][0]["resolution"], "reclaimed_after_takeover")
+        self.assertIsNone(self.state.request_row("req-cli-exit"))
+        reply_ok = True
+        launched = prov.worker_start(task_id="nonlocal-task", agent="claude", profile="rw", prompt="Build",
+                                     retry_request="req-cli-exit")
+        self.assertEqual(launched["state"], "ready")
+        self.assertEqual(len(slings), 2)
+
     def test_a_cli_that_is_not_installed_releases_the_claim(self):
         # Nothing ran: the binary was never found, so no worker can exist and a retry may act.
         def runner(argv, **_kw):
@@ -233,6 +275,7 @@ class TestGastownProvider(ProviderTestBase):
         prov.task_update(task_id=task_id, status="completed")
         self.assertEqual(calls[-1], ["bd", "update", "bd-1", "--status", "closed", "--json"])
         self.assertEqual(len(prov.task_list()["tasks"]), 1)
+        prov.task_update(task_id=task_id, status="ready")
 
         # PROFILE=ro registers `<agent>-ro` alias and slings the BEAD with `--no-merge`
         ro_res = prov.worker_start(task_id=task_id, agent="claude", profile="ro")
@@ -243,9 +286,14 @@ class TestGastownProvider(ProviderTestBase):
         self.assertEqual(ro_res["launch"]["effective"]["agentAlias"], "claude-ro")
         self.assertEqual(ro_res["worktree"], str(wt))
 
+        prov.task_update(task_id=task_id, status="ready")
         prov.worker_start(task_id=task_id, agent="codex", profile="rw")
         sling = [c for c in calls if c[:2] == ["gt", "sling"]][-1]
         self.assertEqual(sling, ["gt", "sling", "bd-1", "rig-alpha", "--agent", "codex", "--no-merge"])
+
+        prov.task_update(task_id=task_id, status="completed")
+        self.assertEqual(calls[-1], ["bd", "update", "bd-1", "--status", "closed", "--json"])
+        self.assertEqual(len(prov.task_list()["tasks"]), 1)
 
         # Mail send & check bridge (worker mailboxes are scoped: read the recipient's own)
         prov.send_message(subject="done", msg_type="worker_done", to="mayor", payload="ok")
@@ -257,6 +305,20 @@ class TestGastownProvider(ProviderTestBase):
         self.assertEqual(calls[-1], ["gt", "mail", "inbox", "--json", "--unread", "--address", "mayor"])
         self.assertEqual(len(inbox["messages"]), 1)
         self.assertEqual(inbox["upstreamInbox"], [{"id": "m1"}])
+
+        # CLI send --retry-request deduplicates both local mailbox and upstream gt mail send
+        gt_sends_before = sum(1 for c in calls if c[:3] == ["gt", "mail", "send"])
+        cs1 = prov.dispatch(
+            ["orchestration", "send", "--subject", "cli", "--type", "info", "--to", "mayor",
+             "--body", "once", "--retry-request", "gt-send-1"],
+        )
+        cs2 = prov.dispatch(
+            ["orchestration", "send", "--subject", "cli", "--type", "info", "--to", "mayor",
+             "--body", "once", "--retry-request", "gt-send-1"],
+        )
+        self.assertEqual(cs1["messageId"], cs2["messageId"])
+        self.assertIn("upstream", cs2)
+        self.assertEqual(sum(1 for c in calls if c[:3] == ["gt", "mail", "send"]), gt_sends_before + 1)
 
 
 class TestWorktrunkProvider(ProviderTestBase):
@@ -668,6 +730,655 @@ class TestMulticlaudeProvider(ProviderTestBase):
         self.assertEqual(ctx.exception.code, "manifest_required")
         self.assertIsNone(prov._verification("mc-1"))
         self.assertFalse(any(m["command"] == "complete_agent" for m in msgs))
+
+
+class TestExternalAdversarialRemediation750(ProviderTestBase):
+    """#750 C8, C24, C29, C33, C37, C38: External orchestrator provider regressions."""
+
+    def test_c8_preserve_worker_head_readback_mismatch_refuses_cleanup(self) -> None:
+        import importlib
+        ext = importlib.import_module("runtime.providers._external")
+        head_sha = "a" * 40
+        mismatch_sha = "b" * 40
+        wt = str(self.tmp_path / "wt")
+
+        def fake_run(argv: list[str]) -> str:
+            if argv[-2:] == ["--verify", "HEAD"]:
+                return head_sha + "\n"
+            if "update-ref" in argv:
+                return ""
+            if len(argv) >= 2 and argv[-2] == "--verify" and argv[-1].startswith("refs/open-fleet/preserved/"):
+                return mismatch_sha + "\n"
+            return str(self.tmp_path / ".git") + "\n"
+
+        with self.assertRaises(ProviderError) as ctx:
+            ext.preserve_worker_head(fake_run, wt, "disp-c8")
+        self.assertEqual(ctx.exception.code, "preserve_failed")
+        self.assertIn(mismatch_sha, ctx.exception.message)
+
+    def test_c24_and_c38_multiclaude_release_preserves_head_and_purges_private_messages(self) -> None:
+        import os
+        import stat
+        home = self.tmp_path / "mc-home"
+        (home / "repos" / "proj").mkdir(parents=True)
+        wt = home / "wts" / "proj" / "mc-24"
+        wt.mkdir(parents=True)
+        head_sha = "1" * 40
+        common_dir = self.tmp_path / "common-git"
+        common_dir.mkdir()
+        msgs: list[dict[str, object]] = []
+        git_calls: list[list[str]] = []
+
+        def runner(msg: dict[str, object], **_kw: object) -> dict[str, object]:
+            msgs.append(msg)
+            if msg["command"] == "spawn_agent":
+                (wt / ".claude").mkdir(parents=True, exist_ok=True)
+                src = home / "repos" / "proj" / ".multiclaude" / "hooks.json"
+                if src.exists():
+                    (wt / ".claude" / "settings.json").write_text(src.read_text())
+                return {"success": True, "data": {"name": "mc-24", "worktree_path": str(wt)}}
+            return {"success": True, "data": {"completed": True}}
+
+        def cli_runner(argv: list[str], **_kw: object) -> dict[str, object]:
+            git_calls.append(argv)
+            if "--verify" in argv and argv[-1] in ("HEAD", "HEAD^{commit}"):
+                return {"stdout": head_sha + "\n", "raw": head_sha + "\n", "stderr": "", "returncode": 0}
+            if "--verify" in argv and argv[-1].startswith("refs/open-fleet/preserved/"):
+                return {"stdout": head_sha + "\n", "raw": head_sha + "\n", "stderr": "", "returncode": 0}
+            if "--git-common-dir" in argv:
+                return {"stdout": str(common_dir) + "\n", "raw": str(common_dir) + "\n", "stderr": "", "returncode": 0}
+            return {"stdout": "", "raw": "", "stderr": "", "returncode": 0}
+
+        prov = MulticlaudeProvider(state=self.state, runner=runner, cli_runner=cli_runner, home=home, repo="proj")
+        prov.worker_start(task_id="t-mc", agent="claude", profile="ro", prompt="Audit", name="mc-24")
+
+        # C38: send_message creates 0700 dirs and 0600 message file even under umask(0)
+        old_umask = os.umask(0)
+        try:
+            prov.send_message(subject="hi", msg_type="info", to="mc-24", payload="secret")
+        finally:
+            os.umask(old_umask)
+        msg_dir = home / "messages" / "proj" / "mc-24"
+        msg_files = list(msg_dir.glob("*.json"))
+        self.assertGreaterEqual(len(msg_files), 1)
+        self.assertEqual(stat.S_IMODE(msg_dir.stat().st_mode), 0o700)
+        for mf in msg_files:
+            self.assertEqual(stat.S_IMODE(mf.stat().st_mode), 0o600)
+
+        # Record durable verification in state DB and release
+        with self.state._connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO multiclaude_verifications(dispatch_id, sha, worktree, verified_at) VALUES (?, ?, ?, ?)",
+                ("mc-24", head_sha, str(wt), 1.0),
+            )
+        rel = prov.worker_fence(verb="release", dispatch_id="mc-24")
+        self.assertEqual(rel["state"], "released")
+        self.assertEqual(rel["preservedRef"], "refs/open-fleet/preserved/mc-24")
+        self.assertEqual(rel["preserved"]["sha"], head_sha)
+        self.assertTrue(any("update-ref" in c for c in git_calls))
+        self.assertTrue(any(m["command"] == "complete_agent" for m in msgs))
+        # C38: agent message files purged on release without leaking file descriptors
+        self.assertEqual(list(msg_dir.glob("*.json")), [])
+        import fcntl
+
+        def _open_fd_count() -> int:
+            cnt = 0
+            for fd_num in range(256):
+                try:
+                    fcntl.fcntl(fd_num, fcntl.F_GETFD)
+                    cnt += 1
+                except OSError:
+                    pass
+            return cnt
+
+        nested_agent = home / "messages" / "proj" / "mc-fd-leak"
+        (nested_agent / "sub1" / "sub2").mkdir(parents=True)
+        (nested_agent / "a.json").write_text("{}", encoding="utf-8")
+        (nested_agent / "sub1" / "b.json").write_text("{}", encoding="utf-8")
+        (nested_agent / "sub1" / "sub2" / "c.json").write_text("{}", encoding="utf-8")
+        fds_before = _open_fd_count()
+        prov._purge_agent_messages("proj", "mc-fd-leak")
+        self.assertFalse(nested_agent.exists())
+        self.assertEqual(_open_fd_count(), fds_before)
+
+        # Symlinked ancestor `<home>/messages/<repo>` must never delete outside the message store:
+        import shutil
+        victim_root = self.tmp_path / "unrelated-store"
+        victim_agent = victim_root / "mc-24"
+        victim_agent.mkdir(parents=True)
+        keep_file = victim_agent / "keep.txt"
+        keep_file.write_text("do-not-delete\n", encoding="utf-8")
+        shutil.rmtree(home / "messages" / "proj")
+        (home / "messages" / "proj").symlink_to(victim_root, target_is_directory=True)
+        prov._purge_agent_messages("proj", "mc-24")
+        self.assertTrue(keep_file.is_file())
+        self.assertEqual(keep_file.read_text(encoding="utf-8"), "do-not-delete\n")
+
+    def test_c29_and_c33_external_worker_start_claims_local_task_and_binds_retry_payload(self) -> None:
+        wt = self.tmp_path / "wt-ext"
+        wt.mkdir()
+
+        def wt_runner(argv: list[str], **_kw: object) -> object:
+            if argv[:3] == ["wt", "switch", "--create"]:
+                return {"action": "created", "branch": argv[3], "path": str(wt)}
+            if argv[:2] == ["wt", "list"]:
+                return {"items": [{"branch": "feat/t1", "worktree": {"path": str(wt)}}]}
+            return {} if argv[0] == "wt" else ""
+
+        prov = WorktrunkProvider(
+            state=self.state,
+            runner=wt_runner,
+            install_hooks=lambda w, a, p: {},
+        )
+        t1 = self.state.task_create(spec="implement x")["task"]["id"]
+        t2 = self.state.task_create(spec="dependent", deps=[t1])["task"]["id"]
+
+        # Non-ready task is refused with task_not_startable
+        with self.assertRaises(ProviderError) as ctx:
+            prov.worker_start(task_id=t2, agent="claude", profile="rw", prompt="go")
+        self.assertEqual(ctx.exception.code, "task_not_startable")
+
+        # Starting ready t1 transitions it to dispatched
+        res1 = prov.worker_start(
+            task_id=t1, agent="claude", profile="rw", prompt="go", retry_request="req-wt-1"
+        )
+        st = {t["id"]: t["status"] for t in self.state.task_list()["tasks"]}
+        self.assertEqual(st[t1], "dispatched")
+
+        # Duplicate launch without matching retry_request is refused because t1 is now dispatched
+        with self.assertRaises(ProviderError) as ctx:
+            prov.worker_start(task_id=t1, agent="claude", profile="rw", prompt="go")
+        self.assertEqual(ctx.exception.code, "task_not_startable")
+
+        # Exact retry with same retry_request returns cached receipt
+        res_retry = prov.worker_start(
+            task_id=t1, agent="claude", profile="rw", prompt="go", retry_request="req-wt-1"
+        )
+        self.assertEqual(res1["dispatchId"], res_retry["dispatchId"])
+
+        # C33: Reusing retry_request with different prompt raises request_mismatch
+        with self.assertRaises(ProviderError) as ctx:
+            prov.worker_start(
+                task_id=t1, agent="claude", profile="rw", prompt="different", retry_request="req-wt-1"
+            )
+        self.assertEqual(ctx.exception.code, "request_mismatch")
+
+    def test_c37_external_worker_list_filters_paginates_and_scopes_upstream(self) -> None:
+        wt = self.tmp_path / "wt-list"
+        wt.mkdir()
+
+        def wt_runner(argv: list[str], **_kw: object) -> object:
+            if argv[:3] == ["wt", "switch", "--create"]:
+                return {"action": "created", "branch": argv[3], "path": str(wt)}
+            if argv[:2] == ["wt", "list"]:
+                return {
+                    "items": [
+                        {"branch": "feat/w1", "worktree": {"path": str(wt)}},
+                        {"branch": "feat/foreign", "worktree": {"path": "/tmp/foreign"}},
+                    ]
+                }
+            return {} if argv[0] == "wt" else ""
+
+        prov = WorktrunkProvider(
+            state=self.state,
+            runner=wt_runner,
+            install_hooks=lambda w, a, p: {},
+        )
+        t1 = self.state.task_create(spec="one")["task"]["id"]
+        t2 = self.state.task_create(spec="two")["task"]["id"]
+        w1 = prov.worker_start(task_id=t1, agent="claude", profile="ro", prompt="one")
+        w2 = prov.worker_start(task_id=t2, agent="claude", profile="ro", prompt="two")
+
+        # Default include_remote=False emits scope + page and paginates with cursor + limit
+        listed = prov.worker_list(limit=1)
+        self.assertEqual(len(listed["workers"]), 1)
+        self.assertEqual(listed["scope"]["source"], "worktrunk")
+        self.assertIsNotNone(listed["page"]["nextCursor"])
+
+        page2 = prov.worker_list(cursor=listed["page"]["nextCursor"], limit=1)
+        self.assertEqual(len(page2["workers"]), 1)
+        self.assertIsNone(page2["page"]["nextCursor"])
+        self.assertEqual(
+            {listed["workers"][0]["dispatchId"], page2["workers"][0]["dispatchId"]},
+            {w1["dispatchId"], w2["dispatchId"]},
+        )
+
+        # GastownProvider filters raw upstream records when include_remote=False
+        gt_prov = GastownProvider(
+            state=self.state,
+            runner=lambda argv, **_kw: [{"name": "Toast"}, {"name": "ForeignPolecat"}] if argv[:3] == ["gt", "polecat", "list"] else {},
+            rig="rig-alpha",
+            install_hooks=lambda w, a, p: {},
+        )
+        gt_list = gt_prov.worker_list(include_remote=False)
+        self.assertEqual(gt_list["upstream"], [])
+        gt_list_remote = gt_prov.worker_list(include_remote=True)
+        self.assertEqual(len(gt_list_remote["upstream"]), 2)
+
+    def test_c28_and_c29_t3_inject_preserves_original_dispatch_and_post_contact_failure_retains_claim(self) -> None:
+        wt_t3 = self.tmp_path / "wt-t3-orig"
+        wt_t3.mkdir()
+        seen_t3_calls: list[dict[str, object]] = []
+
+        def t3_runner(call: dict[str, object], **_kw: object) -> dict[str, object]:
+            seen_t3_calls.append(dict(call))
+            tool = call["tool"]
+            args = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
+            if tool == "t3_thread_launch":
+                return {"structuredContent": {"threadId": "thr-1", "runId": "r1"}, "isError": False}
+            if tool == "t3_thread_list":
+                return {
+                    "structuredContent": {
+                        "threads": [
+                            {"threadId": "thr-1", "status": "running"},
+                            {"threadId": "thr-foreign", "status": "running"},
+                        ]
+                    },
+                    "isError": False,
+                }
+            if tool == "t3_thread_read":
+                if args.get("threadId") != "thr-1":
+                    return {"content": [{"type": "text", "text": "unknown thread"}], "isError": True}
+                if args.get("view") == "messages":
+                    return {
+                        "structuredContent": {
+                            "items": [{"itemId": "m1", "createdBy": "assistant", "text": "injected reply"}],
+                            "nextPosition": 2,
+                        },
+                        "isError": False,
+                    }
+                return {"structuredContent": {"thread": {"worktreePath": str(wt_t3), "status": "idle"}}, "isError": False}
+            if tool == "t3_thread_send":
+                return {"structuredContent": {"delivery": "queued"}, "isError": False}
+            if tool == "t3_thread_interrupt":
+                if args.get("threadId") != "thr-1":
+                    return {"content": [{"type": "text", "text": "unknown thread"}], "isError": True}
+                return {"structuredContent": {"interrupted": True}, "isError": False}
+            return {"structuredContent": {}, "isError": False}
+
+        t3 = T3CodeProvider(
+            state=self.state,
+            runner=t3_runner,
+            env={"OPEN_FLEET_T3_PROJECT_ID": "proj-1"},
+            hooks=lambda w, a, p: {},
+        )
+        t_orig = self.state.task_create(spec="first", run="run-t3")["task"]["id"]
+        t_inj = self.state.task_create(spec="followup", run="run-t3")["task"]["id"]
+        t3.worker_start(task_id=t_orig, worktree=str(wt_t3), agent="codex", profile="rw", run="run-t3")
+        inj_res = t3.dispatch_inject(task_id=t_inj, to_handle="t3:thr-1", run="run-t3")
+        with self.state._connect() as conn:
+            rows = conn.execute(
+                "SELECT dispatch_id, task_id, worktree, agent, profile FROM dispatches WHERE backend = 't3code' ORDER BY created_at ASC"
+            ).fetchall()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["dispatch_id"], "thr-1")
+        self.assertEqual(rows[0]["task_id"], t_orig)
+        self.assertEqual(rows[0]["agent"], "codex")
+        self.assertEqual(rows[0]["profile"], "rw")
+        inj_did = str(rows[1]["dispatch_id"])
+        self.assertTrue(inj_did.startswith("thr-1:inject:"))
+        self.assertEqual(inj_res["dispatchId"], inj_did)
+        self.assertEqual(rows[1]["task_id"], t_inj)
+        self.assertEqual(rows[1]["worktree"], str(wt_t3))
+        self.assertEqual(rows[1]["agent"], "codex")
+        self.assertEqual(rows[1]["profile"], "rw")
+
+        # Injected T3 dispatch IDs resolve upstream threadId (`thr-1`) across list, show, read, and fence:
+        listed = t3.worker_list(run="run-t3")
+        self.assertEqual([w["dispatchId"] for w in listed["workers"]], ["thr-1", inj_did])
+        self.assertEqual([w["stage"] for w in listed["workers"]], ["running", "running"])
+        listed_inj = t3.worker_list(run="run-t3", task=t_inj)
+        self.assertEqual([w["dispatchId"] for w in listed_inj["workers"]], [inj_did])
+        self.assertEqual([t["threadId"] for t in listed_inj["upstream"]["threads"]], ["thr-1"])
+
+        shown = t3.worker_show(dispatch_id=inj_did)
+        self.assertEqual(shown["worker"]["dispatchId"], inj_did)
+        self.assertEqual(shown["worker"]["taskId"], t_inj)
+        self.assertEqual(shown["worker"]["stage"], "idle")
+
+        read_out = t3.worker_read(dispatch_id=inj_did)
+        self.assertEqual(read_out["transcript"]["messages"][0]["blocks"][0]["text"], "injected reply")
+
+        stopped = t3.worker_fence(verb="stop", dispatch_id=inj_did, reason="cancel-inject")
+        self.assertEqual(stopped["dispatchId"], inj_did)
+        self.assertEqual(stopped["state"], "stopped")
+        interrupt_calls = [c for c in seen_t3_calls if c.get("tool") == "t3_thread_interrupt"]
+        self.assertEqual(interrupt_calls[-1]["arguments"], {"threadId": "thr-1", "reason": "cancel-inject"})
+
+        # C29: Post-runtime-contact ambiguous failure must NOT release claimed task back to ready
+        t_ambig = self.state.task_create(spec="ambig", run="run-t3")["task"]["id"]
+
+        def ambig_runner(call: dict[str, object], **_kw: object) -> dict[str, object]:
+            if call["tool"] == "t3_thread_launch":
+                return {"structuredContent": {}, "isError": False}  # missing threadId after contact
+            return {"structuredContent": {}, "isError": False}
+
+        t3_ambig = T3CodeProvider(
+            state=self.state,
+            runner=ambig_runner,
+            env={"OPEN_FLEET_T3_PROJECT_ID": "proj-1"},
+            hooks=lambda w, a, p: {},
+        )
+        with self.assertRaises(ProviderError):
+            t3_ambig.worker_start(task_id=t_ambig, worktree=str(wt_t3), agent="claude", profile="rw", run="run-t3")
+        st = {t["id"]: t["status"] for t in self.state.task_list(run="run-t3")["tasks"]}
+        self.assertEqual(st[t_ambig], "dispatched")
+
+        # C29: Ambiguous t3_thread_send failure in dispatch_inject AFTER upstream contact also retains claim
+        t_inj_ambig = self.state.task_create(spec="inj-ambig", run="run-t3")["task"]["id"]
+
+        def ambig_inject_runner(call: dict[str, object], **_kw: object) -> object:
+            if call["tool"] == "t3_thread_send":
+                return "not-json-after-delivery"
+            return {"structuredContent": {}, "isError": False}
+
+        t3_inj_ambig = T3CodeProvider(
+            state=self.state,
+            runner=ambig_inject_runner,
+            env={"OPEN_FLEET_T3_PROJECT_ID": "proj-1"},
+            hooks=lambda w, a, p: {},
+        )
+        with self.assertRaises(ProviderError) as ctx_inj_ambig:
+            t3_inj_ambig.dispatch_inject(task_id=t_inj_ambig, to_handle="t3:thr-1", run="run-t3")
+        self.assertEqual(ctx_inj_ambig.exception.code, "t3code_bad_json")
+        st_inj = {t["id"]: t["status"] for t in self.state.task_list(run="run-t3")["tasks"]}
+        self.assertEqual(st_inj[t_inj_ambig], "dispatched")
+        with self.assertRaises(ProviderError) as ctx_dup:
+            t3.dispatch_inject(task_id=t_inj_ambig, to_handle="t3:thr-1", run="run-t3")
+        self.assertEqual(ctx_dup.exception.code, "task_not_startable")
+
+        # Pre-contact failure in dispatch_inject (missing endpoint/auth before t3 runs) releases claim to ready
+        t_inj_pre = self.state.task_create(spec="inj-pre", run="run-t3")["task"]["id"]
+        t3_unconf = T3CodeProvider(
+            state=self.state,
+            env={"OPEN_FLEET_T3_PROJECT_ID": "proj-1"},
+            hooks=lambda w, a, p: {},
+        )
+        with self.assertRaises(ProviderError) as ctx_pre:
+            t3_unconf.dispatch_inject(task_id=t_inj_pre, to_handle="t3:thr-1", run="run-t3")
+        self.assertEqual(ctx_pre.exception.code, "t3code_not_configured")
+        self.assertEqual(
+            {t["id"]: t["status"] for t in self.state.task_list(run="run-t3")["tasks"]}[t_inj_pre],
+            "ready",
+        )
+
+        # C28/C29: Launched worker bound to run-t3 cannot claim, launch, or inject tasks in run-other
+        # either implicitly (omitting run) or explicitly (passing run='run-other')
+        t_foreign = self.state.task_create(spec="foreign-secret", run="run-other")["task"]["id"]
+        t_own_ready = self.state.task_create(spec="own-ready", run="run-t3")["task"]["id"]
+        bound_state = LocalStateStore(
+            self.state.db_path,
+            env={"OPEN_FLEET_DISPATCH_ID": "thr-1", "OPEN_FLEET_TERMINAL_HANDLE": "t3:thr-1"},
+        )
+        wt_calls: list[list[str]] = []
+
+        def guard_wt_runner(argv: list[str], **_kw: object) -> object:
+            wt_calls.append(list(argv))
+            return {}
+
+        bound_wt = WorktrunkProvider(
+            state=bound_state,
+            runner=guard_wt_runner,
+            install_hooks=lambda w, a, p: {},
+        )
+        t3_calls: list[dict[str, object]] = []
+
+        def guard_t3_runner(call: dict[str, object], **_kw: object) -> dict[str, object]:
+            t3_calls.append(dict(call))
+            return {"structuredContent": {}, "isError": False}
+
+        bound_t3 = T3CodeProvider(
+            state=bound_state,
+            runner=guard_t3_runner,
+            env={"OPEN_FLEET_T3_PROJECT_ID": "proj-1", "OPEN_FLEET_DISPATCH_ID": "thr-1"},
+            hooks=lambda w, a, p: {},
+        )
+        # Start a foreign T3 worker on run-other as coordinator so we can verify observation/fencing isolation:
+        t_foreign_disp = self.state.task_create(spec="foreign-disp", run="run-other")["task"]["id"]
+
+        def foreign_t3_runner(call: dict[str, object], **_kw: object) -> dict[str, object]:
+            if call["tool"] == "t3_thread_launch":
+                return {"structuredContent": {"threadId": "thr-other", "runId": "r2"}, "isError": False}
+            if call["tool"] == "t3_thread_read":
+                return {"structuredContent": {"thread": {"worktreePath": str(wt_t3), "status": "running"}}, "isError": False}
+            return {"structuredContent": {}, "isError": False}
+
+        T3CodeProvider(
+            state=self.state,
+            runner=foreign_t3_runner,
+            env={"OPEN_FLEET_T3_PROJECT_ID": "proj-1"},
+            hooks=lambda w, a, p: {},
+        ).worker_start(task_id=t_foreign_disp, worktree=str(wt_t3), agent="codex", profile="rw", run="run-other")
+
+        ao_calls: list[dict[str, object]] = []
+        bound_ao = ComposioAOProvider(
+            state=bound_state,
+            runner=lambda call, **_kw: (ao_calls.append(dict(call)) or {"ok": True}),
+            env={"OPEN_FLEET_AO_PROJECT": "proj-1", "OPEN_FLEET_DISPATCH_ID": "thr-1"},
+        )
+        emdash_calls: list[tuple[str, object]] = []
+        bound_emdash = EmdashProvider(
+            state=bound_state,
+            caller=lambda method, params=None: (emdash_calls.append((method, params)) or {"ok": True}),
+            snapshotter=lambda topic: (emdash_calls.append(("snap", topic)) or {"data": {"text": "secret"}}),
+            env={"OPEN_FLEET_DISPATCH_ID": "thr-1"},
+        )
+        ov_calls: list[list[str]] = []
+        bound_ov = OverstoryProvider(
+            state=bound_state,
+            runner=lambda argv, **_kw: (ov_calls.append(list(argv)) or {"success": True, "messages": []}),
+            env={"OPEN_FLEET_DISPATCH_ID": "thr-1"},
+        )
+        gt_calls: list[list[str]] = []
+        bound_gt = GastownProvider(
+            state=bound_state,
+            runner=lambda argv, **_kw: (gt_calls.append(list(argv)) or "[]"),
+            env={"OPEN_FLEET_GASTOWN_RIG": "rig1", "OPEN_FLEET_DISPATCH_ID": "thr-1"},
+        )
+        sup_calls: list[list[str]] = []
+        bound_sup = MODS["superset"].SupersetProvider(
+            state=bound_state,
+            runner=lambda argv, **_kw: (sup_calls.append(list(argv)) or "{}"),
+            env={"OPEN_FLEET_DISPATCH_ID": "thr-1"},
+        )
+
+        for bad_call in (
+            lambda: bound_wt.worker_start(task_id=t_foreign, agent="claude", profile="rw", prompt="go"),
+            lambda: bound_wt.worker_start(task_id=t_own_ready, agent="claude", profile="rw", prompt="go", run="run-other"),
+            lambda: bound_wt.worker_start(task_id=t_foreign, agent="claude", profile="rw"),
+            lambda: bound_wt.worktree_rm(selector="unregistered-branch"),
+            lambda: bound_sup.worktree_rm(selector="ws-unregistered"),
+            lambda: bound_t3.dispatch_inject(task_id=t_foreign, to_handle="t3:thr-1", prompt="go"),
+            lambda: bound_t3.dispatch_inject(task_id=t_own_ready, to_handle="t3:thr-1", prompt="go", run="run-other"),
+            lambda: bound_t3.dispatch_inject(task_id="", to_handle="t3:unregistered-thread", prompt="go"),
+            lambda: bound_t3.dispatch_inject(task_id=t_own_ready, to_handle="t3:unregistered-thread", prompt="go"),
+            lambda: bound_t3.worker_list(run="run-other"),
+            lambda: bound_t3.worker_list(include_remote=True),
+            lambda: bound_t3.worker_show(dispatch_id="thr-other"),
+            lambda: bound_t3.worker_read(dispatch_id="thr-other"),
+            lambda: bound_t3.worker_fence(verb="stop", dispatch_id="thr-other", reason="cross-run"),
+            lambda: bound_wt.worker_list(run="run-other"),
+            lambda: bound_ao.terminal_send(terminal="ao:unregistered-session", text="hi"),
+            lambda: bound_emdash.terminal_send(terminal="emdash:unregistered-conv", text="hi"),
+            lambda: bound_emdash.terminal_read(terminal="emdash:unregistered-conv"),
+            lambda: bound_ov.send_message(subject="hi", to="unregistered-agent"),
+            lambda: bound_ov.check_messages(),
+            lambda: bound_ov.reply_message(msg_id="upstream-only-id", body="no"),
+            lambda: bound_ov.worktree_rm(selector="unregistered-agent"),
+            lambda: bound_gt.send_message(subject="hi", to="rig1/unregistered"),
+            lambda: bound_gt.check_messages(),
+            lambda: bound_gt.reply_message(msg_id="upstream-only-id", body="no"),
+        ):
+            with self.assertRaises(ProviderError) as ctx_bound:
+                bad_call()
+            self.assertEqual(ctx_bound.exception.code, "cross_run_access")
+        self.assertEqual(wt_calls, [])
+        self.assertEqual(t3_calls, [])
+        self.assertEqual(ao_calls, [])
+        self.assertEqual(emdash_calls, [])
+        self.assertEqual(ov_calls, [])
+        self.assertEqual(gt_calls, [])
+        self.assertEqual(sup_calls, [])
+        self.assertEqual(
+            {t["id"]: t["status"] for t in self.state.task_list(run="run-t3")["tasks"]}[t_own_ready],
+            "ready",
+        )
+        # Implicit `worker_list()` from a bound worker scopes strictly to its bound run (`run-t3`), omitting `thr-other`:
+        bound_list_t3 = T3CodeProvider(
+            state=bound_state,
+            runner=lambda call, **_kw: {
+                "structuredContent": {
+                    "threads": [
+                        {"threadId": "thr-1", "status": "running"},
+                        {"threadId": "thr-other", "status": "running"},
+                    ]
+                },
+                "isError": False,
+            },
+            env={"OPEN_FLEET_T3_PROJECT_ID": "proj-1", "OPEN_FLEET_DISPATCH_ID": "thr-1"},
+            hooks=lambda w, a, p: {},
+        ).worker_list()
+        self.assertNotIn("thr-other", [w["dispatchId"] for w in bound_list_t3["workers"]])
+        self.assertEqual([t["threadId"] for t in bound_list_t3["upstream"]["threads"]], ["thr-1"])
+        self.assertEqual(
+            {t["id"]: t["status"] for t in self.state.task_list(run="run-other")["tasks"]}[t_foreign],
+            "ready",
+        )
+
+    def test_post_contact_message_retries_retain_ambiguous_claims(self) -> None:
+        home = self.tmp_path / "mc-retry-home"
+        (home / "repos" / "proj").mkdir(parents=True)
+        wt = home / "wts" / "proj" / "mc-r1"
+        wt.mkdir(parents=True)
+        route_calls: list[dict[str, object]] = []
+        fail_route = {"on": False}
+
+        def mc_runner(msg: dict[str, object], **_kw: object) -> dict[str, object]:
+            if msg["command"] == "spawn_agent":
+                (wt / ".claude").mkdir(parents=True, exist_ok=True)
+                src = home / "repos" / "proj" / ".multiclaude" / "hooks.json"
+                if src.exists():
+                    (wt / ".claude" / "settings.json").write_text(src.read_text())
+                return {"success": True, "data": {"name": "mc-r1", "worktree_path": str(wt)}}
+            if msg["command"] == "route_messages":
+                route_calls.append(msg)
+                if fail_route["on"]:
+                    raise ProviderError("multiclaude_empty_output", "socket closed after write")
+            return {"success": True, "data": {"routed": 1}}
+
+        mc = MulticlaudeProvider(state=self.state, runner=mc_runner, home=home, repo="proj")
+        mc.worker_start(task_id="t-mc-r", agent="claude", profile="ro", prompt="Audit", name="mc-r1")
+        fail_route["on"] = True
+        route_calls.clear()
+        msg_dir = home / "messages" / "proj" / "mc-r1"
+        for existing in msg_dir.glob("*.json"):
+            existing.unlink()
+
+        # Pre-contact refusal (unsafe recipient path segment) releases the claim immediately.
+        with self.state._connect() as conn:
+            conn.execute(
+                "INSERT INTO dispatches(dispatch_id, task_id, run_id, worktree, agent, profile, state, terminal_handle, backend, session_id, launch_effective, created_at, updated_at) "
+                "VALUES ('mc-bad', '', 'default', '', 'claude', 'ro', 'running', 'mc-bad', 'multiclaude', '../escape', '{}', 1.0, 1.0)"
+            )
+        with self.assertRaises(ProviderError) as pre_mc:
+            mc.send_message(subject="s", msg_type="info", to="mc-bad", payload="p", retry_request="req-mc-pre")
+        self.assertEqual(pre_mc.exception.code, "multiclaude_unsafe_path")
+        self.assertEqual(mc.request_show("req-mc-pre")["state"], "absent")
+
+        # Post-contact failure (file written, route_messages reply lost) retains ambiguous claim.
+        with self.assertRaises(ProviderError) as lost_mc:
+            mc.send_message(subject="hi", msg_type="info", to="mc-r1", payload="once", retry_request="req-mc-lost")
+        self.assertEqual(lost_mc.exception.code, "multiclaude_empty_output")
+        files_after_first = sorted(p.name for p in msg_dir.glob("*.json"))
+        self.assertEqual(len(files_after_first), 1)
+        self.assertEqual(len(route_calls), 1)
+        shown = mc.request_show("req-mc-lost")
+        self.assertEqual(shown["state"], "pending")
+        self.assertTrue(shown.get("ambiguousContact"))
+
+        # Retry returns pending marker without writing a second file or re-routing.
+        retry_res = mc.send_message(subject="hi", msg_type="info", to="mc-r1", payload="once", retry_request="req-mc-lost")
+        self.assertEqual(retry_res, {"state": "pending", "requestId": "req-mc-lost"})
+        self.assertEqual(sorted(p.name for p in msg_dir.glob("*.json")), files_after_first)
+        self.assertEqual(len(route_calls), 1)
+
+        # Operator takeover clears the ambiguous claim; subsequent retry uses the same deterministic msg-<digest>.json.
+        rec = mc.launch_reconcile(request="req-mc-lost", takeover=True)
+        self.assertEqual(rec["reconciled"][0]["resolution"], "reclaimed_after_takeover")
+        fail_route["on"] = False
+        ok_mc = mc.send_message(subject="hi", msg_type="info", to="mc-r1", payload="once", retry_request="req-mc-lost")
+        self.assertTrue(ok_mc["sent"])
+        self.assertEqual(sorted(p.name for p in msg_dir.glob("*.json")), files_after_first)
+
+        # Overstory send, unread check, and upstream reply retain claims post-contact and release pre-contact.
+        ov_calls: list[list[str]] = []
+        ov_mode = {"fail": "timeout"}
+
+        def ov_runner(argv: list[str], **_kw: object) -> dict[str, object]:
+            ov_calls.append(list(argv))
+            if ov_mode["fail"] == "missing":
+                raise ProviderError("overstory_cli_missing", "ov missing")
+            if ov_mode["fail"] == "timeout":
+                raise ProviderError("overstory_timeout", "ov timed out")
+            return {"success": True, "messages": [{"id": "ov-m1"}]}
+
+        ov = OverstoryProvider(state=self.state, runner=ov_runner)
+        with self.assertRaises(ProviderError):
+            ov.send_message(subject="bad", msg_type="nonexistent", to="orchestrator", retry_request="req-ov-invalid")
+        self.assertEqual(self.state.request_show("req-ov-invalid")["state"], "absent")
+        self.assertEqual(ov_calls, [])
+
+        ov_mode["fail"] = "missing"
+        with self.assertRaises(ProviderError):
+            ov.send_message(subject="hi", msg_type="info", to="orchestrator", retry_request="req-ov-missing")
+        self.assertEqual(self.state.request_show("req-ov-missing")["state"], "absent")
+
+        ov_mode["fail"] = "timeout"
+        ov_calls.clear()
+        with self.assertRaises(ProviderError):
+            ov.send_message(subject="hi", msg_type="info", to="orchestrator", retry_request="req-ov-send")
+        self.assertTrue(self.state.request_show("req-ov-send").get("ambiguousContact"))
+        self.assertEqual(
+            ov.send_message(subject="hi", msg_type="info", to="orchestrator", retry_request="req-ov-send"),
+            {"state": "pending", "requestId": "req-ov-send"},
+        )
+        self.assertEqual(len(ov_calls), 1)
+
+        ov_calls.clear()
+        with self.assertRaises(ProviderError):
+            ov.check_messages(mode="unread", retry_request="req-ov-check")
+        self.assertTrue(self.state.request_show("req-ov-check").get("ambiguousContact"))
+        self.assertEqual(ov.check_messages(mode="unread", retry_request="req-ov-check"), {"state": "pending", "requestId": "req-ov-check"})
+        self.assertEqual(len(ov_calls), 1)
+
+        ov_calls.clear()
+        with self.assertRaises(ProviderError):
+            ov.reply_message(msg_id="ov-up-1", body="ack", retry_request="req-ov-reply")
+        self.assertTrue(self.state.request_show("req-ov-reply").get("ambiguousContact"))
+        self.assertEqual(ov.reply_message(msg_id="ov-up-1", body="ack", retry_request="req-ov-reply"), {"state": "pending", "requestId": "req-ov-reply"})
+        self.assertEqual(len(ov_calls), 1)
+
+        # JCode Swarm broadcast send: missing coordinator releases pre-contact; lost socket reply retains claim.
+        jc_calls: list[dict[str, object]] = []
+        jc_nocoord = JCodeSwarmProvider(state=self.state, runner=lambda r, **_k: (jc_calls.append(r) or {"type": "ack"}))
+        with self.assertRaises(ProviderError):
+            jc_nocoord.send_message(subject="b", msg_type="info", to="broadcast", retry_request="req-jc-pre")
+        self.assertEqual(jc_nocoord.request_show("req-jc-pre")["state"], "absent")
+        self.assertEqual(jc_calls, [])
+
+        def jc_lost(req: dict[str, object], **_kw: object) -> dict[str, object]:
+            jc_calls.append(req)
+            raise ProviderError("jcode_no_reply", "socket closed")
+
+        jc = JCodeSwarmProvider(state=self.state, runner=jc_lost, coordinator_session="coord-1")
+        with self.assertRaises(ProviderError):
+            jc.send_message(subject="b", msg_type="info", to="broadcast", retry_request="req-jc-lost")
+        self.assertTrue(jc.request_show("req-jc-lost").get("ambiguousContact"))
+        self.assertEqual(
+            jc.send_message(subject="b", msg_type="info", to="broadcast", retry_request="req-jc-lost"),
+            {"state": "pending", "requestId": "req-jc-lost"},
+        )
+        self.assertEqual(len(jc_calls), 1)
 
 
 if __name__ == "__main__":

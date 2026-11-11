@@ -44,7 +44,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from ._external import release_claim_on_failure
+from ._external import _ensure_ctx_task_claimed, release_claim_on_failure
 from ._external import ExternalDispatchMixin, coerce_output, env_flag, env_lookup, http_json, real_worktree, run_cli
 from .base import (
     ProviderError,
@@ -353,6 +353,7 @@ class VibeKanbanProvider(ExternalDispatchMixin, RuntimeProvider):
                 "vibe-kanban: set OPEN_FLEET_VIBE_KANBAN_REPO_ID (a POST /api/repos id) and OPEN_FLEET_VIBE_KANBAN_TARGET_BRANCH",
             )
         task_prompt = self.resolve_task_prompt(task_id, prompt)
+        _ensure_ctx_task_claimed()
         executor_config: dict[str, Any] = {"executor": executor, "permission_policy": "PLAN" if profile == "ro" else "AUTO"}
         ro_cfg = None
         if profile == "ro":
@@ -408,7 +409,7 @@ class VibeKanbanProvider(ExternalDispatchMixin, RuntimeProvider):
         )
 
     def worker_list(self, **kwargs: Any) -> dict[str, Any]:
-        return self._list_local(run=kwargs.get("run"), task=kwargs.get("task"), limit=kwargs.get("limit"))
+        return self._list_local(**kwargs)
 
     def worker_show(self, *, dispatch_id: str = "", **kwargs: Any) -> dict[str, Any]:
         row = self._dispatch_row(dispatch_id)
@@ -463,8 +464,8 @@ class VibeKanbanProvider(ExternalDispatchMixin, RuntimeProvider):
     def task_list(self, **kwargs: Any) -> dict[str, Any]:
         return self.state.task_list(**kwargs)
 
-    def send_message(self, **kwargs: Any) -> dict[str, Any]:
-        return self.state.send_message(**kwargs)
+    def send_message(self, *, retry_request: str | None = None, **kwargs: Any) -> dict[str, Any]:
+        return self.state.send_message(retry_request=retry_request, **kwargs)
 
     def check_messages(self, **kwargs: Any) -> dict[str, Any]:
         return self.state.check_messages(**kwargs)

@@ -77,6 +77,13 @@ DISABLED = "live runs are disabled outside the container-based live harness"
 SEAMS: dict = {}
 
 
+_MQ_PROBE_SPEC = importlib.util.spec_from_file_location(
+    "mq_probe_for_wip_curve", ROOT / "runtime" / "scripts" / "merge_queue.py"
+)
+_MQ_PROBE_MOD = importlib.util.module_from_spec(_MQ_PROBE_SPEC)
+_MQ_PROBE_SPEC.loader.exec_module(_MQ_PROBE_MOD)
+
+
 def setUpModule():
     SEAMS["live"] = mock.patch.object(wip.contain, "live_disabled", lambda: None)
     SEAMS["live"].start()
@@ -86,6 +93,22 @@ def setUpModule():
     SEAMS["kept_root"] = tempfile.mkdtemp(prefix="wip-curve-kept-")
     SEAMS["kept"] = mock.patch.object(wip, "KEPT_ROOT", SEAMS["kept_root"], create=True)
     SEAMS["kept"].start()
+    SEAMS["mq_sandbox"] = mock.patch.object(
+        wip.first_run, "SANDBOX_ENV_ALLOW", wip.first_run.SANDBOX_ENV_ALLOW | {"MQ_GATE_SANDBOX_CMD"}
+    )
+    SEAMS["mq_sandbox"].start()
+
+
+def _ensure_test_mq_sandbox(env: dict, tmp: Path) -> None:
+    """Configure a disposable MQ_GATE_SANDBOX_CMD wrapper only on CI hosts lacking bwrap/unshare."""
+    if env.get("MQ_GATE_SANDBOX_CMD"):
+        return
+    if not _MQ_PROBE_MOD.MergeQueue._has_native_gate_isolation():
+        sbx = tmp / "mq-test-gate-sandbox"
+        sbx.parent.mkdir(parents=True, exist_ok=True)
+        sbx.write_text("#!/bin/sh\nexec \"$@\"\n", encoding="utf-8")
+        sbx.chmod(0o755)
+        env["MQ_GATE_SANDBOX_CMD"] = str(sbx)
 
 
 def tripwired_env(tmp: Path) -> tuple[dict, Path]:
@@ -100,6 +123,7 @@ def tripwired_env(tmp: Path) -> tuple[dict, Path]:
     env = {k: v for k, v in os.environ.items() if k not in LEAKY}
     env["PATH"] = os.pathsep.join([str(trip), os.path.dirname(sys.executable), env.get("PATH", "")])
     env["SHELL"] = "/bin/sh"
+    _ensure_test_mq_sandbox(env, tmp)
     return env, log
 
 
@@ -977,6 +1001,7 @@ B1_OVERSPEND = ("wip1-b1r1-rep1", ("--cost-cap-usd", "0.50", "--inert-cost-usd",
 
 
 def tearDownModule():
+    SEAMS["mq_sandbox"].stop()
     SEAMS["live"].stop()
     SEAMS["kept"].stop()
     shutil.rmtree(SEAMS["kept_root"], ignore_errors=True)
@@ -1848,6 +1873,7 @@ class TestMergeQueueFailuresAreCounted(Tmp):
         mq = [sys.executable, str(ROOT / "runtime" / "scripts" / "merge_queue.py"), "--db", str(self.tmp / "mq.db"),
               "--repo-dir", str(self.tmp / "clone")]
         env = {**os.environ, "OPEN_FLEET_STATE_DIR": str(self.tmp / "mq-state")}
+        _ensure_test_mq_sandbox(env, self.tmp)
         wip.git(self.tmp, "init", "-q", "--bare", str(self.tmp / "origin.git"))
         seed = self.tmp / "seed"
         wip.build_seed(json.loads(TASKSET.read_text(encoding="utf-8")), seed)

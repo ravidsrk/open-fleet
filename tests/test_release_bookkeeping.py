@@ -244,13 +244,31 @@ class TheCutFoldsTheBookkeeping(unittest.TestCase):
                            env=env, check=True, capture_output=True)
             run("git", "remote", "remove", "origin")
             run("git", "checkout", "-B", "bookkeeping-rehearsal")
-            for rel in ("docs/ops.md", "docs/releases.json"):
+            for rel in ("docs/ops.md", "docs/releases.json", "tests/test_docs_navigation.py"):
                 shutil.copyfile(ROOT / rel, repo / rel)
             inventory = json.loads((repo / "docs/releases.json").read_text())
             historical = inventory["releases"]
             if inventory.get("preparing") is not None:  # the suite running on a cut itself
-                run("git", "restore", "--source", historical[-1]["commit"], "--",
-                    "CHANGELOG.md", ".claude-plugin/plugin.json", ".claude-plugin/marketplace.json")
+                prep_ver = inventory["preparing"]["version"]
+                prev_ver = historical[-1]["version"]
+                cl_path = repo / "CHANGELOG.md"
+                cl_text, stripped = re.subn(
+                    rf"(?ms)^## \[{re.escape(prep_ver)}\] - [^\n]+\n.*?(?=^## \[{re.escape(prev_ver)}\])",
+                    "",
+                    cl_path.read_text(encoding="utf-8"),
+                    count=1,
+                )
+                self.assertEqual(stripped, 1, "preparing section missing from CHANGELOG.md")
+                cl_path.write_text(cl_text, encoding="utf-8")
+                for name in ("plugin", "marketplace"):
+                    manifest = repo / f".claude-plugin/{name}.json"
+                    value = json.loads(manifest.read_text(encoding="utf-8"))
+                    if name == "plugin":
+                        value["version"] = prev_ver
+                    else:
+                        value["metadata"]["version"] = prev_ver
+                        value["plugins"][0]["version"] = prev_ver
+                    manifest.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
                 inventory["preparing"] = None
                 (repo / "docs/releases.json").write_text(json.dumps(inventory, indent=2) + "\n")
             planted = "- **A rehearsal entry** that links [ops](../docs/ops.md).\n"
@@ -298,6 +316,8 @@ class TheCutFoldsTheBookkeeping(unittest.TestCase):
             for name in pending:
                 with self.subTest(fragment=name):
                     self.assertIn(f"D\tchangelog.d/{name}", gone)
+            # Exercise the preparing != None branch of ReleaseCutWalkthrough on the cut itself.
+            run(sys.executable, "-m", "unittest", "tests.test_docs_navigation.ReleaseCutWalkthrough")
 
 
 

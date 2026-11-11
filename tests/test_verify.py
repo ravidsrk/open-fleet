@@ -1905,6 +1905,8 @@ class MutationFixture(RepoCase):
                 "artifact": self.nc_artifact, "command": self.proof_cmd, "paths": ["app.py"]}
 
     def _run_main(self, path, *extra):
+        if "--execute-nc" not in extra and "--dispatch-record" not in extra:
+            extra = (*extra, "--allow-static-nc")
         buf, errbuf = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(errbuf):
             rc = verify.main(["--manifest", path,
@@ -1929,7 +1931,7 @@ class EndToEndMutationGreen(MutationFixture):
     def test_full_pass_mutation_manifest_is_green_end_to_end(self):
         path = self._manifest()
         out, err = verify.verify(path, self.contract, self.digest, repo="o/r",
-                                 unit_class="mutation", lighting="lit")
+                                 unit_class="mutation", lighting="lit", allow_static_nc=True)
         self.assertIsNone(err)
         fatal, notes = out
         self.assertEqual(fatal, [], fatal)
@@ -1944,7 +1946,8 @@ class EndToEndMutationGreen(MutationFixture):
                               "--contract-digest", self.digest,
                               "--repo", "o/r",
                               "--unit-class", "mutation",
-                              "--lighting", "lit"])
+                              "--lighting", "lit",
+                              "--allow-static-nc"])
         self.assertEqual(rc, 0)
         self.assertIn("verify: OK", buf.getvalue())
         self._assert_mutation_lanes_ran()
@@ -2476,7 +2479,7 @@ class EndToEndMutationGreen(MutationFixture):
         # #169: a mutation manifest with no lighting key verifies clean — omission means lit.
         path = self._manifest(lighting=None)
         out, err = verify.verify(path, self.contract, self.digest, repo="o/r",
-                                 unit_class="mutation", lighting="lit")
+                                 unit_class="mutation", lighting="lit", allow_static_nc=True)
         self.assertIsNone(err)
         fatal, notes = out
         self.assertEqual(fatal, [], fatal)
@@ -2627,6 +2630,310 @@ class EndToEndMutationGreen(MutationFixture):
             self.assertIsNone(err)
             self.assertTrue(any('no replay is implemented' in e for e in result[0]), result)
             execute.assert_not_called()
+
+    def test_unexecuted_nc_discloses_static_corroboration_note_c10(self):
+        # #750 C10: an ordinary GitHub-reviewed mutation unit fails closed without --execute-nc
+        # unless --allow-static-nc is explicitly supplied; when waived, the verdict discloses that
+        # the negative control was corroborated from the artifact only.
+        path = self._manifest()
+        (fatal_default, _), err_default = verify.verify(
+            path, self.contract, self.digest, repo='o/r', unit_class='mutation', execute_nc=False)
+        self.assertIsNone(err_default)
+        self.assertTrue(any('negative control was NOT executed' in f for f in fatal_default),
+                        fatal_default)
+        errbuf = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(errbuf):
+            rc_default = verify.main(['--manifest', path, '--contract-source', self.contract,
+                                      '--contract-digest', self.digest, '--repo', 'o/r',
+                                      '--unit-class', 'mutation'])
+        self.assertEqual(rc_default, 2, errbuf.getvalue())
+        (fatal, notes), err = verify.verify(path, self.contract, self.digest, repo='o/r',
+                                            unit_class='mutation', execute_nc=False,
+                                            allow_static_nc=True)
+        self.assertIsNone(err)
+        self.assertEqual(fatal, [], fatal)
+        self.assertTrue(any('corroborated from artifact only (--execute-nc not set)' in n
+                            for n in notes), notes)
+
+    def test_all_six_mutation_tools_replay_when_artifact_quotes_diff_c11(self):
+        # #750 C11: all six named mutation tools (mutmut, cosmic-ray, stryker, pitest,
+        # cargo-mutants, go-mutesting) replay deterministically under --execute-nc when their
+        # artifact quotes the mutant's unified diff, and fail closed when it does not.
+        diff = '--- a/app.py\n+++ b/app.py\n@@ -2 +2 @@\n-    return 2\n+    return 1\n'
+        for tool in ('mutmut', 'cosmic-ray', 'stryker', 'pitest', 'cargo-mutants', 'go-mutesting'):
+            with self.subTest(tool=tool):
+                self.write(self.nc_artifact, f'mutant m#7 was KILLED\n{diff}')
+                self.head_sha = self.commit(f'pin {tool} diff')
+                self.head_tree = self.git('rev-parse', 'HEAD^{tree}')
+                nc = {'tool': tool, 'mutant': 'm#7', 'artifact': self.nc_artifact,
+                      'result': 'KILLED', 'command': self.proof_cmd}
+                path = self._manifest(nc=nc)
+                (fatal, notes), err = verify.verify(
+                    path, self.contract, self.digest, repo='o/r',
+                    unit_class='mutation', execute_nc=True, nc_command=self.proof_cmd)
+                self.assertIsNone(err)
+                self.assertEqual(fatal, [], fatal)
+                self.assertTrue(any(f'with the {tool} control applied' in n for n in notes), notes)
+
+    def test_quiet_oss_contribute_pr_verifies_with_review_artifact_and_executed_nc_c15(self):
+        # #750 C15: an oss-contribute unit parked awaiting-maintainer-merge has no upstream
+        # OWNER/MEMBER/COLLABORATOR approval while feedback is quiet; it verifies when
+        # review.artifact binds head_sha, no upstream CHANGES_REQUESTED veto exists, the
+        # coordinator contract is corroborated, and the negative control is EXECUTED.
+        rev_rel = 'docs/reports/u/review.md'
+        rev_bytes = f'Internal review PASS at {self.head_sha}\n'.encode('utf-8')
+        (self.repo / rev_rel).parent.mkdir(parents=True, exist_ok=True)
+        (self.repo / rev_rel).write_bytes(rev_bytes)
+        oss_contract = self.write('oss-contract.json', json.dumps({
+            'mission': 'oss-contribute', 'criterion_ids': ['AC-1'],
+        }))
+        oss_digest = 'sha256:' + hashlib.sha256(
+            (self.repo / oss_contract).read_bytes()).hexdigest()
+        path = self._manifest(nc=self._revert_nc())
+        m = json.loads(Path(path).read_text(encoding='utf-8'))
+        m['parked'] = [{'item': 'upstream merge', 'reason': 'awaiting-maintainer-merge'}]
+        m['review'] = {'artifact': rev_rel}
+        m['artifacts'] = [{'path': rev_rel, 'sha256': hashlib.sha256(rev_bytes).hexdigest()}]
+        m['contract'] = {'source': oss_contract, 'digest': oss_digest, 'criterion_ids': ['AC-1']}
+        Path(path).write_text(json.dumps(m), encoding='utf-8')
+        with mock.patch.object(verify, 'fetch_reviews', return_value=([], None)):
+            # Non-oss-contribute contract cannot self-waive GitHub review:
+            m_plain = dict(m, contract={'source': self.contract, 'digest': self.digest,
+                                        'criterion_ids': ['AC-1']})
+            plain_path = self.write('plain-manifest.json', json.dumps(m_plain))
+            (fatal_plain, _), _ = verify.verify(
+                plain_path, self.contract, self.digest, repo='o/r',
+                unit_class='mutation', execute_nc=True, nc_command=self.proof_cmd)
+            self.assertTrue(any('no INDEPENDENT APPROVED review' in f for f in fatal_plain),
+                            fatal_plain)
+            (fatal, notes), err = verify.verify(
+                path, oss_contract, oss_digest, repo='o/r',
+                unit_class='mutation', execute_nc=True, nc_command=self.proof_cmd)
+            self.assertIsNone(err)
+            self.assertEqual(fatal, [], fatal)
+            self.assertTrue(any('oss-contribute quiet PR (awaiting-maintainer-merge)' in n
+                                for n in notes), notes)
+            # Without --execute-nc, quiet oss-contribute PR fails closed:
+            (fatal_no_nc, _), _ = verify.verify(
+                path, oss_contract, oss_digest, repo='o/r',
+                unit_class='mutation', execute_nc=False)
+            self.assertTrue(any('no INDEPENDENT APPROVED review' in f for f in fatal_no_nc),
+                            fatal_no_nc)
+        # With an upstream CHANGES_REQUESTED veto, quiet oss-contribute PR fails closed:
+        veto = [{'user': {'login': 'upstream-maint'}, 'author_association': 'OWNER',
+                 'state': 'CHANGES_REQUESTED', 'commit_id': self.head_sha}]
+        with mock.patch.object(verify, 'fetch_reviews', return_value=(veto, None)):
+            (fatal_veto, _), _ = verify.verify(
+                path, oss_contract, oss_digest, repo='o/r',
+                unit_class='mutation', execute_nc=True, nc_command=self.proof_cmd)
+            self.assertTrue(any('no INDEPENDENT APPROVED review' in f for f in fatal_veto),
+                            fatal_veto)
+
+    def test_mutable_or_worktree_proof_executable_fails_closed_c19(self):
+        # #750 C19: a proof executable inside the repository worktree or one whose binary identity
+        # changes across phases must fail closed under --execute-nc.
+        wt_bin = self.repo / 'bin' / 'pytest'
+        wt_bin.parent.mkdir(parents=True, exist_ok=True)
+        wt_bin.write_text('#!/bin/sh\nexit 0\n', encoding='utf-8')
+        wt_bin.chmod(0o755)
+        recs, err = verify._Authority.nc_exec_identity([str(wt_bin)], str(self.repo))
+        self.assertIsNone(recs)
+        self.assertIn('resolves inside the repository worktree', err)
+        # Shell -c, env lookup/split bypasses, and group/world-writable binaries also fail closed:
+        recs_sh, err_sh = verify._Authority.nc_exec_identity(
+            ['env', 'FOO=1', 'sh', '-c', 'exit 1'], str(self.repo))
+        self.assertIsNone(recs_sh)
+        self.assertIn('shell -c', err_sh)
+        for bad_env_argv in (
+            ['env', 'PATH=./bin:/usr/bin:/bin', 'python3', 'test.py'],
+            ['env', 'LD_AUDIT=/tmp/audit.so', 'python3', 'proof.py'],
+            ['env', 'GLIBC_TUNABLES=glibc.rtld.audit=/tmp/audit.so', 'python3', 'proof.py'],
+            ['env', 'PYTHONSAFEPATH=1', sys.executable, '-m', 'runner'],
+            ['env', 'PYTHONPYCACHEPREFIX=/tmp/cache', sys.executable, 'proof.py'],
+            ['env', 'SHELLOPTS=keyword', 'bash', './proof.sh'],
+            ['bash', '-eo', 'keyword', '/tmp/external_proof.sh'],
+            ['node', 'inspect', '/tmp/external_proof.js'],
+            ['deno', 'run', '/tmp/external_proof.ts'],
+            ['env', '-S', 'sh -c true'],
+            ['env', '-i', 'python3', 'test.py'],
+            ['env', '-C', '/tmp', 'python3', 'test.py'],
+            ['env', '-u', 'PATH', 'python3', 'test.py'],
+            ['sh', 'proof.sh'],
+            ['sh', '/tmp/external_proof.sh'],
+            [sys.executable, '/tmp/external_proof.py'],
+            [sys.executable, '-W', 'ignore', '/tmp/external_proof.py'],
+            ['node', '--no-warnings', '/tmp/external_proof.js'],
+            ['pytest', '-c', '/tmp/external_pytest.ini'],
+            ['pytest', '-otestpaths=/opt/evil'],
+            ['pytest', '-opythonpath=/opt/evil'],
+            ['pytest', '-o', 'testpaths=/opt/evil'],
+            ['pytest', '-o', 'pythonpath=/opt/evil'],
+            ['pytest', '--override-ini=pythonpath=/opt/evil'],
+            [sys.executable, '-m', 'pytest', '-otestpaths=/opt/evil'],
+            [sys.executable, '-m', 'unittest', 'discover', '-s', '/opt/evil'],
+            ['grep', 'FIXED', '/opt/evil/app.py'],
+        ):
+            recs_bad, err_bad = verify._Authority.nc_exec_identity(bad_env_argv, str(self.repo))
+            self.assertIsNone(recs_bad, bad_env_argv)
+            self.assertIn('fail-closed', err_bad)
+        # Missing/untracked shell proof script `./missing.sh` fails closed before phase execution:
+        untracked_sh = self.repo / 'missing.sh'
+        untracked_sh.write_text('#!/bin/sh\nexit 1\n', encoding='utf-8')
+        m_untracked_sh = {
+            'base_sha': self.base_sha,
+            'head_sha': self.head_sha,
+            'negative_control': {
+                'tool': 'revert',
+                'paths': ['app.py'],
+                'command': 'sh ./missing.sh',
+            },
+        }
+        ok_ush, msgs_ush = verify.execute_negative_control(m_untracked_sh, 'sh ./missing.sh')
+        self.assertFalse(ok_ush, msgs_ush)
+        self.assertTrue(any('not a tracked regular file in head_sha' in x for x in msgs_ush), msgs_ush)
+        untracked_sh.unlink()
+        # Tracked regular shell proof script `sh ./proof.sh` and hidden `.ci/proof.sh` succeed across clean -> control -> clean:
+        self.write('proof.sh', f'#!/bin/sh\nexec {shlex.quote(sys.executable)} check.py\n')
+        self.write('.ci/proof.sh', f'#!/bin/sh\nexec {shlex.quote(sys.executable)} check.py\n')
+        sh_head = self.commit('add tracked proof.sh and .ci/proof.sh')
+        try:
+            m_tracked_sh = {
+                'base_sha': self.base_sha,
+                'head_sha': sh_head,
+                'negative_control': {
+                    'tool': 'revert',
+                    'paths': ['app.py'],
+                    'command': 'sh ./proof.sh',
+                },
+            }
+            ok_tsh, msgs_tsh = verify.execute_negative_control(m_tracked_sh, 'sh ./proof.sh')
+            self.assertTrue(ok_tsh, msgs_tsh)
+            for hid_cmd in ('sh .ci/proof.sh', 'sh ./.ci/proof.sh'):
+                m_hid_sh = {
+                    'base_sha': self.base_sha,
+                    'head_sha': sh_head,
+                    'negative_control': {
+                        'tool': 'revert',
+                        'paths': ['app.py'],
+                        'command': hid_cmd,
+                    },
+                }
+                ok_hsh, msgs_hsh = verify.execute_negative_control(m_hid_sh, hid_cmd)
+                self.assertTrue(ok_hsh, msgs_hsh)
+        finally:
+            self.git('reset', '--hard', self.head_sha)
+            shutil.rmtree(self.repo / '.ci', ignore_errors=True)
+        with tempfile.TemporaryDirectory() as ext_dir:
+            os.chmod(ext_dir, 0o755)
+            writable_bin = Path(ext_dir) / 'runner'
+            writable_bin.write_text('#!/bin/sh\nexit 0\n', encoding='utf-8')
+            writable_bin.chmod(0o777)
+            recs_w, err_w = verify._Authority.nc_exec_identity([str(writable_bin)], str(self.repo))
+            self.assertIsNone(recs_w)
+            self.assertIn('writable', err_w)
+
+        # Simulate executable digest replacement between clean and control phases:
+        path = self._manifest(nc=self._revert_nc())
+        real_id = verify._Authority.nc_exec_identity
+        calls = []
+        def tampered_id(argv, top=None, path_env=None, expected=None, when=None):
+            calls.append(when)
+            if when == 'before control':
+                return None, 'proof executable changed before control phase; fail-closed'
+            return real_id(argv, top, path_env, expected, when)
+        with mock.patch.object(verify._Authority, 'nc_exec_identity', side_effect=tampered_id):
+            (fatal, _), err = verify.verify(
+                path, self.contract, self.digest, repo='o/r',
+                unit_class='mutation', execute_nc=True, nc_command=self.proof_cmd)
+        self.assertIsNone(err)
+        self.assertTrue(any('proof executable changed before control phase' in f for f in fatal),
+                        fatal)
+
+    def test_versioned_pypy_unittest_discovery_and_shebang_interpreter_pinning(self):
+        self.write('checks/__init__.py', '')
+        self.write('checks/probe.py', 'import unittest\n')
+        probe_head = self.commit('add checks/probe.py')
+        try:
+            self.assertTrue(
+                verify._is_oracle_path(
+                    'checks/probe.py',
+                    nc_command='pypy3.11 -m unittest checks.probe',
+                    head=probe_head,
+                )
+            )
+            self.assertTrue(
+                verify._is_oracle_path(
+                    'checks/probe.py',
+                    nc_command='pypy-3.10 -m pytest checks/probe.py',
+                    head=probe_head,
+                )
+            )
+        finally:
+            self.git('reset', '--hard', self.head_sha)
+            shutil.rmtree(self.repo / 'checks', ignore_errors=True)
+
+        wt_interp = self.repo / 'bin' / 'local-interp'
+        wt_interp.parent.mkdir(parents=True, exist_ok=True)
+        wt_interp.write_text('#!/bin/sh\nexit 0\n', encoding='utf-8')
+        wt_interp.chmod(0o755)
+        try:
+            with tempfile.TemporaryDirectory() as ext_dir:
+                os.chmod(ext_dir, 0o755)
+                ext_root = Path(ext_dir)
+                bad_wrap = ext_root / 'wrap-repo-interp'
+                bad_wrap.write_text(f'#!{wt_interp}\nexit 0\n', encoding='utf-8')
+                bad_wrap.chmod(0o755)
+                recs_repo, err_repo = verify._Authority.nc_exec_identity([str(bad_wrap)], str(self.repo))
+                self.assertIsNone(recs_repo)
+                self.assertIn('resolves inside the repository worktree', err_repo)
+
+                ext_interp = ext_root / 'custom-interp'
+                ext_interp.write_text('#!/bin/sh\nexit 0\n', encoding='utf-8')
+                ext_interp.chmod(0o755)
+                good_wrap = ext_root / 'wrap-ext-interp'
+                good_wrap.write_text(f'#!{ext_interp}\nexit 0\n', encoding='utf-8')
+                good_wrap.chmod(0o755)
+                recs_init, err_init = verify._Authority.nc_exec_identity([str(good_wrap)], str(self.repo))
+                self.assertIsNone(err_init, err_init)
+                self.assertIsNotNone(recs_init)
+
+                ext_interp.write_text('#!/bin/sh\nexit 1\n', encoding='utf-8')
+                recs_after, err_after = verify._Authority.nc_exec_identity(
+                    [str(good_wrap)], str(self.repo), expected=recs_init, when='before control'
+                )
+                self.assertIsNone(recs_after)
+                self.assertIn('proof executable changed before control phase', err_after)
+
+                py_alias = ext_root / 'pycheck'
+                py_alias.symlink_to(sys.executable)
+                recs_alias, err_alias = verify._Authority.nc_exec_identity(
+                    [str(py_alias), 'tests/test_probe.py'], str(self.repo)
+                )
+                self.assertIsNone(recs_alias)
+                self.assertIn('via alias', err_alias)
+
+                env_bin = shutil.which('env')
+                if env_bin:
+                    rel_env_wrap = ext_root / 'wrap-rel-env'
+                    rel_env_wrap.write_text(f'#!{env_bin} usr/bin/sh\nexit 0\n', encoding='utf-8')
+                    rel_env_wrap.chmod(0o755)
+                    prev_cwd = os.getcwd()
+                    try:
+                        os.chdir('/')
+                        recs_rel_env, err_rel_env = verify._Authority.nc_exec_identity(
+                            [str(rel_env_wrap)], str(self.repo)
+                        )
+                        recs_rel_tok, err_rel_tok = verify._Authority.nc_exec_identity(
+                            ['usr/bin/sh', 'scripts/run.sh'], str(self.repo)
+                        )
+                    finally:
+                        os.chdir(prev_cwd)
+                    self.assertIsNone(recs_rel_env)
+                    self.assertIn('relative shebang env target', err_rel_env)
+                    self.assertIsNone(recs_rel_tok)
+                    self.assertIn("relative path containing '/'", err_rel_tok)
+        finally:
+            shutil.rmtree(self.repo / 'bin', ignore_errors=True)
 
 
 _edspec = importlib.util.spec_from_file_location("ed25519", ROOT / "runtime" / "scripts" / "ed25519.py")
@@ -3524,6 +3831,66 @@ class ProofOracleProtection(RepoCase):
                 self.assertFalse(any('worktree' in c.args[0] for c in run.call_args_list))
                 apply.assert_not_called()
 
+    def test_python_module_mode_rejects_untracked_or_flag_smuggling_runners_and_pins_repo_module(self):
+        py = shlex.quote(sys.executable)
+        for command in (
+            f'{py} -m timeit -n 1 -r 1 -s "exec(open(\'/tmp/external_proof.py\').read())" pass',
+            f'{py} -m pdb runner.py',
+            f'{py} -I -m runner',
+            f'{py} -m runner --eval-external',
+            f'{py} -m runner /tmp/external_proof.py',
+            f'{py} -m untracked_ghost_mod',
+        ):
+            with self.subTest(command=command):
+                self.cmd = command
+                m = self.manifest('revert')
+                m['negative_control']['paths'] = ['app.py']
+                with mock.patch.object(verify, '_apply_control') as apply:
+                    ok, errors = verify.execute_negative_control(m, command)
+                self.assertFalse(ok, errors)
+                self.assertTrue(
+                    any('unsupported proof command' in e or 'outside the staged commit' in e for e in errors),
+                    errors,
+                )
+                apply.assert_not_called()
+        # A tracked repo module that mutates itself during a phase also fails closed.
+        self.write(
+            'self_mutating_runner.py',
+            'from pathlib import Path\n'
+            'import app\n'
+            'Path("self_mutating_runner.py").write_text("# tampered\\n")\n'
+            'assert app.VALUE == 2\n',
+        )
+        self.write('app.py', 'VALUE = 1\n')
+        self.base = self.commit()
+        self.write('app.py', 'VALUE = 2\n')
+        self.head = self.commit()
+        self.cmd = f'{py} -m self_mutating_runner'
+        m = self.manifest('revert')
+        m['negative_control']['paths'] = ['app.py']
+        ok, errors = verify.execute_negative_control(m, self.cmd)
+        self.assertFalse(ok, errors)
+        self.assertTrue(any('self_mutating_runner.py' in e and 'changed during' in e for e in errors), errors)
+        # Parent package initializers (`harness/__init__.py`) are oracle inputs, never mutable production files.
+        self.write('harness/__init__.py', 'assert False, "broken startup"\n')
+        self.write(
+            'harness/probe.py',
+            'import app\n'
+            'assert app.VALUE == 2\n',
+        )
+        self.write('app.py', 'VALUE = 2\n')
+        self.base = self.commit()
+        self.write('harness/__init__.py', 'pass\n')
+        self.head = self.commit()
+        self.cmd = f'{py} -m harness.probe'
+        m_pkg = self.manifest('revert')
+        m_pkg['negative_control']['paths'] = ['harness/__init__.py']
+        self.assertIs(verify._is_oracle_path('harness/__init__.py', self.cmd, self.head), True)
+        ok_pkg, err_pkg = verify.execute_negative_control(m_pkg, self.cmd)
+        self.assertFalse(ok_pkg, err_pkg)
+        static_pkg_errs, _ = verify.check_negative_control(m_pkg, True, execute=False, nc_command=self.cmd)
+        self.assertTrue(static_pkg_errs, static_pkg_errs)
+
 
 
 class PerRunCaches(RepoCase):
@@ -4007,6 +4374,8 @@ class CrossRepoRoots(RepoCase):
         buf, errbuf = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(errbuf):
             try:
+                if "--execute-nc" not in extra and "--dispatch-record" not in extra:
+                    extra = (*extra, "--allow-static-nc")
                 rc = verify.main(["--manifest", path,
                                   "--contract-source", self.contract,
                                   "--contract-digest", self.contract_digest,
@@ -7214,6 +7583,21 @@ class SoundLaneNeverRunsAWorkerWritableGitleaks(RepoCase):
         with mock.patch.object(verify, "_run", return_value=(0, "", "")):
             errs = verify.check_redaction({"artifacts": [self.pin(art)]}, None)
         self.assertTrue(errs and "github-token" in errs[0], errs)
+
+    def test_built_in_floor_refuses_slack_tokens_when_gitleaks_absent_c7(self):
+        # #750 C7: exercise the built-in-floor Slack token pattern (xox[baprs]-[A-Za-z0-9-]{10,128})
+        # directly with gitleaks absent.
+        verify._Authority.gitleaks = None
+        verify._Authority.gitleaks_custody = "absent"
+        for prefix in ("xoxb", "xoxp", "xoxa", "xoxr", "xoxs"):
+            with self.subTest(prefix=prefix):
+                art = self.artifact(f"SLACK_TOKEN={prefix}-1234567890-abcdefGHIJ\n",
+                                    rel=f"docs/reports/u/slack-{prefix}.txt")
+                errs = verify.check_redaction({"artifacts": [self.pin(art)]}, None)
+                self.assertTrue(errs and "slack-token" in errs[0], errs)
+        # Below the 10-char suffix bound does not false-positive:
+        short_art = self.artifact("xoxb-12345\n", rel="docs/reports/u/slack-short.txt")
+        self.assertEqual(verify.check_redaction({"artifacts": [self.pin(short_art)]}, None), [])
 
     def test_a_system_gitleaks_and_the_advisory_lane_still_consult_it(self):
         for custody, lane in (("system", "provenance=ci"), ("worker-writable", None)):

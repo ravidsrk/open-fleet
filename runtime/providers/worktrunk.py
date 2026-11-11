@@ -47,7 +47,7 @@ from .base import (
     require_id,
 )
 from ._external import release_claim_on_failure
-from ._external import call_runner, foreign_dirty_paths, insert_dispatch, load_dispatch, preserve_worker_head, record_fence, run_cli_text, show_from_row
+from ._external import call_runner, foreign_dirty_paths, insert_dispatch, load_dispatch, local_worker_list, preserve_worker_head, record_fence, run_cli_text, show_from_row
 from .local_state import LocalStateStore
 
 def _is_placeholder_worktree(worktree: str | None) -> bool:
@@ -166,6 +166,16 @@ class WorktrunkProvider(RuntimeProvider):
         if not selector:
             # `wt remove` with no target removes the CURRENT worktree — never a default here.
             raise ProviderError("invalid_selector", "worktrunk worktree rm requires an explicit branch or path")
+        bound = self.state._worker_bound_run()
+        if bound:
+            sel_check = os.path.realpath(selector) if os.path.isabs(selector) else selector
+            with self.state._connect() as conn:
+                owned = conn.execute(
+                    "SELECT 1 FROM dispatches WHERE backend = ? AND (dispatch_id = ? OR worktree = ? OR worktree = ?) AND run_id = ? LIMIT 1",
+                    (self.name, selector, selector, sel_check, bound),
+                ).fetchone()
+            if owned is None:
+                raise ProviderError("cross_run_access", f"worktrunk worktree {selector!r} is not owned by run {bound!r}")
         argv = ["wt", "remove", str(selector), "--reap", "--foreground", "--format=json"]
         if force:
             argv.append("--force")
@@ -197,6 +207,15 @@ class WorktrunkProvider(RuntimeProvider):
 
     def predict_and_merge(self, branch: str, *, target: str | None = None, **kwargs: Any) -> dict[str, Any]:
         """Refuse a dirty worktree or a predicted conflict, else `wt merge` (squash+rebase, keeps the worktree)."""
+        bound = self.state._worker_bound_run()
+        if bound:
+            with self.state._connect() as conn:
+                owned = conn.execute(
+                    "SELECT 1 FROM dispatches WHERE backend = ? AND dispatch_id = ? AND run_id = ? LIMIT 1",
+                    (self.name, branch, bound),
+                ).fetchone()
+            if owned is None:
+                raise ProviderError("cross_run_access", f"worktrunk branch {branch!r} is not owned by run {bound!r}")
         items, _ = self._list_items()
         item = next((it for it in items if it["branch"] == branch), None)
         if item is None:
@@ -336,23 +355,7 @@ class WorktrunkProvider(RuntimeProvider):
         return res
 
     def worker_list(self, *, run: str | None = None, **kwargs: Any) -> dict[str, Any]:
-        with self.state._connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM dispatches WHERE backend = ? ORDER BY created_at ASC", (self.name,)
-            ).fetchall()
-        workers = [
-            {
-                "dispatchId": r["dispatch_id"],
-                "taskId": r["task_id"],
-                "state": r["state"],
-                "terminalState": r["terminal_state"],
-                "agentTerminalHandle": r["terminal_handle"],
-                "worktree": r["worktree"],
-            }
-            for r in rows
-            if not run or r["run_id"] == run
-        ]
-        return {"workers": workers}
+        return local_worker_list(self.state, self.name, run=run, **kwargs)
 
     def _session_alive(self, session: str) -> bool:
         try:
@@ -460,8 +463,8 @@ class WorktrunkProvider(RuntimeProvider):
     def task_list(self, **kwargs: Any) -> dict[str, Any]:
         return self.state.task_list(**kwargs)
 
-    def send_message(self, **kwargs: Any) -> dict[str, Any]:
-        return self.state.send_message(**kwargs)
+    def send_message(self, *, retry_request: str | None = None, **kwargs: Any) -> dict[str, Any]:
+        return self.state.send_message(retry_request=retry_request, **kwargs)
 
     def check_messages(self, **kwargs: Any) -> dict[str, Any]:
         return self.state.check_messages(**kwargs)

@@ -803,6 +803,7 @@ class StateAndLanesArePrivateToTheFleetUser(unittest.TestCase):
             self.assertEqual(mode(lane / "events.jsonl"), 0o600)
             pre = Path(tmp) / "pre"
             pre.mkdir(mode=0o755)
+            os.chmod(pre, 0o755)
             providers.get_provider("posix", env={**env, "OPEN_FLEET_STATE_DB": str(pre / "runtime.db")})
             self.assertEqual(mode(pre), 0o755, "an operator's existing directory keeps its mode")
 

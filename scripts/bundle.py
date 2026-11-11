@@ -161,16 +161,88 @@ PLUGIN_LISTING = {".claude-plugin/bundle-README.md": "README.md", ".claude-plugi
                   "LICENSE": "LICENSE", "THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md"}
 
 
+def _source_symlink(path, root=None):
+    """First symlink component along `path` relative to `root` (or `path` itself), or None."""
+    base = Path(os.path.normpath(root or ROOT))
+    norm = Path(os.path.normpath(path))
+    if os.path.islink(base):
+        return base.name or str(base)
+    try:
+        rel = norm.relative_to(base)
+    except ValueError:
+        return norm.as_posix() if os.path.islink(norm) else None
+    cur = base
+    for part in rel.parts:
+        cur = cur / part
+        if os.path.islink(cur):
+            return cur.relative_to(base).as_posix()
+    return None
+
+
+def _tree_symlinks(directory, root=None):
+    """Relative paths of any symlink at or under `directory` without following symlinks."""
+    base = Path(os.path.normpath(root or ROOT))
+    top = Path(os.path.normpath(directory))
+    anc = _source_symlink(top, base)
+    if anc:
+        return [anc]
+    if not top.is_dir():
+        return []
+    found = []
+    for dirpath, dirs, files in os.walk(top, followlinks=False):
+        dp = Path(dirpath)
+        for name in sorted(dirs + files):
+            candidate = dp / name
+            if os.path.islink(candidate):
+                try:
+                    found.append(candidate.relative_to(base).as_posix())
+                except ValueError:
+                    found.append(candidate.as_posix())
+    return found
+
+
 def missing_inputs(protocols):
     """Check declared requirements before discovered files can define the inventory."""
-    problems = [f"missing required source: {name}"
-                for name in (*REQUIRED_RUNTIME, *SUPPORT_DOCS, *PLUGIN_MANIFESTS, *PLUGIN_LISTING)
-                if not (ROOT / name).is_file()]
+    problems = []
+    seen_symlinks = set()
+
+    def flag_symlink(sym):
+        if sym and sym not in seen_symlinks:
+            seen_symlinks.add(sym)
+            problems.append(f"source symlink refused: {sym}")
+
+    for name in (*REQUIRED_RUNTIME, *SUPPORT_DOCS, *PLUGIN_MANIFESTS, *PLUGIN_LISTING):
+        sym = _source_symlink(ROOT / name)
+        if sym:
+            flag_symlink(sym)
+        elif not (ROOT / name).is_file():
+            problems.append(f"missing required source: {name}")
+    flag_symlink(_source_symlink(SKILLS_DIR))
+    if SKILLS_DIR.is_dir() and not os.path.islink(SKILLS_DIR):
+        for entry in sorted(SKILLS_DIR.iterdir()):
+            if entry.name.startswith((".", "_")):
+                continue
+            for sym in _tree_symlinks(entry):
+                flag_symlink(sym)
+    for tree in (ROOT / "playbooks", ROOT / "runtime"):
+        for sym in _tree_symlinks(tree):
+            flag_symlink(sym)
     for path in [*SKILLS_DIR.glob("*/SKILL.md"), *(ROOT / "playbooks").glob("*.md"),
                  *(ROOT / "runtime").glob("*.md")]:
+        if _source_symlink(path):
+            continue
         text = path.read_text(encoding="utf-8")  # never the locale's codec (2026-10-23 review)
         for name in sorted(validate.explicit_protocol_refs(text) - protocols):
             problems.append(f"{path.relative_to(ROOT)}: missing required protocol: {name}.md")
+        if path.parent.parent == SKILLS_DIR:
+            base = Path(os.path.normpath(ROOT))
+            for match in OUTBOUND_LINK_RE.finditer(text):
+                cand = Path(os.path.normpath(ROOT / match.group(1)))
+                try:
+                    cand.relative_to(base)
+                except ValueError:
+                    continue
+                flag_symlink(_source_symlink(cand))
     return problems
 
 
@@ -198,14 +270,15 @@ def protocol_docs(text, protocols):
 def root_docs(text):
     """{filename: source path} for every repo-root doc the SKILL.md links."""
     found = {}
+    base = Path(os.path.normpath(ROOT))
     for match in OUTBOUND_LINK_RE.finditer(text):
         target = match.group(1)
-        source = (ROOT / target).resolve()
+        source = Path(os.path.normpath(ROOT / target))
         try:
-            source.relative_to(ROOT)
+            source.relative_to(base)
         except ValueError:
             continue
-        if source.is_file():
+        if _source_symlink(source, base) is None and source.is_file() and not source.is_symlink():
             found[Path(target).name] = source
     return found
 
@@ -315,7 +388,8 @@ def reference_index(mission, names):
 def runtime_files():
     """Ship the runtime as one unit so lazy imports and shell helpers stay local."""
     return [path for path in sorted((ROOT / "runtime").rglob("*"))
-            if path.is_file() and path.suffix in {".py", ".sh", ".json"}
+            if _source_symlink(path) is None and path.is_file() and not path.is_symlink()
+            and path.suffix in {".py", ".sh", ".json"}
             and "__pycache__" not in path.parts]
 
 
@@ -1085,14 +1159,21 @@ def _build_into(out, missions, protocols, origin=None):
             copied.pop(relative, None)
 
     for source, relative in plugin_files():
+        sym = _source_symlink(source)
+        if sym:
+            continue
         destination = out / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
+        shutil.copy2(source, destination, follow_symlinks=False)
         copy(source, relative)
     skills_out = out / "skills"
     built, problems = 0, []
     for skill_dir in missions:
         skill_md = skill_dir / "SKILL.md"
+        sym = _source_symlink(skill_md)
+        if sym:
+            problems.append(f"source symlink refused: {sym}")
+            continue
         text = skill_md.read_text(encoding="utf-8")
         target = skills_out / skill_dir.name
         (target / REFERENCES).mkdir(parents=True, exist_ok=True)
@@ -1100,20 +1181,28 @@ def _build_into(out, missions, protocols, origin=None):
         for extra in skill_dir.iterdir():
             if extra.name == "SKILL.md":
                 continue
+            extra_syms = _tree_symlinks(extra)
+            if extra_syms:
+                problems.extend(f"source symlink refused: {s}" for s in extra_syms)
+                continue
             inventory.update(path.relative_to(skill_dir).as_posix()
                              for path in (extra.rglob("*") if extra.is_dir() else [extra])
-                             if path.is_file())
+                             if path.is_file() and not path.is_symlink())
             if extra.is_dir():
-                shutil.copytree(extra, target / extra.name, dirs_exist_ok=True)
+                shutil.copytree(extra, target / extra.name, symlinks=True, dirs_exist_ok=True)
             else:
-                shutil.copy2(extra, target / extra.name)
+                shutil.copy2(extra, target / extra.name, follow_symlinks=False)
             for path in (extra.rglob("*") if extra.is_dir() else [extra]):
-                if path.is_file():
+                if path.is_file() and not path.is_symlink():
                     copy(path, f"skills/{skill_dir.name}/{path.relative_to(skill_dir).as_posix()}")
         docs = protocol_docs(text, protocols)
         for name, source in docs.items():
+            sym = _source_symlink(source)
+            if sym:
+                problems.append(f"source symlink refused: {sym}")
+                continue
             inventory.add(f"{REFERENCES}/{name}.md")
-            shutil.copy2(source, target / REFERENCES / f"{name}.md")
+            shutil.copy2(source, target / REFERENCES / f"{name}.md", follow_symlinks=False)
             copy(source, f"skills/{skill_dir.name}/{REFERENCES}/{name}.md")
         if docs:
             inventory.add(f"{REFERENCES}/README.md")
@@ -1121,14 +1210,22 @@ def _build_into(out, missions, protocols, origin=None):
                 reference_index(skill_dir.name, sorted(docs)), encoding="utf-8"
             )
         for name, source in root_docs(text).items():
+            sym = _source_symlink(source)
+            if sym:
+                problems.append(f"source symlink refused: {sym}")
+                continue
             inventory.add(f"{REFERENCES}/{name}")
-            shutil.copy2(source, target / REFERENCES / name)
+            shutil.copy2(source, target / REFERENCES / name, follow_symlinks=False)
             copy(source, f"skills/{skill_dir.name}/{REFERENCES}/{name}")
         for source in [*runtime_files(), *(ROOT / name for name in SUPPORT_DOCS)]:
+            sym = _source_symlink(source)
+            if sym:
+                problems.append(f"source symlink refused: {sym}")
+                continue
             inventory.add(source.relative_to(ROOT).as_posix())
             destination = target / source.relative_to(ROOT)
             destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
+            shutil.copy2(source, destination, follow_symlinks=False)
             copy(source, f"skills/{skill_dir.name}/{source.relative_to(ROOT).as_posix()}")
         shipped = shipped_runtime(target)   # after the runtime copy: only what really shipped
         (target / "SKILL.md").write_text(

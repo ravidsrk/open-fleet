@@ -44,7 +44,7 @@ primary checkout), `reviewed-sha-freshness`, `ledger-contract`, `gate-classifica
 and the promotion are one-way doors), `sandbox-policy` (PROFILE=rw; secrets never land in
 scripts, userData, state, or commits). Worker TASK pack: one of matt | addy — never co-mount.
 
-DEFERRED READS, never at activation: liveness-resume.md on a stall or resume.
+DEFERRED READS, never at activation: liveness-resume.md on a stall or resume · merge-serialization.md + conductor-close.md at LAND.
 
 ## Terminal outcomes
 
@@ -90,7 +90,7 @@ BOOTSTRAP integration BASE (runtime/scripts/preflight.py --mission offload-it --
   provisionTranscript, fix the script, re-run to ok. Confirm separately that destroy really
   tears down (destroy:none means hand-cleanup, recorded, human-accepted).
 → PR against BASE (the integrator opens it; gitleaks-scanned) → build-blind REVIEW (acceptance-review:
-  no secret anywhere, destroy real) → LAND (the conductor merges to BASE, ancestry-verified)
+  no secret anywhere, destroy real) → LAND (conductor merges to BASE, ancestry-verified)
 → PROMOTE [ONE-WAY]: open the BASE→default promotion PR and stop — the composer reads recipes from
   the PRIMARY checkout, so Run-on appears only after the human merges it; never commit to default.
 → optional WORKSPACE-TEST [CHECKPOINT, only if asked, after that merge]: create via the picker,
@@ -106,17 +106,17 @@ authSourceSnapshotId it superseded; destroy enacted, not assumed; the PR merged 
 ancestry-verified, at its reviewed SHA. Negative control (evidence-manifest §1, executed per §2):
 revert the unit's orca.yaml recipe entry and the free doctor dry-run fails — the recipe id no longer
 resolves. The verifier re-runs that FREE dry-run and re-derives the transcript's resource ids through
-provider read-only verbs — it never re-provisions (a re-provision is a paid step, and paid steps are
-the human's).
+provider read-only verbs — it never re-provisions (re-provision is a paid step, and paid steps are the
+human's).
 
 ## Ledger + supervision
 
 Header at T0 per liveness-resume.md: `RUN · COORDINATOR · BASE · FORK_POINT · T0 · SOURCE · WIP` (SOURCE =
 provider + recipe id; WIP = 1 — snapshots are serial and paid); rows per ledger-contract.md. One row per
 recipe: `| task_id | recipe | INTERVIEW | SCAFFOLD | BASE_SNAP | AUTH_SNAP | WIRED | DOCTOR |
-PROVISION | destroy_tested | PR_OPEN | REVIEWED | MERGED | WT_CLEAN | lighting | park | evidence |`.
-Paid checkpoints, the interactive login, and the promotion PR are OPS-queue items with
-verify-complete observations; stalls → liveness-resume.md WATCH.
+PROVISION | destroy_tested | BUILD_DONE | PR_OPEN | BOT | REVIEWED | MERGED | WT_CLEAN | lighting | park | evidence |`.
+Paid checkpoints, interactive login, and promotion PR are OPS-queue items with verify-complete
+observations; stalls → liveness-resume.md WATCH.
 
 ## Anti-patterns
 
@@ -124,9 +124,9 @@ Picking a provider, region, plan, or scope for the human (asked, never invented)
 login on a headless box (device-auth or hang). Grep-for-logged-in (matches "not logged in").
 Snapshotting post-runtime state (every workspace from that image shares one pairing identity).
 Secrets in scripts, userData, state, comments, docs, or commits. Writing the recipe on the primary
-checkout or committing it to default (it reaches default only through the promotion PR). `provisioned-root` without an
-explicit ask (and then only direct SSH + schema 2). Treating `ok:true` with warns as clear.
-Bind-mounting a host agent home into the runtime (sqlite state and host config break there).
+checkout or committing to default (only through the promotion PR). `provisioned-root` without an
+explicit ask (only direct SSH + schema 2). Treating `ok:true` with warns as clear.
+Bind-mounting a host agent home into the runtime (sqlite state and host config break).
 
 ## Related
 

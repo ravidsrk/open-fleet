@@ -359,6 +359,55 @@ class GuidesMatchTheLoadSchedule(unittest.TestCase):
         missing = sorted(name for name, _ in _missions() if name not in rows)
         self.assertEqual(missing, [], f"docs/getting-started.md tooling table has no row for {missing}")
 
+    def test_every_mission_with_a_land_step_loads_merge_serialization(self):
+        # #750 C13: offload-it reached conductor-owned LAND without loading merge-serialization.
+        protocols = _protocol_names()
+        missing = []
+        for mission, text in _missions():
+            pipe = PIPELINE_RE.search(text)
+            if not pipe or not re.search(r"\bLAND\b", pipe.group(1)):
+                continue
+            body = _body(text)
+            loaded = composed(body, protocols) | deferred(body, protocols)
+            if "merge-serialization" not in loaded:
+                missing.append(mission)
+        self.assertEqual(missing, [],
+                         f"missions with a pipeline LAND step that never load merge-serialization: {missing}")
+
+    def test_research_brief_delegates_writes_past_ro_workers(self):
+        # #750 C14: PROFILE=ro workers cannot create or edit repository files; research-brief.md
+        # must route both the initial draft and the verification-leg updates through worker_done
+        # to the coordinator or a PROFILE=rw writer unit.
+        text = " ".join((PLAYBOOKS / "research-brief.md").read_text(encoding="utf-8").split())
+        self.assertIn("worker_done", text)
+        self.assertRegex(text, r"coordinator\s*\(or a (?:separate )?`PROFILE=rw` writer unit\)\s*(?:materializes|writes)")
+        self.assertRegex(text, r"coordinator\s*\(or a `PROFILE=rw` writer unit\)\s*records that verification leg")
+        self.assertRegex(text, r"no `PROFILE=ro` worker mutated the (?:repository )?tree")
+
+    def test_oss_contribute_contributed_ledger_states_are_well_formed_c16(self):
+        # #750 C16: oss-contribute and ledger-contract.md must agree that a live unparked PR with
+        # MERGED=f stays in FOLLOW UP, a quiet PR reaches terminal CONTRIBUTED via
+        # awaiting-maintainer-merge (MERGED=f, review.artifact at head_sha, --execute-nc), and a
+        # posted review-assist closes with BUILD_DONE..MERGED=n/a, FOLLOWED_UP,WT_CLEAN=t,
+        # park=externally-covered.
+        skill = " ".join((SKILLS / "oss-contribute" / "SKILL.md").read_text(encoding="utf-8").split())
+        ledger = " ".join((RUNTIME / "ledger-contract.md").read_text(encoding="utf-8").split())
+        self.assertIn("`MERGED=f` + empty `park` stays in FOLLOW UP", skill)
+        self.assertIn("`awaiting-maintainer-merge` (`MERGED=f`, `review.artifact` at `head_sha`, `--execute-nc`)", skill)
+        self.assertIn("`BUILD_DONE..MERGED=n/a`, `FOLLOWED_UP,WT_CLEAN=t`, `park=externally-covered`", skill)
+        self.assertIn("live unparked `MERGED=f` stays in FOLLOW UP", ledger)
+        self.assertIn("`BUILD_DONE..MERGED=n/a`, `FOLLOWED_UP,WT_CLEAN=t`", ledger)
+
+    def test_threat_model_states_dispatch_signing_is_opt_in_and_dormant_by_default(self):
+        # #750 C25: threat-model.md must not claim every unit is signed unconditionally while
+        # verify.py and current mission/playbook usage leave dispatch signing dormant unless a
+        # pubkey is pinned or passed.
+        text = " ".join((RUNTIME / "threat-model.md").read_text(encoding="utf-8").split())
+        self.assertNotIn("the coordinator signs each unit's contract digest", text)
+        self.assertIn("opt-in", text)
+        self.assertIn(".orca/dispatch-pubkey", text)
+        self.assertIn("dormant by default", text)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

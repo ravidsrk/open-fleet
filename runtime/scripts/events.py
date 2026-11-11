@@ -352,6 +352,12 @@ def build_event(kind, run, *, epoch, producer, clock, observed_at, basis="observ
 
 # ---------------------------------------------------------------------------- the record
 
+def _raw_lines(text):
+    if not text:
+        return []
+    return text[:-1].split("\n") if text.endswith("\n") else text.split("\n")
+
+
 def append_events(path, events):
     """Append each event the record does not already hold. [(event_id, status)], status
     appended | duplicate (same id, same body: skipped) | conflict (same id, different body:
@@ -365,7 +371,10 @@ def append_events(path, events):
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
             fh.seek(0)
             text = fh.read()
-            lines = [ln for ln in text.split("\n") if ln]
+            lines = _raw_lines(text)
+            for lineno, raw in enumerate(lines, 1):
+                if not raw or raw != raw.strip():
+                    raise EventsError(f"{path}:{lineno}: blank or padded line in event record")
             if text and not text.endswith("\n"):
                 # The reader accepts a last line with no newline; appending after it would glue
                 # two objects onto one line. Ending it changes no raw line, so no link moves
@@ -417,7 +426,9 @@ def read_log(path):
     except UnicodeDecodeError as err:
         raise EventsError(f"{path} is not valid UTF-8: {err}") from err
     events, previous = [], None
-    for lineno, raw in enumerate([ln for ln in text.split("\n") if ln], 1):
+    for lineno, raw in enumerate(_raw_lines(text), 1):
+        if not raw or raw != raw.strip():
+            raise EventsError(f"{path}:{lineno}: unparseable line or missing prev")
         try:
             record = json.loads(raw)
         except ValueError:
@@ -515,30 +526,37 @@ def _scope(event):
     return ("unit", event["task"])
 
 
-def screen(events):
+def screen(events, all_events=None):
     """Dedup, then fence, in record order. Returns (kept, duplicates, conflicts, fenced, epochs,
     taints, excluded) where taints maps a scope to the reasons its metrics are unavailable and
     excluded holds every event left out as a conflicting copy or a fenced write."""
     by_id, kept, duplicates, conflicts, taints, excluded = {}, [], 0, [], {}, []
+    in_run = {id(e) for e in events}
 
     def taint(event, why):
         taints.setdefault(_scope(event), []).append(why)
 
-    for event in events:
+    for event in (all_events if all_events is not None else events):
         seen = by_id.get(event["event_id"])
         if seen is None:
             by_id[event["event_id"]] = event
-            kept.append(event)
+            if id(event) in in_run:
+                kept.append(event)
         elif identity(seen) == identity(event):
-            duplicates += 1
-        else:
+            if id(event) in in_run:
+                duplicates += 1
+        elif id(seen) in in_run or id(event) in in_run:
             conflicts.append({"event_id": event["event_id"], "kept": seen["_digest"],
                               "conflicting": event["_digest"]})
             why = (f"event_id {event['event_id']} delivered twice with different bodies "
                    "(contested observation)")
-            taint(seen, why)
-            taint(event, why)
-            excluded.append(event)
+            if id(seen) in in_run:
+                taint(seen, why)
+            if id(event) in in_run:
+                taint(event, why)
+                excluded.append(event)
+            if seen.get("run") != event.get("run"):
+                taints.setdefault(("run",), []).append(why)
     declared, screened, fenced, epochs = 0, [], [], []
     for event in kept:
         if event["kind"] in DECLARES_EPOCH:
@@ -1025,7 +1043,7 @@ def derive(events, run=None, file_sha="", head=""):
     mine = [e for e in events if e["run"] == run]
     if not mine:
         raise UsageError(f"the record holds no event for run {run!r} (runs: {runs})")
-    kept, duplicates, conflicts, fenced, epochs, taints, excluded = screen(mine)
+    kept, duplicates, conflicts, fenced, epochs, taints, excluded = screen(mine, events)
     if not epochs:
         taints.setdefault(("run",), []).append("no run.start observed, so no coordinator "
                                                "epoch was ever declared")
@@ -1349,6 +1367,9 @@ def cmd_ingest_state(args):
             continue
         row, row_head = match
         attrs = _attrs(msg)
+        if attrs.get("dispatchUnbound") is True:
+            earlier.append(msg["id"])
+            continue
         named = next((attrs[k] for k in ("task-id", "task_id", "taskId")
                       if isinstance(attrs.get(k), str)), None)
         # Mail naming another task, or (naming none) older than the row it names, came from an

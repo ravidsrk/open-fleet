@@ -11,12 +11,14 @@ from __future__ import annotations
 import importlib.util
 import hashlib
 import json
+import shutil
 import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -350,6 +352,25 @@ class GateSelection(QueueCase):
         self.assertEqual(ran.read_text().splitlines(), ["ran"], "a passed gate ran again for the same prefix")
         self.assertEqual(len(self.w.merge_log()), 1)
 
+    def test_a_saved_plan_whose_gate_executable_was_replaced_is_not_reused_c19(self):
+        bin_dir = self.w.tmp / "gate-bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        tool = bin_dir / "gate-check"
+        tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        tool.chmod(0o755)
+        self.w.env["PATH"] = f"{bin_dir}:{self.w.env.get('PATH', '/usr/bin:/bin')}"
+
+        token, entry = self._plan("--gate-cmd", "gate-check")
+        # Now replace the gate executable on PATH so it exits 1
+        tool.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        tool.chmod(0o755)
+        rc, out = self.w.cli("merge", "--token", token, "--require-gate", "gate-check")
+        self.assertEqual((rc, out.get("code")), (1, "gate_not_run"), out)
+        self.w.cli("release", "--token", token)
+        rc, out = self.w.cli("drain", "--base", W.BASE, "--holder", "c1", "--gate-cmd", "gate-check", "--ack")
+        self.assertEqual((rc, out.get("code")), (1, "queue_frozen"), out)
+        self.assertEqual(self.state_of(entry), "failed")
+
     def test_merge_refuses_a_plan_that_did_not_pass_the_required_gate(self):
         token, entry = self._plan()
         rc, out = self.w.cli("merge", "--token", token, "--require-gate", "true")
@@ -500,6 +521,805 @@ class GateRunsIsolated(QueueCase):
         self.assertNotIn("worktrees", common)
         self.assertEqual(self.w.git(self.w.conductor, "worktree", "list").count("\n") + 1, 1,
                          "a gate worktree was left in the conductor's clone")
+
+    def test_the_gate_has_no_alternates_no_origin_remote_and_isolated_home_and_tmp_c21(self):
+        conductor_home = self.w.tmp / "conductor-home"
+        conductor_home.mkdir(parents=True, exist_ok=True)
+        (conductor_home / ".netrc").write_text("machine github.invalid login secret\n", encoding="utf-8")
+        self.w.env["HOME"] = str(conductor_home)
+        self.w.env["TMPDIR"] = str(self.w.tmp)
+        self.w.env["GH_TOKEN"] = "ghp_SENTINEL"
+        self.w.env["MQ_GATE_ENV_KEEP"] = "GH_TOKEN,HOME,TMPDIR,ORCA_MERGE_QUEUE_DB,SAFE_VAR"
+        self.w.env["SAFE_VAR"] = "allowed"
+        tail = self._gate_tail(
+            'test ! -e .git/objects/info/alternates && echo "alt=absent"; '
+            'git remote get-url origin >/dev/null 2>&1 || echo "origin=absent"; '
+            'test ! -e "$HOME/.netrc" && echo "netrc=absent"; '
+            'echo "home=$HOME tmp=$TMPDIR gh=[$GH_TOKEN] safe=[$SAFE_VAR]"'
+        )
+        self.assertIn("alt=absent", tail)
+        self.assertIn("origin=absent", tail)
+        self.assertIn("netrc=absent", tail)
+        self.assertIn("gh=[] safe=[allowed]", tail)
+        self.assertNotIn(str(conductor_home), tail)
+        self.assertNotIn(str(self.w.conductor), tail)
+
+    def test_gate_ppid_environ_and_require_sandbox_and_shell_wrapper_fingerprint_c19_c21(self):
+        self.w.env["GH_TOKEN"] = "ghp_PPID_SENTINEL_SECRET"
+        tail = self._gate_tail(
+            'if [ -r "/proc/$PPID/environ" ]; then '
+            'tr "\\0" "\\n" < "/proc/$PPID/environ" | grep -q "ghp_PPID_SENTINEL_SECRET" '
+            '&& echo "ppid=LEAKED" || echo "ppid=clean"; '
+            'else echo "ppid=clean"; fi'
+        )
+        self.assertIn("ppid=clean", tail)
+        # Subshell, compound (if/then/while/case), and sh -c wrapper executables are extracted:
+        exes = mq_mod.MergeQueue._extract_gate_executables(
+            '(sh -c "env FOO=1 ./scripts/gate.sh && nice -n 5 pytest"); '
+            'if true; then /opt/tools/compound-gate; fi; '
+            'for x in /not/an/exe; do ./loop-gate "$x"; done'
+        )
+        self.assertIn("./scripts/gate.sh", exes)
+        self.assertIn("pytest", exes)
+        self.assertIn("/opt/tools/compound-gate", exes)
+        self.assertIn("./loop-gate", exes)
+        self.assertNotIn("/not/an/exe", exes)
+        # Replacing an executable inside `if true; then <bin>; fi` after `plan` invalidates `merge --require-gate`:
+        ext_bin = self.w.tmp / "bin" / "compound-gate-bin"
+        ext_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        ext_bin.chmod(0o755)
+        compound_cmd = f"if true; then {ext_bin}; fi"
+        tok_cmp = self.acquire("c-cmp", "--takeover")
+        self.board(tok_cmp, self.w.unit("cmp-unit"))
+        rc_p, out_p = self.w.cli("plan", "--token", tok_cmp, "--gate-cmd", compound_cmd)
+        self.assertEqual(rc_p, 0, out_p)
+        ext_bin.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        ext_bin.chmod(0o755)
+        rc_m, out_m = self.w.cli("merge", "--token", tok_cmp, "--require-gate", compound_cmd)
+        self.assertNotEqual(rc_m, 0, out_m)
+        self.assertEqual(out_m.get("code"), "gate_not_run", out_m)
+        # Replacing a `sh <script>` operand after `plan` invalidates `merge --require-gate`:
+        ext_sh = self.w.tmp / "bin" / "gate-operand.sh"
+        ext_sh.write_text("exit 0\n", encoding="utf-8")
+        sh_operand_cmd = f"sh {ext_sh}"
+        tok_sh = self.acquire("c-sh-op", "--takeover")
+        self.board(tok_sh, self.w.unit("sh-op-unit"))
+        rc_sp, out_sp = self.w.cli("plan", "--token", tok_sh, "--gate-cmd", sh_operand_cmd)
+        self.assertEqual(rc_sp, 0, out_sp)
+        self.assertEqual(out_sp["planned"][0]["result"], "tested", out_sp)
+        ext_sh.write_text("exit 1\n", encoding="utf-8")
+        rc_sm, out_sm = self.w.cli("merge", "--token", tok_sh, "--require-gate", sh_operand_cmd)
+        self.assertNotEqual(rc_sm, 0, out_sm)
+        self.assertEqual(out_sm.get("code"), "gate_not_run", out_sm)
+        # Replacing a `python3 <script>` operand after `plan` also invalidates `merge --require-gate`:
+        ext_py = self.w.tmp / "bin" / "gate-operand.py"
+        ext_py.write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
+        py_operand_cmd = f"{sys.executable} -s {ext_py}"
+        tok_py = self.acquire("c-py-op", "--takeover")
+        self.board(tok_py, self.w.unit("py-op-unit"))
+        rc_pp, out_pp = self.w.cli("plan", "--token", tok_py, "--gate-cmd", py_operand_cmd)
+        self.assertEqual(rc_pp, 0, out_pp)
+        self.assertEqual(out_pp["planned"][0]["result"], "tested", out_pp)
+        ext_py.write_text("import sys\nsys.exit(1)\n", encoding="utf-8")
+        rc_pm, out_pm = self.w.cli("merge", "--token", tok_py, "--require-gate", py_operand_cmd)
+        self.assertNotEqual(rc_pm, 0, out_pm)
+        self.assertEqual(out_pm.get("code"), "gate_not_run", out_pm)
+        # Line continuations (`\\\n`) and `sed -e '' -f <script>` extract the real executable/script:
+        self.assertIn("gate-check", mq_mod.MergeQueue._extract_gate_executables("gat\\\ne-check"))
+        ext_sed = self.w.tmp / "bin" / "gate-operand.sed"
+        ext_sed.write_text("q\n", encoding="utf-8")
+        sed_exes, _, sed_probs = mq_mod.MergeQueue._analyze_gate_command(f"sed -e '' -f {ext_sed} /dev/null")
+        self.assertFalse(sed_probs, sed_probs)
+        self.assertIn(str(ext_sed), sed_exes)
+        # Wrapped builtin-named binaries (`env test`, `nice echo`, `exec test`) execute via PATH and are fingerprinted:
+        self.assertEqual(mq_mod.MergeQueue._extract_gate_executables("env test -f marker"), ["env", "test"])
+        self.assertEqual(mq_mod.MergeQueue._extract_gate_executables("nice -n 5 echo ok"), ["nice", "echo"])
+        self.assertEqual(mq_mod.MergeQueue._extract_gate_executables("exec test -f marker"), ["test"])
+        ext_test = self.w.tmp / "bin" / "test"
+        ext_test.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        ext_test.chmod(0o755)
+        try:
+            tok_et = self.acquire("c-env-test", "--takeover")
+            self.board(tok_et, self.w.unit("env-test-unit"))
+            rc_etp, out_etp = self.w.cli("plan", "--token", tok_et, "--gate-cmd", "env test -f anything")
+            self.assertEqual(rc_etp, 0, out_etp)
+            self.assertEqual(out_etp["planned"][0]["result"], "tested", out_etp)
+            ext_test.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            rc_etm, out_etm = self.w.cli("merge", "--token", tok_et, "--require-gate", "env test -f anything")
+            self.assertNotEqual(rc_etm, 0, out_etm)
+            self.assertEqual(out_etm.get("code"), "gate_not_run", out_etm)
+        finally:
+            ext_test.unlink(missing_ok=True)
+        # Unresolved executable names fail closed in `_gate_fingerprint`:
+        unres_fp, unres_probs = self.w.queue()._gate_fingerprint("nonexistent_gate_binary_xyz")
+        self.assertEqual(unres_fp, "")
+        self.assertTrue(unres_probs)
+        # `bwrap` argv never `--ro-bind`s `/` or conductor `$HOME` (even through a PATH symlink):
+        q_bw = self.w.queue()
+        fake_home = self.w.tmp / "fake-home"
+        (fake_home / "bin").mkdir(parents=True, exist_ok=True)
+        (fake_home / ".ssh").mkdir(parents=True, exist_ok=True)
+        sym_home = fake_home / "symbin"
+        sym_home.symlink_to(fake_home)
+        sym_ssh = fake_home / "sshbin"
+        sym_ssh.symlink_to(fake_home / ".ssh")
+        q_bw.env.pop("MQ_GATE_SANDBOX_CMD", None)
+        q_bw.env["HOME"] = str(fake_home)
+        q_bw.env["PATH"] = f"{fake_home / 'bin'}:{sym_home}:{sym_ssh}:/usr/bin:/bin"
+        with unittest.mock.patch.object(
+            type(q_bw), "_bwrap_mode", return_value=("/usr/bin/bwrap", ("--unshare-all",))
+        ):
+            bw_argv = q_bw._gate_exec_argv("true", self.w.tmp / "co", self.w.tmp / "gh", self.w.tmp / "gt")
+        ro_srcs = [bw_argv[i + 1] for i, v in enumerate(bw_argv) if v == "--ro-bind"]
+        self.assertNotIn("/", ro_srcs)
+        self.assertNotIn(str(fake_home), ro_srcs)
+        self.assertNotIn(str(sym_home), ro_srcs)
+        self.assertNotIn(str(sym_ssh), ro_srcs)
+        self.assertIn(str(fake_home / "bin"), ro_srcs)
+        # Protected directories beneath `/opt` (or any `_BWRAP_SYS_DIRS` root) are never wholesale `--ro-bind`ed:
+        q_bw.env["HOME"] = "/opt/conductor"
+        with unittest.mock.patch.object(
+            type(q_bw), "_bwrap_mode", return_value=("/usr/bin/bwrap", ("--unshare-all",))
+        ):
+            opt_argv = q_bw._gate_exec_argv("true", self.w.tmp / "co", self.w.tmp / "gh", self.w.tmp / "gt")
+        opt_ro_srcs = [opt_argv[i + 1] for i, v in enumerate(opt_argv) if v == "--ro-bind"]
+        self.assertNotIn("/opt", opt_ro_srcs)
+        self.assertNotIn("/opt/conductor", opt_ro_srcs)
+        fake_opt = self.w.tmp / "fake-opt"
+        (fake_opt / "conductor" / ".config" / "gh").mkdir(parents=True, exist_ok=True)
+        (fake_opt / "conductor" / ".config" / "gh" / "hosts.yml").write_text("oauth_token: secret\n", encoding="utf-8")
+        (fake_opt / "gh-creds").mkdir(parents=True, exist_ok=True)
+        (fake_opt / "toolchain" / "bin").mkdir(parents=True, exist_ok=True)
+        (fake_opt / "leak-link").symlink_to(fake_opt / "conductor")
+        q_bw.env["HOME"] = str(fake_opt / "conductor")
+        q_bw.env["GH_CONFIG_DIR"] = str(fake_opt / "gh-creds")
+        with (
+            unittest.mock.patch.object(
+                type(q_bw), "_bwrap_mode", return_value=("/usr/bin/bwrap", ("--unshare-all",))
+            ),
+            unittest.mock.patch.object(
+                type(q_bw), "_BWRAP_SYS_DIRS", (*type(q_bw)._BWRAP_SYS_DIRS, str(fake_opt))
+            ),
+        ):
+            fopt_argv = q_bw._gate_exec_argv("true", self.w.tmp / "co", self.w.tmp / "gh", self.w.tmp / "gt")
+        fopt_ro_srcs = [fopt_argv[i + 1] for i, v in enumerate(fopt_argv) if v == "--ro-bind"]
+        self.assertNotIn(str(fake_opt), fopt_ro_srcs)
+        self.assertNotIn(str(fake_opt / "conductor"), fopt_ro_srcs)
+        self.assertNotIn(str(fake_opt / "gh-creds"), fopt_ro_srcs)
+        self.assertNotIn(str(fake_opt / "leak-link"), fopt_ro_srcs)
+        self.assertIn(str(fake_opt / "toolchain"), fopt_ro_srcs)
+        q_bw.env.pop("GH_CONFIG_DIR", None)
+        # Dynamic command words (`eval`) and lookup-mutating forms (`PATH=`, `env PATH=`, `env -C`, `cd`, `command -p`) fail closed:
+        for unsafe_gate in (
+            "eval /bin/true",
+            "PATH=/opt/alternate/bin gate-check",
+            'PATH="/opt/alternate/bin" gate-check',
+            "env PATH=/opt/alternate/bin gate-check",
+            "env 'PATH=/opt/alternate/bin' gate-check",
+            "env -C /tmp ./gate-check",
+            "env -i gate-check",
+            "env -u PATH gate-check",
+            "env -S nice /opt/gate-check",
+            "env --split-string='sh -c true' /opt/gate-check",
+            "cd subdir && ./gate-check",
+            "export PATH=/opt/alternate/bin; gate-check",
+            "for PATH in /opt/alternate/bin; do gate-check; done",
+            "declare -n ref=PATH; ref=/opt/alternate/bin",
+            "command -p python3 -V",
+            "exec -c gate-check",
+            "sh bare_script.sh",
+            "sh -s",
+            ". bare_script.sh",
+            "[g]ate-check",
+            "D='1 /opt/tools/proof'; timeout $D true",
+            "K='5 /opt/tools/proof'; timeout -k $K 10 true",
+            "N='0 /opt/tools/proof'; nice -n $N true",
+            "A='name /opt/tools/proof'; exec -a $A true",
+            "X='1 /opt/tools/proof'; env FOO=$X true",
+            "bash -c 'env {FOO=1,/opt/gate/proof}'",
+            "bash -c 'env {FOO=1,PATH=/opt/gate/bin} true'",
+            "bash -c 'timeout {1,/opt/gate/proof} /bin/true'",
+            "bash -c '{/bin/true,/opt/gate/proof}'",
+            "sed --file=~/evil.sed input.txt",
+            "F=-exec; find . $F /opt/gate/proof \\;",
+            "ruby -v /tmp/evil.rb",
+            "python3 -c 'import os'",
+            "python3 -uc 'open(\"/opt/gates/check.py\").read()'",
+            "python3 -m timeit -n 1 pass",
+            "python3 -I -m gate_mod",
+            "python3 -P -m gate_mod",
+            "python3 -X safe_path -m gate_mod",
+            "python3 -Xsafe_path=1 -m gate_mod",
+            "python3 -X pycache_prefix=/opt/gates -m gate_mod",
+            "python3 -W ignore::ext_pkg.Warn script.py",
+            "node -e 'process.exit(0)'",
+            "deno eval 'Deno.exit(0)'",
+            "bun exec 'exit 0'",
+            "perl -e '1'",
+            "awk 'BEGIN {exit system(\"/opt/gates/check\")}'",
+            "gawk -e 'BEGIN {exit system(\"/opt/gates/check\")}'",
+            "sed 'e /opt/gates/check' /dev/null",
+            "sed -e 's/.*/x/e' /dev/null",
+            "env SHELLOPTS=keyword bash -c 'gate-check PATH=/opt/alternate/bin'",
+            "SHELLOPTS=keyword bash -c 'gate-check PATH=/opt/alternate/bin'",
+            "PYTHONSAFEPATH=1 python3 -m gate_mod",
+            "env PYTHONWARNINGS=ignore::ext_pkg.Warn python3 ./script.py",
+            "AWKPATH=/opt/gates awk -f check.awk /dev/null",
+        ):
+            _, _, dyn_probs = mq_mod.MergeQueue._analyze_gate_command(unsafe_gate)
+            self.assertTrue(dyn_probs, f"expected fail-closed problem on {unsafe_gate!r}")
+        tok_path = self.acquire("c-path", "--takeover")
+        self.board(tok_path, self.w.unit("path-unit"))
+        rc_path, out_path = self.w.cli("plan", "--token", tok_path, "--gate-cmd", "PATH=/opt/alternate/bin true")
+        self.assertEqual(rc_path, 0, out_path)
+        self.assertEqual(out_path["planned"][0]["result"], "fail", out_path)
+        self.assertEqual(out_path["planned"][0]["reason"], "gate_failed", out_path)
+        self.assertEqual(out_path["planned"][0]["gate"]["fingerprint"], "", out_path)
+        # Resolve frozen failed entry so subsequent tests in this method can plan cleanly:
+        self.w.cli(
+            "resolve", "--token", tok_path, "--entry", out_path["planned"][0]["entry"],
+            "--action", "drop", "--reason", "lookup-test",
+        )
+        # When MQ_REQUIRE_GATE_SANDBOX=1 and no sandbox binary/command is usable, fail closed:
+        if mq_mod.MergeQueue._bwrap_bin() is None:
+            token = self.acquire("c2", "--takeover")
+            self.board(token, self.w.unit("beta"))
+            saved_sbx = self.w.env.pop("MQ_GATE_SANDBOX_CMD", None)
+            self.w.env["MQ_REQUIRE_GATE_SANDBOX"] = "1"
+            try:
+                rc, out = self.w.cli("plan", "--token", token, "--gate-cmd", "true")
+            finally:
+                self.w.env.pop("MQ_REQUIRE_GATE_SANDBOX", None)
+                if saved_sbx is not None:
+                    self.w.env["MQ_GATE_SANDBOX_CMD"] = saved_sbx
+            self.assertNotEqual(rc, 0, out)
+            self.assertEqual(out.get("code"), "sandbox_unavailable", out)
+        # Even without MQ_REQUIRE_GATE_SANDBOX, absence of filesystem-isolating bwrap/MQ_GATE_SANDBOX_CMD fails closed:
+        q = self.w.queue()
+        q.env.pop("MQ_GATE_SANDBOX_CMD", None)
+        q.env.pop("MQ_REQUIRE_GATE_SANDBOX", None)
+        q_cls = type(q)
+        with unittest.mock.patch.object(q_cls, "_bwrap_mode", return_value=None):
+            self.assertFalse(q_cls._has_native_gate_isolation())
+            with self.assertRaises(Exception) as ctx_sbx:
+                q._gate_exec_argv("true", self.w.tmp, self.w.tmp, self.w.tmp)
+            self.assertEqual(getattr(ctx_sbx.exception, "code", None), "sandbox_unavailable")
+
+    def test_hidden_relative_gate_scripts_preserve_leading_dots(self):
+        ext_hidden_bin = self.w.tmp / "bin" / "hidden-gate-check"
+        ext_hidden_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        ext_hidden_bin.chmod(0o755)
+        (self.w.worker / ".ci").mkdir(parents=True, exist_ok=True)
+        (self.w.worker / "ci").mkdir(parents=True, exist_ok=True)
+        hidden_unit = self.w.unit(
+            "hidden-gate-unit",
+            files={
+                ".ci/gate.sh": f"{ext_hidden_bin}\n",
+                "ci/gate.sh": "true\n",
+                ".ci/only.sh": "true\n",
+            },
+        )
+        tok = self.acquire("c-hidden")
+        self.board(tok, hidden_unit)
+        for gate_cmd in ("sh .ci/only.sh", "sh ./.ci/only.sh"):
+            rc_ho, out_ho = self.w.cli("plan", "--token", tok, "--gate-cmd", gate_cmd)
+            self.assertEqual(rc_ho, 0, out_ho)
+            self.assertEqual(out_ho["planned"][0]["result"], "tested", out_ho)
+        rc_hp, out_hp = self.w.cli("plan", "--token", tok, "--gate-cmd", "sh .ci/gate.sh")
+        self.assertEqual(rc_hp, 0, out_hp)
+        self.assertEqual(out_hp["planned"][0]["result"], "tested", out_hp)
+        ext_hidden_bin.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        rc_hm, out_hm = self.w.cli("merge", "--token", tok, "--require-gate", "sh .ci/gate.sh")
+        self.assertNotEqual(rc_hm, 0, out_hm)
+        self.assertEqual(out_hm.get("code"), "gate_not_run", out_hm)
+
+    def test_arithmetic_expansion_and_comment_quote_substitutions_fingerprint_or_fail_closed(self):
+        probe = self.w.tmp / "bin" / "arith-probe"
+        probe.write_text("#!/bin/sh\necho 0\n", encoding="utf-8")
+        probe.chmod(0o755)
+        gate_cmd = f"(exit $(( $({probe}) )))"
+        exes, _, probs = mq_mod.MergeQueue._analyze_gate_command(gate_cmd)
+        self.assertEqual(probs, [])
+        self.assertIn(str(probe), exes)
+        for sub_form in (
+            f"(exit $(( `{probe}` )))",
+            f"test $(( 1 + $({probe}) )) -eq 1",
+            f"echo $(({probe}); true)",
+            f"true # '\necho $({probe}) # '",
+            f"echo $(case x in (x) {probe} ;; esac)",
+            f'echo "${{FOO:-$({probe})}}"',
+        ):
+            sub_exes, _, sub_probs = mq_mod.MergeQueue._analyze_gate_command(sub_form)
+            self.assertEqual(sub_probs, [], sub_form)
+            self.assertIn(str(probe), sub_exes, sub_form)
+        for unsafe_form in (
+            "runner$((1+1))",
+            f"echo $'\\'' $({probe}) $'\\''",
+            ': "${PYTHONPATH:=/tmp}"',
+            ': "${PATH[0]:=/opt/proofs/bin}"',
+            "bash -c 'test \"${1@P}\" = 0' _ '$(/opt/proofs/check)'",
+            "bash -c 'x=\"BASH_VERSINFO[\\$(/opt/probe)]\"; : \"${#BASH_VERSINFO[x]}\"'",
+            "bash -c ': \"${| /opt/probe; }\"'",
+            ': "${x:-"\'"}" ; /opt/probe ; : "\'"',
+            "echo $( : ${x:-)} ; /opt/probe )",
+            "bash -c 'x=\"a[\\$(/opt/probe)]\"; test -v \"$x\"'",
+            "bash -c 'x=\"a[\\$(/opt/probe)]\"; [ -v \"$x\" ]'",
+            "bash -c 'x=\"a[\\$(/opt/probe)]\"; [[ -v $x ]]'",
+            "bash -c 'op=-v; x=\"a[\\$(/opt/probe)]\"; test \"$op\" \"$x\"'",
+            "bash -o keyword -c 'gate-check PATH=/opt/alternate/bin'",
+            "bash -eo keyword -c 'gate-check PATH=/opt/alternate/bin'",
+            "bash -k -c 'gate-check PATH=/opt/alternate/bin'",
+            "bash -O expand_aliases -c 'gate-check'",
+            "bash -c 'set -k; gate-check PATH=/opt/alternate/bin'",
+            "bash -c 'set -o keyword; gate-check PATH=/opt/alternate/bin'",
+            f"echo $(case x in x) {probe} ;; esac)",
+            'bash -c \'printf -v "PATH[0]" /opt/proofs/bin; proof\'',
+            "bash -c 'printf -vPATH[0] /opt/proofs/bin; proof'",
+            "bash -c 'printf -v safe -v PATH /opt/proofs/bin; proof'",
+            'bash -c \'printf "%n" PATH; proof\'',
+            'bash -c \'printf "%ln" PATH; proof\'',
+            'bash -c \'printf "%hhn" PATH; proof\'',
+            'bash -c \'fmt="%n"; printf "$fmt" PATH; proof\'',
+            "bash -c 'read -aPATH <<< /opt/proofs/bin; proof'",
+            "bash -c 'wait -npPATH; proof'",
+            "bash -c 'mapfile -t PATH <<< /opt/proofs/bin; proof'",
+            "bash -c 'jobs -x /opt/tools/probe'",
+            'bash -c \'export "PATH[0]=/opt/proofs/bin"; proof\'',
+            'bash -c \'export "PATH+=/opt/proofs/bin"; proof\'',
+            'bash -c \'read "PATH[0]"; proof\'',
+            'bash -c \'unset "PATH[0]"; proof\'',
+            "(( true , PATH = 0 )) && pytest",
+            "[[ 0 -eq PATH[0]=1 ]] && pytest",
+            f"bash -c 'x=a[$({probe})]; exit \"$((x))\"'",
+            "bash -c 'x=\"a[\\$(/opt/tools/probe)]\"; exit \"$((x))\"'",
+            "bash -c 'x=\"a[\\$(/opt/tools/probe)]\"; s=hi; echo \"${s:x}\"'",
+            "bash -c 'x=\"a[\\$(/opt/tools/probe)]\"; let x'",
+            "bash -c 'declare -i y; x=\"a[\\$(/opt/tools/probe)]\"; y=$x'",
+            "bash -c 'x=\"a[\\$(/opt/tools/probe)]\"; [[ $x -eq 0 ]]'",
+            "/bin/true\r",
+            "gate-check\r",
+            "ruby3.1 -e 'exit 0'",
+            "perl5.38 -e '1'",
+            "php8.2 -r 'exit(0);'",
+            "lua5.4 -e 'os.exit(0)'",
+            "luajit-2.1 -e 'os.exit(0)'",
+            "node20 inspect check.js",
+            "gsed 's/a/b/'",
+            "gawk-5.1 '{print}'",
+            "bash5 -i ./gate.sh",
+            "tcsh ./gate.csh",
+        ):
+            _, _, bad_probs = mq_mod.MergeQueue._analyze_gate_command(unsafe_form)
+            self.assertTrue(bad_probs, f"expected fail-closed problem on {unsafe_form!r}")
+        tok = self.acquire("c-arith")
+        self.board(tok, self.w.unit("arith-unit"))
+        rc_p, out_p = self.w.cli("plan", "--token", tok, "--gate-cmd", gate_cmd)
+        self.assertEqual(rc_p, 0, out_p)
+        self.assertEqual(out_p["planned"][0]["result"], "tested", out_p)
+        probe.write_text("#!/bin/sh\necho 1\n", encoding="utf-8")
+        rc_m, out_m = self.w.cli("merge", "--token", tok, "--require-gate", gate_cmd)
+        self.assertNotEqual(rc_m, 0, out_m)
+        self.assertEqual(out_m.get("code"), "gate_not_run", out_m)
+
+    def test_versioned_interpreter_external_script_replacement_invalidates_plan(self):
+        tools_dir = self.w.tmp / "bin" / "ver-interp"
+        tools_dir.mkdir(parents=True, exist_ok=True)
+        ruby31 = tools_dir / "ruby3.1"
+        ruby31.write_text(
+            f"#!{sys.executable} -I\nimport pathlib, sys\n"
+            "exec(compile(pathlib.Path(sys.argv[1]).read_bytes(), sys.argv[1], 'exec'))\n",
+            encoding="utf-8",
+        )
+        ruby31.chmod(0o755)
+        ext_rb = tools_dir / "check.rb"
+        ext_rb.write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
+        gate_cmd = f"{ruby31} {ext_rb}"
+        tok = self.acquire("c-ver-interp")
+        self.board(tok, self.w.unit("ver-interp-unit"))
+        rc_p, out_p = self.w.cli("plan", "--token", tok, "--gate-cmd", gate_cmd)
+        self.assertEqual(rc_p, 0, out_p)
+        self.assertEqual(out_p["planned"][0]["result"], "tested", out_p)
+        ext_rb.write_text("import sys\nsys.exit(1)\n", encoding="utf-8")
+        rc_m, out_m = self.w.cli("merge", "--token", tok, "--require-gate", gate_cmd)
+        self.assertNotEqual(rc_m, 0, out_m)
+        self.assertEqual(out_m.get("code"), "gate_not_run", out_m)
+
+    def test_shebang_interpreter_replacement_invalidates_saved_plan(self):
+        tools_dir = self.w.tmp / "bin" / "shebang-interp"
+        tools_dir.mkdir(parents=True, exist_ok=True)
+        interp = tools_dir / "py-chain"
+        interp.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        interp.chmod(0o755)
+        gate_script = tools_dir / "run-gate"
+        gate_script.write_text(f"#!{interp}\n# script body unchanged\n", encoding="utf-8")
+        gate_script.chmod(0o755)
+
+        tok = self.acquire("c-shebang")
+        self.board(tok, self.w.unit("shebang-unit"))
+        rc_p, out_p = self.w.cli("plan", "--token", tok, "--gate-cmd", str(gate_script))
+        self.assertEqual(rc_p, 0, out_p)
+        self.assertEqual(out_p["planned"][0]["result"], "tested", out_p)
+
+        interp.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        rc_m, out_m = self.w.cli("merge", "--token", tok, "--require-gate", str(gate_script))
+        self.assertNotEqual(rc_m, 0, out_m)
+        self.assertEqual(out_m.get("code"), "gate_not_run", out_m)
+
+        env_prog = tools_dir / "env-chain-prog"
+        env_prog.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        env_prog.chmod(0o755)
+        env_script = tools_dir / "run-env-gate"
+        env_script.write_text("#!/usr/bin/env env-chain-prog\n# script body unchanged\n", encoding="utf-8")
+        env_script.chmod(0o755)
+        saved_path = self.w.env.get("PATH")
+        self.w.env["PATH"] = f"{tools_dir}:{saved_path or '/usr/bin:/bin'}"
+        try:
+            tok_env = self.acquire("c-shebang-env", "--takeover")
+            self.board(tok_env, self.w.unit("shebang-env-unit"))
+            rc_ep, out_ep = self.w.cli("plan", "--token", tok_env, "--gate-cmd", str(env_script))
+            self.assertEqual(rc_ep, 0, out_ep)
+            self.assertEqual(out_ep["planned"][0]["result"], "tested", out_ep)
+            env_prog.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            rc_em, out_em = self.w.cli("merge", "--token", tok_env, "--require-gate", str(env_script))
+            self.assertNotEqual(rc_em, 0, out_em)
+            self.assertEqual(out_em.get("code"), "gate_not_run", out_em)
+        finally:
+            if saved_path is None:
+                self.w.env.pop("PATH", None)
+            else:
+                self.w.env["PATH"] = saved_path
+
+    def test_interpreter_alias_script_replacement_invalidates_saved_plan(self):
+        tools_dir = self.w.tmp / "bin" / "interp-alias"
+        tools_dir.mkdir(parents=True, exist_ok=True)
+        pycheck = tools_dir / "pycheck"
+        pycheck.symlink_to(sys.executable)
+        check_py = tools_dir / "check.py"
+        check_py.write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
+        gate_cmd = f"{pycheck} {check_py}"
+
+        tok = self.acquire("c-interp-alias")
+        self.board(tok, self.w.unit("interp-alias-unit"))
+        rc_p, out_p = self.w.cli("plan", "--token", tok, "--gate-cmd", gate_cmd)
+        self.assertEqual(rc_p, 0, out_p)
+        self.assertEqual(out_p["planned"][0]["result"], "tested", out_p)
+
+        # Replacing the external script operand after `plan` must invalidate `plan_passed`.
+        check_py.write_text("import sys\nsys.exit(1)\n", encoding="utf-8")
+        rc_m, out_m = self.w.cli("merge", "--token", tok, "--require-gate", gate_cmd)
+        self.assertNotEqual(rc_m, 0, out_m)
+        self.assertEqual(out_m.get("code"), "gate_not_run", out_m)
+
+        # Inline `-c` via an interpreter alias must fail closed just like canonical `python3 -c`.
+        q = self.w.queue()
+        fp_inline, probs_inline = q._gate_fingerprint(f"{pycheck} -c 'import sys'")
+        self.assertEqual(fp_inline, "")
+        self.assertTrue(probs_inline)
+
+        env_bin = shutil.which("env")
+        if env_bin:
+            envwrap = tools_dir / "envwrap"
+            envwrap.symlink_to(env_bin)
+            wrap_cmd = f"{envwrap} FOO=1 {pycheck} {check_py}"
+            fp_w1, probs_w1 = q._gate_fingerprint(wrap_cmd)
+            self.assertEqual(probs_w1, [])
+            self.assertTrue(fp_w1)
+            check_py.write_text("import sys\nsys.exit(2)\n", encoding="utf-8")
+            fp_w2, probs_w2 = q._gate_fingerprint(wrap_cmd)
+            self.assertEqual(probs_w2, [])
+            self.assertNotEqual(fp_w2, fp_w1)
+
+        # `rg --pre` is rejected fail-closed in `plan`, and `rg -f <pattern_file>` invalidates `plan_passed` on replacement:
+        rg_bin = tools_dir / "rg"
+        grep_src = shutil.which("grep")
+        assert grep_src is not None
+        shutil.copyfile(grep_src, rg_bin)
+        rg_bin.chmod(0o755)
+        pre_prog = tools_dir / "rg-pre-check"
+        pre_prog.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        pre_prog.chmod(0o755)
+        tok_rg = self.acquire("c-rg-pre", "--takeover")
+        self.board(tok_rg, self.w.unit("rg-pre-unit"))
+        rc_pre, out_pre = self.w.cli(
+            "plan", "--token", tok_rg, "--gate-cmd", f"{rg_bin} --pre {pre_prog} fleet README.md"
+        )
+        self.assertEqual(rc_pre, 0, out_pre)
+        self.assertEqual(out_pre["planned"][0]["result"], "fail", out_pre)
+        self.assertEqual(out_pre["planned"][0]["gate"]["fingerprint"], "", out_pre)
+        self.w.cli(
+            "resolve", "--token", tok_rg, "--entry", out_pre["planned"][0]["entry"],
+            "--action", "drop", "--reason", "rg-pre-rejected",
+        )
+        rg_pat = tools_dir / "patterns.txt"
+        rg_pat.write_text("fleet\n", encoding="utf-8")
+        rg_file_cmd = f"{rg_bin} -q -f {rg_pat} README.md"
+        self.board(tok_rg, self.w.unit("rg-file-unit"))
+        rc_rfp, out_rfp = self.w.cli("plan", "--token", tok_rg, "--gate-cmd", rg_file_cmd)
+        self.assertEqual(rc_rfp, 0, out_rfp)
+        self.assertEqual(out_rfp["planned"][0]["result"], "tested", out_rfp)
+        rg_pat.write_text("never-matches-sentinel\n", encoding="utf-8")
+        rc_rfm, out_rfm = self.w.cli("merge", "--token", tok_rg, "--require-gate", rg_file_cmd)
+        self.assertNotEqual(rc_rfm, 0, out_rfm)
+        self.assertEqual(out_rfm.get("code"), "gate_not_run", out_rfm)
+
+    def test_directly_executed_shell_scripts_fingerprint_inner_dependencies_and_fail_closed(self):
+        tools_dir = self.w.tmp / "bin" / "direct-sh"
+        tools_dir.mkdir(parents=True, exist_ok=True)
+        inner_check = tools_dir / "inner-check"
+        inner_check.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        inner_check.chmod(0o755)
+
+        # 1. Directly executed repo-relative `#!/bin/sh` script invalidates `plan_passed` when inner executable changes:
+        (self.w.worker / "ci").mkdir(parents=True, exist_ok=True)
+        rel_gate = self.w.worker / "ci" / "gate.sh"
+        rel_gate.write_text(f"#!/bin/sh\nexec {inner_check}\n", encoding="utf-8")
+        rel_gate.chmod(0o755)
+        self.w.git(self.w.worker, "add", "--chmod=+x", "ci/gate.sh")
+        self.w.git(self.w.worker, "commit", "-q", "-m", "add ci/gate.sh")
+        self.w.git(self.w.worker, "push", "-q", "origin", f"HEAD:refs/heads/{W.BASE}")
+        self.w.git(self.w.conductor, "fetch", "-q", "origin")
+
+        tok = self.acquire("c-direct-rel-sh")
+        self.board(tok, self.w.unit("direct-rel-sh-unit"))
+        rc_rp, out_rp = self.w.cli("plan", "--token", tok, "--gate-cmd", "./ci/gate.sh")
+        self.assertEqual(rc_rp, 0, out_rp)
+        self.assertEqual(out_rp["planned"][0]["result"], "tested", out_rp)
+        inner_check.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        rc_rm, out_rm = self.w.cli("merge", "--token", tok, "--require-gate", "./ci/gate.sh")
+        self.assertNotEqual(rc_rm, 0, out_rm)
+        self.assertEqual(out_rm.get("code"), "gate_not_run", out_rm)
+        self.w.cli(
+            "resolve", "--token", tok, "--entry", out_rp["planned"][0]["entry"],
+            "--action", "drop", "--reason", "stale-rel-sh",
+        )
+
+        # 2. Directly executed external `#!/usr/bin/env sh` script also fingerprints inner dependencies:
+        inner_check2 = tools_dir / "inner-check-2"
+        inner_check2.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        inner_check2.chmod(0o755)
+        ext_gate = tools_dir / "ext-gate.sh"
+        ext_gate.write_text(f"#!/usr/bin/env sh\nexec {inner_check2}\n", encoding="utf-8")
+        ext_gate.chmod(0o755)
+
+        self.board(tok, self.w.unit("direct-ext-sh-unit"))
+        rc_ep, out_ep = self.w.cli("plan", "--token", tok, "--gate-cmd", str(ext_gate))
+        self.assertEqual(rc_ep, 0, out_ep)
+        self.assertEqual(out_ep["planned"][0]["result"], "tested", out_ep)
+        inner_check2.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        rc_em, out_em = self.w.cli("merge", "--token", tok, "--require-gate", str(ext_gate))
+        self.assertNotEqual(rc_em, 0, out_em)
+        self.assertEqual(out_em.get("code"), "gate_not_run", out_em)
+
+        # 3. Dynamic inner dispatch, ENOEXEC shebang-less scripts, and option-permuting `#!` tools fail closed:
+        q = self.w.queue()
+        dyn_sh = tools_dir / "dyn-gate.sh"
+        dyn_sh.write_text('#!/bin/sh\nexec "$1"\n', encoding="utf-8")
+        dyn_sh.chmod(0o755)
+        fp_dyn, probs_dyn = q._gate_fingerprint(f"{dyn_sh} {inner_check2}")
+        self.assertEqual(fp_dyn, "")
+        self.assertTrue(probs_dyn)
+
+        no_sb = tools_dir / "no-shebang.sh"
+        no_sb.write_text(f"exec {inner_check2}\n", encoding="utf-8")
+        no_sb.chmod(0o755)
+        fp_nosb, probs_nosb = q._gate_fingerprint(str(no_sb))
+        self.assertEqual(fp_nosb, "")
+        self.assertTrue(probs_nosb)
+
+        find_bin = shutil.which("find")
+        if find_bin:
+            sb_find = tools_dir / "shebang-find"
+            sb_find.write_text(f"#!{find_bin}\n", encoding="utf-8")
+            sb_find.chmod(0o755)
+            fp_sbf, probs_sbf = q._gate_fingerprint(f"{sb_find} . -exec {inner_check2} \\;")
+            self.assertEqual(fp_sbf, "")
+            self.assertTrue(probs_sbf)
+
+        # 4. Unicode digits (`١>/dev/null`, `trap ١ EXIT`) fingerprint executable `١`, and `trap 999 EXIT` fails closed:
+        uni_cmd = "١"
+        uni_bin = tools_dir / uni_cmd
+        uni_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        uni_bin.chmod(0o755)
+        fp_t999, probs_t999 = q._gate_fingerprint("trap 999 EXIT")
+        self.assertEqual(fp_t999, "")
+        self.assertTrue(probs_t999)
+
+        saved_path = self.w.env.get("PATH")
+        self.w.env["PATH"] = f"{tools_dir}:{saved_path or '/usr/bin:/bin'}"
+        try:
+            for idx_u, g_cmd in enumerate((f"{uni_cmd}>/dev/null", f"trap {uni_cmd} EXIT")):
+                uni_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                self.board(tok, self.w.unit(f"uni-digit-{idx_u}"))
+                rc_up, out_up = self.w.cli("plan", "--token", tok, "--gate-cmd", g_cmd)
+                self.assertEqual(rc_up, 0, out_up)
+                self.assertEqual(out_up["planned"][0]["result"], "tested", out_up)
+                uni_bin.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+                rc_um, out_um = self.w.cli("merge", "--token", tok, "--require-gate", g_cmd)
+                self.assertNotEqual(rc_um, 0, out_um)
+                self.assertEqual(out_um.get("code"), "gate_not_run", out_um)
+                self.w.cli(
+                    "resolve", "--token", tok, "--entry", out_up["planned"][0]["entry"],
+                    "--action", "drop", "--reason", f"stale-uni-{idx_u}",
+                )
+        finally:
+            if saved_path is None:
+                self.w.env.pop("PATH", None)
+            else:
+                self.w.env["PATH"] = saved_path
+
+    def test_bwrap_filtered_path_and_dangling_symlinks_fingerprint_sandbox_view(self):
+        fake_home = self.w.tmp / "bw-fp-home"
+        forbidden_dir = fake_home / ".ssh" / "tools"
+        mounted_dir = fake_home / "bin1"
+        mounted_dir2 = fake_home / "bin2"
+        forbidden_dir.mkdir(parents=True, exist_ok=True)
+        mounted_dir.mkdir(parents=True, exist_ok=True)
+        mounted_dir2.mkdir(parents=True, exist_ok=True)
+
+        hidden_gate = forbidden_dir / "shadow-gate"
+        hidden_gate.write_text("#!/bin/sh\necho hidden-v1\n", encoding="utf-8")
+        hidden_gate.chmod(0o755)
+        only_hidden = forbidden_dir / "only-hidden"
+        only_hidden.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        only_hidden.chmod(0o755)
+
+        visible_gate = mounted_dir / "shadow-gate"
+        visible_gate.write_text("#!/bin/sh\necho visible-v1\n", encoding="utf-8")
+        visible_gate.chmod(0o755)
+
+        (mounted_dir / "dangling-gate").symlink_to(hidden_gate)
+        real_dangling_fallback = mounted_dir2 / "dangling-gate"
+        real_dangling_fallback.write_text("#!/bin/sh\necho fallback-v1\n", encoding="utf-8")
+        real_dangling_fallback.chmod(0o755)
+
+        bad_shebang = mounted_dir / "bad-shebang"
+        bad_shebang.write_text(f"#!{hidden_gate}\nexit 0\n", encoding="utf-8")
+        bad_shebang.chmod(0o755)
+
+        tools_dir = mounted_dir / "tools"
+        v1_subdir = mounted_dir / "v1" / "subdir"
+        tools_dir.mkdir(parents=True, exist_ok=True)
+        v1_subdir.mkdir(parents=True, exist_ok=True)
+        (tools_dir / "link").symlink_to(v1_subdir)
+        decoy_gate = tools_dir / "gate"
+        decoy_gate.write_text("#!/bin/sh\necho decoy-v1\n", encoding="utf-8")
+        decoy_gate.chmod(0o755)
+        real_v1_gate = mounted_dir / "v1" / "gate"
+        real_v1_gate.write_text("#!/bin/sh\necho v1-real-1\n", encoding="utf-8")
+        real_v1_gate.chmod(0o755)
+
+        q = self.w.queue()
+        q.env.pop("MQ_GATE_SANDBOX_CMD", None)
+        q.env["HOME"] = str(fake_home)
+        q.env["PATH"] = f"{forbidden_dir}:{mounted_dir}:{mounted_dir2}:/usr/bin:/bin"
+        with unittest.mock.patch.object(
+            type(q), "_bwrap_mode", return_value=("/usr/bin/bwrap", ("--unshare-all",))
+        ):
+            fp1, probs1 = q._gate_fingerprint("shadow-gate")
+            self.assertEqual(probs1, [])
+            self.assertTrue(fp1)
+            # Mutating the unmounted forbidden binary does not change the sandbox fingerprint.
+            hidden_gate.write_text("#!/bin/sh\necho hidden-v2\n", encoding="utf-8")
+            fp_after_hidden, probs_h = q._gate_fingerprint("shadow-gate")
+            self.assertEqual(probs_h, [])
+            self.assertEqual(fp_after_hidden, fp1)
+            # Mutating the mounted binary that bwrap actually executes invalidates the fingerprint.
+            visible_gate.write_text("#!/bin/sh\necho visible-v2\n", encoding="utf-8")
+            fp_after_visible, probs_v = q._gate_fingerprint("shadow-gate")
+            self.assertEqual(probs_v, [])
+            self.assertNotEqual(fp_after_visible, fp1)
+            # Executable present only in forbidden PATH dir fails closed.
+            fp_only, probs_only = q._gate_fingerprint("only-hidden")
+            self.assertEqual(fp_only, "")
+            self.assertTrue(probs_only)
+            # Dangling symlink into forbidden dir falls through to next mounted PATH dir, matching /bin/sh.
+            fp_d1, probs_d1 = q._gate_fingerprint("dangling-gate")
+            self.assertEqual(probs_d1, [])
+            self.assertTrue(fp_d1)
+            real_dangling_fallback.write_text("#!/bin/sh\necho fallback-v2\n", encoding="utf-8")
+            fp_d2, _ = q._gate_fingerprint("dangling-gate")
+            self.assertNotEqual(fp_d2, fp_d1)
+            # Shebang pointing into forbidden dir fails closed.
+            fp_sb, probs_sb = q._gate_fingerprint("bad-shebang")
+            self.assertEqual(fp_sb, "")
+            self.assertTrue(probs_sb)
+            # POSIX symlink-before-dotdot: tools/link/../gate resolves v1/gate, not tools/gate.
+            dotdot_cmd = f"{tools_dir}/link/../gate"
+            fp_dd1, probs_dd1 = q._gate_fingerprint(dotdot_cmd)
+            self.assertEqual(probs_dd1, [])
+            self.assertTrue(fp_dd1)
+            decoy_gate.write_text("#!/bin/sh\necho decoy-v2\n", encoding="utf-8")
+            fp_dd_decoy, probs_dd_decoy = q._gate_fingerprint(dotdot_cmd)
+            self.assertEqual(probs_dd_decoy, [])
+            self.assertEqual(fp_dd_decoy, fp_dd1)
+            real_v1_gate.write_text("#!/bin/sh\necho v1-real-2\n", encoding="utf-8")
+            fp_dd2, probs_dd2 = q._gate_fingerprint(dotdot_cmd)
+            self.assertEqual(probs_dd2, [])
+            self.assertNotEqual(fp_dd2, fp_dd1)
+            # Nonexistent intermediate segment before '..' fails closed instead of lexical collapse.
+            fp_noent, probs_noent = q._gate_fingerprint(f"{mounted_dir}/no_such_dir/../shadow-gate")
+            self.assertEqual(fp_noent, "")
+            self.assertTrue(probs_noent)
+
+        with unittest.mock.patch.object(type(q), "_bwrap_mode", return_value=None):
+            fp_nb1, probs_nb1 = q._gate_fingerprint(f"{tools_dir}/link/../gate")
+            self.assertEqual(probs_nb1, [])
+            self.assertTrue(fp_nb1)
+            real_v1_gate.write_text("#!/bin/sh\necho v1-real-3\n", encoding="utf-8")
+            fp_nb2, probs_nb2 = q._gate_fingerprint(f"{tools_dir}/link/../gate")
+            self.assertEqual(probs_nb2, [])
+            self.assertNotEqual(fp_nb2, fp_nb1)
+            fp_nb_noent, probs_nb_noent = q._gate_fingerprint(f"{mounted_dir}/no_such_dir/../shadow-gate")
+            self.assertEqual(fp_nb_noent, "")
+            self.assertTrue(probs_nb_noent)
+            fake_checkout = fake_home / "checkout-with-dash"
+            fake_checkout.mkdir(parents=True, exist_ok=True)
+            (fake_checkout / "-").write_text("q\n", encoding="utf-8")
+            good_sed = fake_checkout / "good.sed"
+            good_sed.write_text("q\n", encoding="utf-8")
+            stdin_link = mounted_dir / "stdin-link.sed"
+            stdin_link.symlink_to("/dev/stdin")
+            proc_fd_link = mounted_dir / "proc-fd0.sed"
+            proc_fd_link.symlink_to("/proc/self/fd/0")
+            for unsafe_gate in (
+                'bash -c \'a=1; x="a[\\$(/opt/gates/probe)]"; exit "$[x]"\'',
+                'bash -c \'exit $[1 + 0]\'',
+                'bash -c \'echo "${foo:-$[x]}"\'',
+                'bash -c \'echo "$(exit "$[x]")"\'',
+                f"/usr/bin/toybox env {real_v1_gate}",
+                f"busybox.static sh -c {real_v1_gate}",
+                f"find . -exec {real_v1_gate} \\;",
+                f"/lib64/ld-linux-x86-64.so.2 {real_v1_gate}",
+                "bash -c 'readonly -i y=1; exit 0'",
+                "bash -c 'export -f f; exit 0'",
+                "bash -c 'exec -l /bin/bash -c true'",
+                "bash -c 'exec -a -bash /bin/bash -c true'",
+                "bash -c 'exec -a sh /bin/true'",
+                "env -- -bash -c true",
+                "/opt/gates/-bash -c true",
+                "zsh -c true",
+                f"sed -f - /etc/hostname < {good_sed}",
+                "sed -f- /etc/hostname",
+                "sed -nf- /etc/hostname",
+                "sed --file=- /etc/hostname",
+                "sed -f ./- /etc/hostname",
+                f"sed -f {good_sed} /etc/hostname -e '1p'",
+                f"sed -f {good_sed} /etc/hostname -f {stdin_link}",
+                f"sed -f {stdin_link} /etc/hostname",
+                f"sed -f {proc_fd_link} /etc/hostname",
+                f"awk -f - /etc/hostname < {good_sed}",
+                "awk -f- /etc/hostname",
+                "awk --file=- /etc/hostname",
+                "awk -f ./- /etc/hostname",
+                "python3 /dev/stdin",
+                "sh /dev/fd/0",
+                f"rg --pre {real_v1_gate} needle README.md",
+                f"rg --pre={real_v1_gate} needle README.md",
+                "rg -z needle README.md",
+                "rg -f - needle README.md",
+                "RIPGREP_CONFIG_PATH=/opt/gates/rgrc rg needle README.md",
+                "grep -f - README.md",
+                f"grep needle README.md -f {stdin_link}",
+                "git -c alias.x='!/opt/gates/evil' x",
+                "git --exec-path=/opt/gates rev-parse HEAD",
+                "tar --to-command=/opt/gates/evil -xf a.tar",
+                "sort --compress-program=/opt/gates/evil README.md",
+                "split --filter=/opt/gates/evil README.md",
+                "make -f /opt/gates/Makefile",
+                "bash -c \"RANDOM='a[\\$(/opt/gates/probe)]'; true\"",
+                "bash -c \"SRANDOM='a[\\$(/opt/gates/probe)]'; true\"",
+                "bash -c \"OPTIND='a[\\$(/opt/gates/probe)]'; true\"",
+                "bash -c \"HISTCMD='a[\\$(/opt/gates/probe)]'; true\"",
+                "export RANDOM='a[$(/opt/gates/probe)]'",
+                "env RANDOM='a[$(/opt/gates/probe)]' bash -c true",
+                "bash -c 'a=1; x=\"a[\\$(/opt/gates/probe)]\"; test \"$(( ${x} ))\" -eq 1'",
+                "bash -c 'a=1; x=\"a[\\$(/opt/gates/probe)]\"; echo \"${y:-$(( ${x} ))}\"'",
+                "bash -c 'a=1; x=\"a[\\$(/opt/gates/probe)]\"; test \"$(( $x ))\" -eq 1'",
+                "bash -c 'echo $(( 0 # )) ; /opt/gates/probe'",
+            ):
+                fp_u, probs_u = q._gate_fingerprint(unsafe_gate, cwd=fake_checkout)
+                self.assertEqual(fp_u, "", unsafe_gate)
+                self.assertTrue(probs_u, unsafe_gate)
 
 
 class GitLaneFreshness(Freshness):

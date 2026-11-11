@@ -830,6 +830,21 @@ class TestCountAgnosticGuards(unittest.TestCase):
         self.assertEqual(len(failures), 1, failures)
         self.assertIn("demo-it", failures[0])
         self.assertIn("lighting", failures[0])
+        # #750 C12: offload-it's inline, multi-line-wrapped row omitted BUILD_DONE and BOT and
+        # escaped `row.startswith("| task_id |")`.
+        with tempfile.TemporaryDirectory() as tmp:
+            skills = Path(tmp) / "skills"
+            (skills / "demo-it").mkdir(parents=True)
+            (skills / "demo-it" / "SKILL.md").write_text(
+                "---\nname: demo-it\n---\n\nOne row per recipe: `| task_id | recipe | INTERVIEW | SCAFFOLD |\n"
+                "PROVISION | PR_OPEN | REVIEWED | MERGED | WT_CLEAN | lighting | park | evidence |`.\n",
+                encoding="utf-8")
+            with mock.patch.object(validate, "SKILLS_DIR", skills):
+                wrapped_failures = validate.check_ledger_rows()
+        self.assertEqual(len(wrapped_failures), 1, wrapped_failures)
+        self.assertIn("demo-it", wrapped_failures[0])
+        self.assertIn("BUILD_DONE", wrapped_failures[0])
+        self.assertIn("BOT", wrapped_failures[0])
 
     def test_badge_check_flags_stale(self):
         # tests.json is written CURRENT so the only error can come from missions.json's

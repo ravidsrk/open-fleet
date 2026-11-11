@@ -301,7 +301,8 @@ class VFBenchReviewLeg(unittest.TestCase):
                 [sys.executable, str(vfbench.VERIFY), "--manifest", path,
                  "--contract-source", self.trap["contract_source"],
                  "--contract-digest", self.trap["contract_digest"],
-                 "--unit-class", self.trap["unit_class"], "--repo", self.trap["repo"]],
+                 "--unit-class", self.trap["unit_class"], "--repo", self.trap["repo"],
+                 "--allow-static-nc"],
                 capture_output=True, text=True, cwd=vfbench.ROOT, env=env)
         finally:
             Path(path).unlink(missing_ok=True)
@@ -472,6 +473,8 @@ class TheRefusedControlClassesAreSampled(unittest.TestCase):
                 cmd.append("--execute-nc")
                 if trap.get("nc_command"):
                     cmd += ["--nc-command", vb._render(trap["nc_command"], facts)]
+            elif not trap.get("dispatch") and unit_class not in ("report-only", "planning"):
+                cmd.append("--allow-static-nc")
             if trap.get("repo"):
                 cmd += ["--repo", trap["repo"]]
             env = dict(os.environ)
