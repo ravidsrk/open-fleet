@@ -49,7 +49,7 @@ class World:
         gh.write_text(f"#!/bin/sh\nexec {sys.executable} {HERE / 'fake_gh.py'} \"$@\"\n", encoding="utf-8")
         gh.chmod(0o755)
         self.env = {
-            **{k: v for k, v in os.environ.items() if not k.startswith(("GIT_", "OPEN_FLEET_", "ORCA_"))},
+            **{k: v for k, v in os.environ.items() if not k.startswith(("GIT_", "OPEN_FLEET_", "ORCA_", "MQ_"))},
             **IDENTITY,
             "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}",
             "HOME": str(self.tmp),
@@ -57,6 +57,19 @@ class World:
             "FAKE_GH_STATE": str(self.state_file), "FAKE_GH_LOG": str(self.log_file),
             "OPEN_FLEET_MERGE_QUEUE_DB": str(self.db), "OPEN_FLEET_EGRESS_LEDGER": str(self.ledger),
         }
+        # On CI runners without bubblewrap, unprivileged userns, or hidepid=2/invisible, supply an
+        # explicit fixture sandbox command so QueueError('sandbox_unavailable') remains fail-closed
+        # in production while disposable World gate tests still run cleanly.
+        mq_mod = load_module(self.script)
+        if not mq_mod.MergeQueue._has_native_gate_isolation():
+            sbx = bindir / "mq-fixture-sandbox"
+            sbx.write_text(
+                f"#!/bin/sh\nexec {sys.executable} -I -c "
+                "\"import subprocess,sys; raise SystemExit(subprocess.call(sys.argv[1:]))\" \"$@\"\n",
+                encoding="utf-8",
+            )
+            sbx.chmod(0o755)
+            self.env["MQ_GATE_SANDBOX_CMD"] = str(sbx)
         self.state_file.write_text(json.dumps({"repo": SLUG, "bare": str(self.bare), "offline": False, "prs": {},
                                                "forks": {}}), encoding="utf-8")
         self.log_file.write_text("", encoding="utf-8")

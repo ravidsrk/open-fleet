@@ -1066,7 +1066,7 @@ class LocalStateStore:
         if newer:
             return []
         t_row = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
-        if not t_row or t_row["status"] in ("completed", "failed"):
+        if not t_row or t_row["status"] != "dispatched":
             return []
         target_status = "completed" if succeeded else "failed"
         if target_status == "completed" and self._gate_holds(conn, task_id):
@@ -1909,15 +1909,16 @@ class LocalStateStore:
             eff_run = disp["run_id"] or run_id
             row = self._terminal_report(conn, eff_run, senders)
             if row:
-                succeeded = (row["msg_type"] == "merge_ready" and row["outcome"] != "failed") or (
-                    row["msg_type"] == "worker_done" and row["outcome"] == "succeeded"
-                )
                 conn.execute(
                     "UPDATE dispatches SET state = 'completed', terminal_state = 'exited', head_sha = COALESCE(NULLIF(?, ''), head_sha), "
                     "updated_at = ? WHERE dispatch_id = ? AND state NOT IN ('stopped','abandoned','released')",
                     (worktree_head_sha, now, dispatch_id),
                 )
-                self._settle_dispatch_task(conn, dispatch_id, succeeded=succeeded, now=now)
+                if row["msg_type"] in ("worker_done", "merge_ready"):
+                    succeeded = (row["msg_type"] == "merge_ready" and row["outcome"] != "failed") or (
+                        row["msg_type"] == "worker_done" and row["outcome"] == "succeeded"
+                    )
+                    self._settle_dispatch_task(conn, dispatch_id, succeeded=succeeded, now=now)
                 conn.execute("COMMIT")
                 return {"syntheticDied": False, "existingMessageId": row["id"], "type": row["msg_type"]}
             conn.execute(
@@ -1925,7 +1926,6 @@ class LocalStateStore:
                 "updated_at = ? WHERE dispatch_id = ?",
                 (worktree_head_sha, now, dispatch_id),
             )
-            self._settle_dispatch_task(conn, dispatch_id, succeeded=False, now=now)
             payload = json.dumps(
                 {
                     "event": "worker_died",

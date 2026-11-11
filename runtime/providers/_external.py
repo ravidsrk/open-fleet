@@ -168,6 +168,8 @@ def claim_local_task(
     run: str | None = None,
 ) -> tuple[bool, str | None]:
     """Transition a local task `ready -> dispatched`, enforcing Run ownership (#750 C28, C29)."""
+    if state is not None and hasattr(state, "_resolve_caller_run"):
+        run = state._resolve_caller_run(run, default_run=None)
     if state is None or not task_id or not hasattr(state, "_connect"):
         return False, run
     now = time.time()
@@ -263,6 +265,19 @@ def release_claim_on_failure(worker_start):
         except (TypeError, ValueError):
             payload_args = {k: v for k, v in kwargs.items() if k != "retry_request"}
         payload_sha = request_payload_sha256(payload_args)
+        state_obj = getattr(self, "state", None)
+        resolved_run = payload_args.get("run")
+        if state_obj is not None and hasattr(state_obj, "_resolve_caller_run"):
+            resolved_run = state_obj._resolve_caller_run(resolved_run, default_run=None)
+            tid = payload_args.get("task_id")
+            if tid and hasattr(state_obj, "_connect"):
+                with state_obj._connect() as conn:
+                    t_row = conn.execute("SELECT run_id FROM tasks WHERE id = ?", (tid,)).fetchone()
+                if t_row is not None and resolved_run is not None and t_row["run_id"] != resolved_run:
+                    raise ProviderError(
+                        "cross_run_access",
+                        f"task {tid!r} belongs to run {t_row['run_id']!r}, not {resolved_run!r}",
+                    )
         runner = getattr(self, "_runner", None)
         if callable(runner) and getattr(runner, "_marks_runtime_contact", False) is not True:
             self._runner = _marking_runtime_contact(runner)
@@ -270,12 +285,12 @@ def release_claim_on_failure(worker_start):
         token = _REACHED_RUNTIME.set(not callable(runner))
         sha_token = ACTIVE_REQUEST_PAYLOAD_SHA.set(payload_sha)
         claim_ctx = {
-            "state": getattr(self, "state", None),
+            "state": state_obj,
             "task_id": payload_args.get("task_id"),
-            "run": payload_args.get("run"),
+            "run": resolved_run,
             "checked": False,
             "claimed": False,
-            "effective_run": payload_args.get("run"),
+            "effective_run": resolved_run,
             "recorded": False,
         }
         ctx_token = _LAUNCH_CLAIM_CTX.set(claim_ctx)
@@ -580,7 +595,11 @@ def insert_dispatch(
 ) -> None:
     _ensure_ctx_task_claimed()
     ctx = _LAUNCH_CLAIM_CTX.get()
-    effective_run = run
+    effective_run = (
+        state._resolve_caller_run(run, default_run=None)
+        if hasattr(state, "_resolve_caller_run")
+        else run
+    )
     if ctx is not None:
         ctx["recorded"] = True
         if effective_run is None and ctx.get("effective_run"):

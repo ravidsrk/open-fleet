@@ -17,6 +17,7 @@ import sys
 import tempfile
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -551,23 +552,59 @@ class GateRunsIsolated(QueueCase):
             'else echo "ppid=clean"; fi'
         )
         self.assertIn("ppid=clean", tail)
-        # Subshell and sh -c wrapper executables are extracted by _extract_gate_executables:
+        # Subshell, compound (if/then/while/case), and sh -c wrapper executables are extracted:
         exes = mq_mod.MergeQueue._extract_gate_executables(
-            '(sh -c "env FOO=1 ./scripts/gate.sh && nice -n 5 pytest")'
+            '(sh -c "env FOO=1 ./scripts/gate.sh && nice -n 5 pytest"); '
+            'if true; then /opt/tools/compound-gate; fi; '
+            'for x in /not/an/exe; do ./loop-gate "$x"; done'
         )
         self.assertIn("./scripts/gate.sh", exes)
         self.assertIn("pytest", exes)
+        self.assertIn("/opt/tools/compound-gate", exes)
+        self.assertIn("./loop-gate", exes)
+        self.assertNotIn("/not/an/exe", exes)
+        # Replacing an executable inside `if true; then <bin>; fi` after `plan` invalidates `merge --require-gate`:
+        ext_bin = self.w.tmp / "bin" / "compound-gate-bin"
+        ext_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        ext_bin.chmod(0o755)
+        compound_cmd = f"if true; then {ext_bin}; fi"
+        tok_cmp = self.acquire("c-cmp", "--takeover")
+        self.board(tok_cmp, self.w.unit("cmp-unit"))
+        rc_p, out_p = self.w.cli("plan", "--token", tok_cmp, "--gate-cmd", compound_cmd)
+        self.assertEqual(rc_p, 0, out_p)
+        ext_bin.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        ext_bin.chmod(0o755)
+        rc_m, out_m = self.w.cli("merge", "--token", tok_cmp, "--require-gate", compound_cmd)
+        self.assertNotEqual(rc_m, 0, out_m)
+        self.assertEqual(out_m.get("code"), "gate_not_run", out_m)
+        # Dynamic command words (`eval`) cannot establish executable identity and fail closed:
+        _, _, dyn_probs = mq_mod.MergeQueue._analyze_gate_command("eval /bin/true")
+        self.assertTrue(dyn_probs)
         # When MQ_REQUIRE_GATE_SANDBOX=1 and no sandbox binary/command is usable, fail closed:
         if mq_mod.MergeQueue._bwrap_bin() is None:
             token = self.acquire("c2", "--takeover")
             self.board(token, self.w.unit("beta"))
+            saved_sbx = self.w.env.pop("MQ_GATE_SANDBOX_CMD", None)
             self.w.env["MQ_REQUIRE_GATE_SANDBOX"] = "1"
             try:
                 rc, out = self.w.cli("plan", "--token", token, "--gate-cmd", "true")
             finally:
                 self.w.env.pop("MQ_REQUIRE_GATE_SANDBOX", None)
+                if saved_sbx is not None:
+                    self.w.env["MQ_GATE_SANDBOX_CMD"] = saved_sbx
             self.assertNotEqual(rc, 0, out)
             self.assertEqual(out.get("code"), "sandbox_unavailable", out)
+        # Even without MQ_REQUIRE_GATE_SANDBOX, absence of all real isolation fails closed:
+        q = self.w.queue()
+        q.env.pop("MQ_GATE_SANDBOX_CMD", None)
+        q.env.pop("MQ_REQUIRE_GATE_SANDBOX", None)
+        q_cls = type(q)
+        with unittest.mock.patch.object(q_cls, "_bwrap_mode", return_value=None), \
+             unittest.mock.patch.object(q_cls, "_unshare_mount_proc_argv", return_value=None), \
+             unittest.mock.patch.object(q_cls, "_unshare_hidepid_argv", return_value=None):
+            with self.assertRaises(Exception) as ctx_sbx:
+                q._gate_exec_argv("true", self.w.tmp, self.w.tmp, self.w.tmp)
+            self.assertEqual(getattr(ctx_sbx.exception, "code", None), "sandbox_unavailable")
 
 
 class GitLaneFreshness(Freshness):

@@ -1049,12 +1049,24 @@ class RuntimeProvider:
         state = getattr(self, "state", None)
         if not task_id or state is None or not hasattr(state, "_connect"):
             return ""
+        bound_run = (
+            state._resolve_caller_run(None, default_run=None)
+            if hasattr(state, "_resolve_caller_run")
+            else None
+        )
         try:
             with state._connect() as conn:
-                row = conn.execute("SELECT spec FROM tasks WHERE id = ?", (task_id,)).fetchone()
+                row = conn.execute("SELECT spec, run_id FROM tasks WHERE id = ?", (task_id,)).fetchone()
         except Exception:
             return ""
-        return str(row["spec"] or "") if row else ""
+        if row is None:
+            return ""
+        if bound_run is not None and row["run_id"] != bound_run:
+            raise ProviderError(
+                "cross_run_access",
+                f"task {task_id!r} belongs to run {row['run_id']!r}, not {bound_run!r}",
+            )
+        return str(row["spec"] or "")
 
     def resolve_task_prompt(self, task_id: str, prompt: str | None) -> str:
         """The worker's assignment: explicit prompt, else the task's saved spec; never empty."""

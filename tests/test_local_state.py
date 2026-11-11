@@ -618,12 +618,31 @@ class TestCoordinatorTakeoverAndWorkerBindingFence(Base):
             next(t["status"] for t in self.store.task_list(run="run-d")["tasks"] if t["id"] == t1),
             "dispatched",
         )
-        # ensure_terminal_or_died marks task failed and blocks dependent in run-d
+        # Process exit without terminal mail (worker_died) preserves 'dispatched' per #597;
+        # ensure_terminal_or_died WITH terminal mail (merge_ready / worker_done) settles the task.
         died = self.store.ensure_terminal_or_died(dispatch_id="disp-die", worker_handle="w-die", exit_code=137)
         self.assertTrue(died["syntheticDied"])
+        died_by_id = {t["id"]: t["status"] for t in self.store.task_list(run="run-d")["tasks"]}
+        self.assertEqual(died_by_id[t1], "dispatched")
+        self.assertEqual(died_by_id[t2], "pending")
+        t_mr = self.store.task_create(spec="mr-parent", run="run-d")["task"]["id"]
+        t_mr_child = self.store.task_create(spec="mr-child", deps=[t_mr], run="run-d")["task"]["id"]
+        self.store.task_update(task_id=t_mr, status="dispatched", run="run-d")
+        with self.store._connect() as conn:
+            conn.execute(
+                "INSERT INTO dispatches(dispatch_id, task_id, run_id, worktree, agent, terminal_handle, state, created_at, updated_at) "
+                "VALUES ('disp-mr', ?, 'run-d', '/w', 'claude', 'w-mr', 'running', 1, 1)",
+                (t_mr,),
+            )
+        self.store.send_message(
+            subject="ready", msg_type="merge_ready", outcome="failed",
+            sender="w-mr", run="run-d",
+        )
+        mr_settled = self.store.ensure_terminal_or_died(dispatch_id="disp-mr", worker_handle="w-mr", exit_code=1)
+        self.assertFalse(mr_settled["syntheticDied"])
         by_id = {t["id"]: t["status"] for t in self.store.task_list(run="run-d")["tasks"]}
-        self.assertEqual(by_id[t1], "failed")
-        self.assertEqual(by_id[t2], "blocked")
+        self.assertEqual(by_id[t_mr], "failed")
+        self.assertEqual(by_id[t_mr_child], "blocked")
 
         # Superseded dispatch cannot clobber a newer active retry dispatch's task
         tr = self.store.task_create(spec="retried", run="run-d")["task"]["id"]

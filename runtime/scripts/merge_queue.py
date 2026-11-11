@@ -1393,8 +1393,18 @@ class MergeQueue:
     _SHELL_BUILTINS = frozenset({
         "true", "false", "test", "[", "echo", "printf", "exit", "cd", "pwd",
         "export", "set", "unset", "shift", "return", "break", "continue", ":",
-        "if", "then", "else", "elif", "fi", "for", "in", "while", "until", "do", "done", "case", "esac",
+        "read", "umask", "wait", "trap", "local", "readonly", "typeset", "declare",
+        "getopts", "hash", "type", "ulimit", "times", "alias", "unalias",
+        "if", "then", "else", "elif", "fi", "for", "select", "in", "while", "until",
+        "do", "done", "case", "esac",
     })
+    _COMPOUND_PREFIX_KEYWORDS = frozenset({
+        "!", "{", "}", "if", "then", "elif", "else", "while", "until", "do",
+    })
+    _COMPOUND_CLOSE_KEYWORDS = frozenset({"fi", "done"})
+    _REDIR_OPS = (
+        "&>>", "&>", "<<-", ">>", ">&", "<>", "<<", "<&", ">|", ">", "<",
+    )
 
     @classmethod
     def _allowed_extra_keep(cls, name: str) -> bool:
@@ -1452,101 +1462,562 @@ class MergeQueue:
         return env
 
     @classmethod
-    def _extract_gate_executables(cls, gate_cmd: str, _depth: int = 0) -> list[str]:
-        if _depth > 4:
-            return []
-        tokens: list[str] = []
-        try:
-            lex = shlex.shlex(gate_cmd.replace("\n", ";"), posix=True, punctuation_chars=";&|()")
-            lex.whitespace = " \t\r"
-            lex.whitespace_split = True
-            raw_tokens = list(lex)
-        except ValueError:
-            raw_tokens = gate_cmd.split()
-        seps = {";", "&", "&&", "|", "||", "|&", "(", ")", "{", "}"}
-        segments: list[list[str]] = [[]]
-        for tok in raw_tokens:
-            if tok in seps:
-                segments.append([])
-            else:
-                segments[-1].append(tok)
-        for words in segments:
-            if not words:
+    def _strip_cmd_substitutions(cls, cmd: str) -> tuple[str, list[str], list[str]]:
+        """Replace `$(...)` and backtick command substitutions outside single quotes with a sentinel
+        token while returning every inner command string for recursive fingerprinting."""
+        out: list[str] = []
+        subs: list[str] = []
+        problems: list[str] = []
+        i, n = 0, len(cmd)
+        in_sq = False
+        in_dq = False
+        while i < n:
+            ch = cmd[i]
+            if in_sq:
+                out.append(ch)
+                if ch == "'":
+                    in_sq = False
+                i += 1
                 continue
-            idx = 0
-            while idx < len(words) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[idx]):
-                idx += 1
-            while idx < len(words) and words[idx] in (
-                "env", "/usr/bin/env", "command", "exec", "nohup", "nice", "timeout",
-            ):
-                w = words[idx]
-                if w not in ("command", "exec"):
-                    tokens.append(w)
-                idx += 1
-                if w in ("env", "/usr/bin/env"):
-                    while idx < len(words):
-                        a = words[idx]
-                        if a == "--":
-                            idx += 1
+            if ch == "\\":
+                out.append(cmd[i:i + 2])
+                i += 2
+                continue
+            if ch == "'" and not in_dq:
+                in_sq = True
+                out.append(ch)
+                i += 1
+                continue
+            if ch == '"':
+                in_dq = not in_dq
+                out.append(ch)
+                i += 1
+                continue
+            if ch == "$" and i + 1 < n and cmd[i + 1] == "(":
+                if i + 2 < n and cmd[i + 2] == "(":
+                    # Arithmetic expansion `$(( ... ))` — find matching `))`
+                    depth = 1
+                    j = i + 2
+                    while j < n and depth > 0:
+                        if cmd[j] == "\\":
+                            j += 2
+                            continue
+                        if cmd[j] == "(":
+                            depth += 1
+                        elif cmd[j] == ")":
+                            depth -= 1
+                        j += 1
+                    if depth == 0 and j < n and cmd[j] == ")":
+                        out.append("0")
+                        i = j + 1
+                        continue
+                depth = 1
+                j = i + 2
+                sub_sq = False
+                sub_dq = False
+                while j < n and depth > 0:
+                    c2 = cmd[j]
+                    if sub_sq:
+                        if c2 == "'":
+                            sub_sq = False
+                        j += 1
+                        continue
+                    if c2 == "\\":
+                        j += 2
+                        continue
+                    if c2 == "'" and not sub_dq:
+                        sub_sq = True
+                    elif c2 == '"':
+                        sub_dq = not sub_dq
+                    elif not sub_dq and c2 == "(":
+                        depth += 1
+                    elif not sub_dq and c2 == ")":
+                        depth -= 1
+                        if depth == 0:
                             break
-                        if a == "-S" and idx + 1 < len(words):
-                            tokens.extend(cls._extract_gate_executables(words[idx + 1], _depth + 1))
-                            idx = len(words)
+                    elif sub_dq and c2 == "$" and j + 1 < n and cmd[j + 1] == "(":
+                        depth += 1
+                        j += 1
+                    j += 1
+                if depth != 0:
+                    problems.append("unterminated $(...) command substitution")
+                    break
+                subs.append(cmd[i + 2:j])
+                out.append("__MQ_CMDSUB__")
+                i = j + 1
+                continue
+            if ch == "`":
+                j = i + 1
+                buf: list[str] = []
+                while j < n and cmd[j] != "`":
+                    if cmd[j] == "\\" and j + 1 < n and cmd[j + 1] in ("\\", "`", "$", '"'):
+                        buf.append(cmd[j + 1])
+                        j += 2
+                        continue
+                    buf.append(cmd[j])
+                    j += 1
+                if j >= n:
+                    problems.append("unterminated backtick command substitution")
+                    break
+                subs.append("".join(buf))
+                out.append("__MQ_CMDSUB__")
+                i = j + 1
+                continue
+            out.append(ch)
+            i += 1
+        if in_sq or in_dq:
+            problems.append("unterminated quote in gate command")
+        return "".join(out), subs, problems
+
+    @classmethod
+    def _lex_gate_tokens(cls, cmd: str) -> tuple[list[tuple[str, str, Any]], list[str]]:
+        """Return `[(kind, text, quote_or_dynamic_flag)]` where `kind` is `'op'`, `'redir'`, or `'word'`."""
+        tokens: list[tuple[str, str, Any]] = []
+        problems: list[str] = []
+        i, n = 0, len(cmd)
+        ctrl_ops = (";;&", ";&", ";;", "&&", "||", "|&", ";", "&", "|", "(", ")")
+        while i < n:
+            ch = cmd[i]
+            if ch in (" ", "\t", "\r"):
+                i += 1
+                continue
+            if ch == "#":
+                while i < n and cmd[i] != "\n":
+                    i += 1
+                continue
+            if ch == "\n":
+                tokens.append(("op", ";", False))
+                i += 1
+                continue
+            # Optional fd digits before a redirection operator (e.g. `2>&1`, `0</dev/null`)
+            fd_end = i
+            while fd_end < n and cmd[fd_end].isdigit():
+                fd_end += 1
+            if fd_end > i and fd_end < n and cmd[fd_end] in (">", "<"):
+                matched_redir = next((op for op in cls._REDIR_OPS if cmd.startswith(op, fd_end)), None)
+                if matched_redir:
+                    tokens.append(("redir", cmd[i:fd_end] + matched_redir, False))
+                    i = fd_end + len(matched_redir)
+                    continue
+            matched_redir = next((op for op in cls._REDIR_OPS if cmd.startswith(op, i)), None)
+            if matched_redir:
+                tokens.append(("redir", matched_redir, False))
+                i += len(matched_redir)
+                continue
+            matched_op = next((op for op in ctrl_ops if cmd.startswith(op, i)), None)
+            if matched_op:
+                tokens.append(("op", matched_op, False))
+                i += len(matched_op)
+                continue
+            # Read one shell word
+            buf: list[str] = []
+            quoted = False
+            dynamic = False
+            while i < n:
+                c = cmd[i]
+                if c in (" ", "\t", "\r", "\n"):
+                    break
+                if any(cmd.startswith(op, i) for op in (*ctrl_ops, *cls._REDIR_OPS)):
+                    break
+                if c == "\\":
+                    quoted = True
+                    if i + 1 < n:
+                        buf.append(cmd[i + 1])
+                        i += 2
+                    else:
+                        i += 1
+                    continue
+                if c == "'":
+                    quoted = True
+                    i += 1
+                    while i < n and cmd[i] != "'":
+                        buf.append(cmd[i])
+                        i += 1
+                    if i >= n:
+                        problems.append("unterminated single quote")
+                        break
+                    i += 1
+                    continue
+                if c == '"':
+                    quoted = True
+                    i += 1
+                    while i < n and cmd[i] != '"':
+                        if cmd[i] == "\\" and i + 1 < n and cmd[i + 1] in ('"', "\\", "$", "`", "\n"):
+                            buf.append(cmd[i + 1])
+                            i += 2
+                            continue
+                        if cmd[i] == "$":
+                            dynamic = True
+                        buf.append(cmd[i])
+                        i += 1
+                    if i >= n:
+                        problems.append("unterminated double quote")
+                        break
+                    i += 1
+                    continue
+                if c == "$" or c in ("*", "?", "["):
+                    if c == "$" or buf:
+                        dynamic = True
+                    elif c != "[":
+                        dynamic = True
+                buf.append(c)
+                i += 1
+            word = "".join(buf)
+            if "__MQ_CMDSUB__" in word:
+                dynamic = True
+            flag_val: Any = (dynamic or False) if not quoted else (True if dynamic else "quoted")
+            tokens.append(("word", word, flag_val))
+        return tokens, problems
+
+    @classmethod
+    def _analyze_gate_command(cls, gate_cmd: str, _depth: int = 0) -> tuple[list[str], list[str], list[str]]:
+        """Extract `(executables, sourced_files, problems)` across simple and compound shell syntax."""
+        if _depth > 6:
+            return [], [], ["gate command recursion depth exceeded"]
+        sanitized, subs, sub_problems = cls._strip_cmd_substitutions(gate_cmd)
+        executables: list[str] = []
+        sourced: list[str] = []
+        problems: list[str] = list(sub_problems)
+        for sub in subs:
+            s_exe, s_src, s_prob = cls._analyze_gate_command(sub, _depth + 1)
+            executables.extend(s_exe)
+            sourced.extend(s_src)
+            problems.extend(s_prob)
+        lex_tokens, lex_problems = cls._lex_gate_tokens(sanitized)
+        problems.extend(lex_problems)
+
+        def is_unquoted(flag: Any) -> bool:
+            return flag is False
+
+        def is_dynamic(flag: Any) -> bool:
+            return flag is True
+
+        expect_cmd = True
+        in_for_header = False
+        in_case_header = False
+        case_depth = 0
+        in_case_pattern = False
+        in_double_bracket = False
+        defined_funcs: set[str] = set()
+        idx, total = 0, len(lex_tokens)
+
+        while idx < total:
+            kind, tok, flag = lex_tokens[idx]
+            if in_double_bracket:
+                if kind == "word" and is_unquoted(flag) and tok == "]]":
+                    in_double_bracket = False
+                idx += 1
+                continue
+            if kind == "redir":
+                idx += 1
+                if idx < total and lex_tokens[idx][0] == "word":
+                    idx += 1  # skip redirection target ( never an executable )
+                continue
+            if kind == "op":
+                if tok in (";;", ";&", ";;&") and case_depth > 0:
+                    in_case_pattern = True
+                    expect_cmd = False
+                    in_for_header = False
+                elif tok == ")" and in_case_pattern:
+                    in_case_pattern = False
+                    expect_cmd = True
+                else:
+                    in_for_header = False
+                    expect_cmd = True
+                idx += 1
+                continue
+
+            # kind == "word"
+            if in_for_header:
+                idx += 1
+                continue
+            if in_case_header:
+                if is_unquoted(flag) and tok == "in":
+                    in_case_header = False
+                    case_depth += 1
+                    in_case_pattern = True
+                idx += 1
+                continue
+            if in_case_pattern:
+                if is_unquoted(flag) and tok == "esac" and case_depth > 0:
+                    case_depth -= 1
+                    in_case_pattern = False
+                    expect_cmd = False
+                idx += 1
+                continue
+            if not expect_cmd:
+                idx += 1
+                continue
+
+            # Command position: peel assignments and compound keywords
+            if is_unquoted(flag) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tok):
+                idx += 1
+                continue
+            if is_unquoted(flag) and tok in cls._COMPOUND_PREFIX_KEYWORDS:
+                idx += 1
+                continue
+            if is_unquoted(flag) and tok == "time":
+                idx += 1
+                while idx < total and lex_tokens[idx][0] == "word" and lex_tokens[idx][1] in ("-p", "--"):
+                    prev = lex_tokens[idx][1]
+                    idx += 1
+                    if prev == "--":
+                        break
+                continue
+            if is_unquoted(flag) and tok in cls._COMPOUND_CLOSE_KEYWORDS:
+                expect_cmd = False
+                idx += 1
+                continue
+            if is_unquoted(flag) and tok == "esac":
+                if case_depth > 0:
+                    case_depth -= 1
+                expect_cmd = False
+                idx += 1
+                continue
+            if is_unquoted(flag) and tok in ("for", "select"):
+                in_for_header = True
+                expect_cmd = False
+                idx += 1
+                continue
+            if is_unquoted(flag) and tok == "case":
+                in_case_header = True
+                expect_cmd = False
+                idx += 1
+                continue
+            if is_unquoted(flag) and tok == "[[":
+                in_double_bracket = True
+                expect_cmd = False
+                idx += 1
+                continue
+            if is_unquoted(flag) and tok == "function":
+                idx += 1
+                if idx < total and lex_tokens[idx][0] == "word":
+                    defined_funcs.add(lex_tokens[idx][1])
+                    idx += 1
+                if idx + 1 < total and lex_tokens[idx][:2] == ("op", "(") and lex_tokens[idx + 1][:2] == ("op", ")"):
+                    idx += 2
+                continue
+            # POSIX function definition `fname () { ... }`
+            if (is_unquoted(flag) and idx + 2 < total
+                    and lex_tokens[idx + 1][:2] == ("op", "(") and lex_tokens[idx + 2][:2] == ("op", ")")):
+                defined_funcs.add(tok)
+                idx += 3
+                expect_cmd = True
+                continue
+
+            if is_dynamic(flag):
+                problems.append(f"dynamic command word {tok!r} cannot be statically fingerprinted")
+                expect_cmd = False
+                idx += 1
+                continue
+
+            # Collect remaining words of this simple command (skipping redirections + their targets)
+            cmd_words: list[tuple[str, Any]] = [(tok, flag)]
+            scan = idx + 1
+            while scan < total and lex_tokens[scan][0] != "op":
+                if lex_tokens[scan][0] == "redir":
+                    scan += 2 if (scan + 1 < total and lex_tokens[scan + 1][0] == "word") else 1
+                    continue
+                cmd_words.append((lex_tokens[scan][1], lex_tokens[scan][2]))
+                scan += 1
+            idx = scan
+            expect_cmd = False
+
+            # Peel command-executing wrappers (`env`, `nice`, `timeout`, `nohup`, `command`, `exec`)
+            wi = 0
+            while wi < len(cmd_words):
+                cw, cflag = cmd_words[wi]
+                if is_unquoted(cflag) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", cw):
+                    wi += 1
+                    continue
+                if is_dynamic(cflag):
+                    problems.append(f"dynamic command word {cw!r} cannot be statically fingerprinted")
+                    wi = len(cmd_words)
+                    break
+                if cw in ("env", "/usr/bin/env"):
+                    executables.append(cw)
+                    wi += 1
+                    broke_env_s = False
+                    while wi < len(cmd_words):
+                        a, aflag = cmd_words[wi]
+                        if a == "--":
+                            wi += 1
+                            break
+                        if a == "-S" and wi + 1 < len(cmd_words):
+                            sa, sflag = cmd_words[wi + 1]
+                            if is_dynamic(sflag):
+                                problems.append("env -S: dynamic argument cannot be fingerprinted")
+                            else:
+                                e2, s2, p2 = cls._analyze_gate_command(sa, _depth + 1)
+                                executables.extend(e2)
+                                sourced.extend(s2)
+                                problems.extend(p2)
+                            wi = len(cmd_words)
+                            broke_env_s = True
                             break
                         if a.startswith("-S") and len(a) > 2:
-                            tokens.extend(cls._extract_gate_executables(a[2:], _depth + 1))
-                            idx = len(words)
+                            if is_dynamic(aflag):
+                                problems.append("env -S: dynamic argument cannot be fingerprinted")
+                            else:
+                                e2, s2, p2 = cls._analyze_gate_command(a[2:], _depth + 1)
+                                executables.extend(e2)
+                                sourced.extend(s2)
+                                problems.extend(p2)
+                            wi = len(cmd_words)
+                            broke_env_s = True
                             break
-                        if a in ("-u", "--unset", "-C", "--chdir") and idx + 1 < len(words):
-                            idx += 2
+                        if a in ("-u", "--unset", "-C", "--chdir") and wi + 1 < len(cmd_words):
+                            wi += 2
                             continue
-                        if a.startswith("-") or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", a):
-                            idx += 1
+                        if a.startswith("-") or (is_unquoted(aflag) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", a)):
+                            wi += 1
                             continue
                         break
-                    while idx < len(words) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[idx]):
-                        idx += 1
-                elif w == "nice":
-                    while idx < len(words) and words[idx].startswith("-"):
-                        if words[idx] == "--":
-                            idx += 1
+                    if broke_env_s:
+                        break
+                    continue
+                if cw == "nice":
+                    executables.append(cw)
+                    wi += 1
+                    while wi < len(cmd_words) and cmd_words[wi][0].startswith("-"):
+                        if cmd_words[wi][0] == "--":
+                            wi += 1
                             break
-                        idx += 2 if words[idx] in ("-n", "--adjustment") else 1
-                elif w == "timeout":
-                    while idx < len(words) and words[idx].startswith("-"):
-                        if words[idx] == "--":
-                            idx += 1
+                        wi += 2 if cmd_words[wi][0] in ("-n", "--adjustment") else 1
+                    continue
+                if cw == "timeout":
+                    executables.append(cw)
+                    wi += 1
+                    while wi < len(cmd_words) and cmd_words[wi][0].startswith("-"):
+                        if cmd_words[wi][0] == "--":
+                            wi += 1
                             break
-                        idx += 2 if words[idx] in ("-k", "--kill-after", "-s", "--signal") else 1
-                    if idx < len(words):
-                        idx += 1  # duration
+                        wi += 2 if cmd_words[wi][0] in ("-k", "--kill-after", "-s", "--signal") else 1
+                    if wi < len(cmd_words):
+                        wi += 1  # duration
+                    continue
+                if cw == "nohup":
+                    executables.append(cw)
+                    wi += 1
+                    while wi < len(cmd_words) and cmd_words[wi][0].startswith("-"):
+                        if cmd_words[wi][0] == "--":
+                            wi += 1
+                            break
+                        wi += 1
+                    continue
+                if cw in ("command", "builtin"):
+                    wi += 1
+                    query_only = False
+                    while wi < len(cmd_words) and cmd_words[wi][0].startswith("-"):
+                        opt = cmd_words[wi][0]
+                        wi += 1
+                        if opt == "--":
+                            break
+                        if "v" in opt[1:] or "V" in opt[1:]:
+                            query_only = True
+                    if query_only:
+                        wi = len(cmd_words)
+                        break
+                    continue
+                if cw == "exec":
+                    wi += 1
+                    while wi < len(cmd_words) and cmd_words[wi][0].startswith("-"):
+                        opt = cmd_words[wi][0]
+                        if opt == "--":
+                            wi += 1
+                            break
+                        wi += 2 if opt == "-a" else 1
+                    continue
+                break
+
+            if wi >= len(cmd_words):
+                continue
+            final_word, final_flag = cmd_words[wi]
+            if is_dynamic(final_flag):
+                problems.append(f"dynamic command word {final_word!r} cannot be statically fingerprinted")
+                continue
+            if final_word == "eval":
+                problems.append("eval cannot be statically fingerprinted")
+                continue
+            if final_word in (".", "source"):
+                if wi + 1 >= len(cmd_words) or is_dynamic(cmd_words[wi + 1][1]):
+                    problems.append(f"{final_word}: dynamic or missing script target cannot be fingerprinted")
                 else:
-                    while idx < len(words) and words[idx].startswith("-"):
-                        if words[idx] == "--":
-                            idx += 1
-                            break
-                        idx += 1
-            if idx < len(words):
-                tok = words[idx].strip("()'\"")
-                if tok and tok not in cls._SHELL_BUILTINS:
-                    tokens.append(tok)
-                if Path(tok).name in cls._SHELL_NAMES:
-                    for j in range(idx + 1, len(words)):
-                        a = words[j]
-                        if a == "--":
-                            break
-                        if a == "-c" or (a.startswith("-") and not a.startswith("--") and "c" in a[1:]):
-                            if j + 1 < len(words):
-                                tokens.extend(cls._extract_gate_executables(words[j + 1], _depth + 1))
-                            break
-        return tokens
+                    sourced.append(cmd_words[wi + 1][0])
+                continue
+            if final_word and final_word not in cls._SHELL_BUILTINS and final_word not in defined_funcs:
+                executables.append(final_word)
+            if Path(final_word).name in cls._SHELL_NAMES:
+                for j in range(wi + 1, len(cmd_words)):
+                    a, _ = cmd_words[j]
+                    if a == "--":
+                        break
+                    if a == "-c" or (a.startswith("-") and not a.startswith("--") and "c" in a[1:]):
+                        if j + 1 < len(cmd_words):
+                            sub_script, sub_flag = cmd_words[j + 1]
+                            if is_dynamic(sub_flag):
+                                problems.append(f"{final_word} -c: dynamic script cannot be fingerprinted")
+                            else:
+                                e2, s2, p2 = cls._analyze_gate_command(sub_script, _depth + 1)
+                                executables.extend(e2)
+                                sourced.extend(s2)
+                                problems.extend(p2)
+                        break
+        return executables, sourced, problems
+
+    @classmethod
+    def _extract_gate_executables(cls, gate_cmd: str, _depth: int = 0) -> list[str]:
+        exes, sourced, _ = cls._analyze_gate_command(gate_cmd, _depth=_depth)
+        return [*exes, *sourced]
+
+    def _read_sourced_gate_script(self, tok: str, cwd: Path | None, commit: str | None) -> str | None:
+        if os.path.isabs(tok):
+            p = Path(tok)
+            if p.is_file():
+                try:
+                    return p.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    return None
+            return None
+        if cwd is not None:
+            cand = (cwd / tok).resolve()
+            cwd_real = cwd.resolve()
+            if (cand == cwd_real or cwd_real in cand.parents) and cand.is_file():
+                try:
+                    return cand.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    return None
+            return None
+        norm_tok = Path(os.path.normpath(tok)).as_posix().lstrip("./")
+        if commit and norm_tok and not norm_tok.startswith(".."):
+            try:
+                proc = subprocess.run(
+                    [self.git.bin, *self.git.HARDENED_CONFIG, "-C", self.git.repo_dir,
+                     "cat-file", "blob", f"{commit}:{norm_tok}"],
+                    capture_output=True, env=self.git.env, timeout=30,
+                )
+                if proc.returncode == 0:
+                    return proc.stdout.decode("utf-8", errors="replace")
+            except (OSError, subprocess.SubprocessError):
+                return None
+        return None
 
     def _gate_fingerprint(self, gate_cmd: str, cwd: Path | None = None,
-                          commit: str | None = None) -> tuple[str, list[str]]:
+                          commit: str | None = None, _depth: int = 0) -> tuple[str, list[str]]:
+        if _depth > 4:
+            return "", ["sourced script recursion depth exceeded"]
         clean_path = self._clean_gate_path()
         items: list[dict[str, Any]] = []
-        problems: list[str] = []
-        candidates = ["/bin/sh", *self._extract_gate_executables(gate_cmd)]
+        exes, sourced, problems = self._analyze_gate_command(gate_cmd)
+        for src in sourced:
+            src_text = self._read_sourced_gate_script(src, cwd, commit)
+            if src_text is None:
+                problems.append(f"source {src}: script cannot be read for static executable analysis")
+            else:
+                sub_fp, sub_probs = self._gate_fingerprint(src_text, cwd=cwd, commit=commit, _depth=_depth + 1)
+                problems.extend(sub_probs)
+                items.append({"tok": f"source:{src}", "sub_fp": sub_fp})
+        candidates = ["/bin/sh", *exes, *sourced]
         seen: set[str] = set()
         for tok in candidates:
             if tok in seen:
@@ -1613,18 +2084,99 @@ class MergeQueue:
 
     @staticmethod
     @functools.lru_cache(maxsize=1)
-    def _bwrap_bin() -> str | None:
+    def _bwrap_mode() -> tuple[str, tuple[str, ...]] | None:
         bw = shutil.which("bwrap")
         if not bw:
             return None
+        for flags in (
+            ("--unshare-all",),
+            ("--unshare-pid", "--unshare-ipc", "--unshare-uts"),
+        ):
+            try:
+                r = subprocess.run(
+                    [bw, *flags, "--ro-bind", "/", "/", "--proc", "/proc", "/bin/true"],
+                    capture_output=True, timeout=5, stdin=subprocess.DEVNULL,
+                )
+                if r.returncode == 0:
+                    return bw, flags
+            except (OSError, subprocess.SubprocessError):
+                continue
+        return None
+
+    @classmethod
+    def _bwrap_bin(cls) -> str | None:
+        mode = cls._bwrap_mode()
+        return mode[0] if mode is not None else None
+
+    @staticmethod
+    @functools.lru_cache(maxsize=1)
+    def _unshare_mount_proc_argv() -> tuple[str, ...] | None:
+        un = shutil.which("unshare")
+        if not un:
+            return None
+        for map_flag in ("--map-current-user", "--map-root-user"):
+            argv = (un, "--user", map_flag, "--pid", "--mount", "--fork", "--mount-proc")
+            try:
+                r = subprocess.run(
+                    [*argv, "/bin/true"],
+                    capture_output=True, timeout=5, stdin=subprocess.DEVNULL,
+                )
+                if r.returncode == 0:
+                    return argv
+            except (OSError, subprocess.SubprocessError):
+                continue
+        return None
+
+    @staticmethod
+    @functools.lru_cache(maxsize=1)
+    def _unshare_hidepid_argv() -> tuple[str, ...] | None:
+        """Unprivileged user+PID namespace where kernel `hidepid=2`/`invisible` hides all outside PIDs."""
+        un = shutil.which("unshare")
+        if not un:
+            return None
+        argv = (un, "--user", "--pid", "--fork")
+        probe = (
+            "import os,sys; "
+            "outside=any(os.path.exists(f'/proc/{p}') for p in sys.argv[1:] if int(p) > 1); "
+            "sys.exit(0 if (os.getpid() == 1 and not outside) else 1)"
+        )
         try:
             r = subprocess.run(
-                [bw, "--unshare-all", "--ro-bind", "/", "/", "/bin/true"],
+                [*argv, sys.executable, "-I", "-c", probe, str(os.getpid()), str(os.getppid())],
                 capture_output=True, timeout=5, stdin=subprocess.DEVNULL,
             )
-            return bw if r.returncode == 0 else None
+            return argv if r.returncode == 0 else None
         except (OSError, subprocess.SubprocessError):
             return None
+
+    @classmethod
+    def _has_native_gate_isolation(cls, *, require_full_sandbox: bool = False) -> bool:
+        if cls._bwrap_mode() is not None or cls._unshare_mount_proc_argv() is not None:
+            return True
+        if not require_full_sandbox and cls._unshare_hidepid_argv() is not None:
+            return True
+        return False
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _non_dumpable_conductor():
+        """Mark the conductor non-dumpable (`PR_SET_DUMPABLE=0`) on Linux while gate code executes."""
+        prev: int | None = None
+        libc: Any = None
+        if sys.platform.startswith("linux"):
+            with contextlib.suppress(Exception):
+                import ctypes
+                libc = ctypes.CDLL(None)
+                got = libc.prctl(3, 0, 0, 0, 0)  # PR_GET_DUMPABLE
+                if got >= 0:
+                    prev = int(got)
+                    libc.prctl(4, 0, 0, 0, 0)  # PR_SET_DUMPABLE = 0
+        try:
+            yield
+        finally:
+            if libc is not None and prev is not None and prev != 0:
+                with contextlib.suppress(Exception):
+                    libc.prctl(4, prev, 0, 0, 0)
 
     def _conductor_state_digest(self) -> str:
         """Digest conductor SQLite state + git refs so same-UID gate tampering fails closed."""
@@ -1649,9 +2201,10 @@ class MergeQueue:
         ).strip()
         if custom_sbx:
             return [*shlex.split(custom_sbx), "/bin/sh", "-c", gate_cmd]
-        bw = self._bwrap_bin()
-        if bw is not None:
-            cmd = [bw, "--unshare-all", "--die-with-parent", "--proc", "/proc", "--dev", "/dev"]
+        bw_mode = self._bwrap_mode()
+        if bw_mode is not None:
+            bw, ns_flags = bw_mode
+            cmd = [bw, *ns_flags, "--die-with-parent", "--proc", "/proc", "--dev", "/dev"]
             for sys_dir in ("/usr", "/bin", "/lib", "/lib64", "/sbin", "/etc", "/opt"):
                 if os.path.exists(sys_dir):
                     cmd += ["--ro-bind", sys_dir, sys_dir]
@@ -1669,19 +2222,18 @@ class MergeQueue:
                 "/bin/sh", "-c", gate_cmd,
             ]
             return cmd
-        if req_sbx:
-            raise QueueError(
-                "sandbox_unavailable",
-                "MQ_REQUIRE_GATE_SANDBOX requires bubblewrap (bwrap) or MQ_GATE_SANDBOX_CMD, "
-                "neither is usable in this environment",
-            )
-        # Unprivileged container fallback: isolate $PPID via a scrubbed `python -I` supervisor so
-        # `/proc/$PPID/environ` and `/proc/$PPID/cmdline` hold zero conductor secrets or DB paths.
-        return [
-            sys.executable, "-I", "-c",
-            "import subprocess,sys; raise SystemExit(subprocess.call(['/bin/sh','-c',sys.argv[1]]))",
-            gate_cmd,
-        ]
+        un_mp = self._unshare_mount_proc_argv()
+        if un_mp is not None and not req_sbx:
+            return [*un_mp, "/bin/sh", "-c", gate_cmd]
+        if not req_sbx:
+            un_hp = self._unshare_hidepid_argv()
+            if un_hp is not None:
+                return [*un_hp, "/bin/sh", "-c", gate_cmd]
+        raise QueueError(
+            "sandbox_unavailable",
+            "gate execution requires bubblewrap (bwrap), unshare with isolated /proc, or MQ_GATE_SANDBOX_CMD; "
+            "refusing to execute gate with conductor /proc exposed",
+        )
 
     def _run_gate(self, gate_cmd: str, commit: str, e: dict[str, Any], timeout: float) -> dict[str, Any]:
         tmp = tempfile.mkdtemp(prefix="mq-gate-")
@@ -1707,17 +2259,18 @@ class MergeQueue:
             exec_argv = self._gate_exec_argv(gate_cmd, checkout, gate_home, gate_tmp)
             # Its own session, so a timeout kills everything the gate started: a grandchild left
             # holding the output pipe would otherwise stretch the timeout to its own lifetime.
-            proc = subprocess.Popen(exec_argv, cwd=checkout, env=env, stdin=subprocess.DEVNULL,
-                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                                    close_fds=True, start_new_session=True)
-            try:
-                out, _ = proc.communicate(timeout=timeout)
-                code, tail = proc.returncode, (out or "")[-500:]
-            except subprocess.TimeoutExpired:
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(proc.pid, signal.SIGKILL)
-                proc.communicate()
-                code, tail = 124, f"gate timed out after {timeout}s"
+            with self._non_dumpable_conductor():
+                proc = subprocess.Popen(exec_argv, cwd=checkout, env=env, stdin=subprocess.DEVNULL,
+                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                        close_fds=True, start_new_session=True)
+                try:
+                    out, _ = proc.communicate(timeout=timeout)
+                    code, tail = proc.returncode, (out or "")[-500:]
+                except subprocess.TimeoutExpired:
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    proc.communicate()
+                    code, tail = 124, f"gate timed out after {timeout}s"
             post_fp, post_problems = self._gate_fingerprint(gate_cmd, cwd=checkout)
             post_plan_fp, post_plan_problems = self._gate_fingerprint(gate_cmd, commit=commit)
             post_state = self._conductor_state_digest()
@@ -1748,10 +2301,11 @@ class MergeQueue:
                 and bool(e.get("prefix_commit")) and gate.get("commit") == e.get("prefix_commit")):
             return False
         saved_fp = gate.get("fingerprint")
-        if saved_fp is not None:
-            current_fp, problems = self._gate_fingerprint(gate_cmd, commit=e.get("prefix_commit"))
-            if problems or saved_fp != current_fp:
-                return False
+        if not isinstance(saved_fp, str) or not saved_fp:
+            return False
+        current_fp, problems = self._gate_fingerprint(gate_cmd, commit=e.get("prefix_commit"))
+        if problems or saved_fp != current_fp:
+            return False
         return True
 
     def merge(self, token: str, *, entry_id: str | None = None, delete_branch: bool = True,

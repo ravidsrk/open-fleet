@@ -306,9 +306,10 @@ class T3CodeProvider(RuntimeProvider):
         thread_id = to_handle.split(":", 1)[1] if to_handle.startswith("t3:") else to_handle
         if not thread_id:
             raise ProviderError("invalid_handle", "dispatch --to needs a t3:<threadId> handle")
+        resolved_run = self.state._resolve_caller_run(run, default_run=None)
         message = self.resolve_task_prompt(task_id, prompt)
-        claimed, eff_run = claim_local_task(self.state, task_id, run)
-        target_run = eff_run or run or "default"
+        claimed, eff_run = claim_local_task(self.state, task_id, resolved_run)
+        target_run = eff_run or resolved_run or "default"
         with self.state._connect() as conn:
             orig = conn.execute(
                 "SELECT worktree, agent, profile, run_id FROM dispatches WHERE backend = ? AND (dispatch_id = ? OR terminal_handle = ?) ORDER BY created_at ASC LIMIT 1",

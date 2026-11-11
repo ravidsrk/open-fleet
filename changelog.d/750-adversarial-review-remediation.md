@@ -15,7 +15,7 @@
   `runtime/providers/posix.py`, and the 12 external orchestrator adapters enforce Run boundaries
   (including launched-worker implicit Run defaults), coordinator-takeover and `"default"`-run
   fencing, pre-side-effect local task claiming (`ready -> dispatched`) and settlement on
-  `worker_done`/`worker_died`, atomic payload-bound request idempotency, ambient-Git-immune state DB
+  `worker_done`/`merge_ready`, atomic payload-bound request idempotency, ambient-Git-immune state DB
   resolution, strict non-negative terminal/worker cursor pagination with `source`/`truncated`
   metadata, `0600` inbox/message permissions with fence cleanup, and preserved refs on Multiclaude
   release (`C1`, `C24`, `C28`–`C35`, `C37`, `C38`, `C40`). `scripts/live_broker.py` and

@@ -279,7 +279,7 @@ def case_token(case_id):
     return hashlib.sha256(f"{ADAPTER_CONTRACT}\0{case_id}".encode("utf-8")).hexdigest()[:16]
 
 
-_BOOLEAN_FLAGS = ("--no-gh", "--execute-nc")
+_BOOLEAN_FLAGS = ("--no-gh", "--execute-nc", "--allow-static-nc")
 
 
 def coordinator_inputs(argv):

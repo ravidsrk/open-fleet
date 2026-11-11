@@ -923,6 +923,54 @@ class TestExternalAdversarialRemediation750(ProviderTestBase):
         st = {t["id"]: t["status"] for t in self.state.task_list(run="run-t3")["tasks"]}
         self.assertEqual(st[t_ambig], "dispatched")
 
+        # C28/C29: Launched worker bound to run-t3 cannot claim, launch, or inject tasks in run-other
+        # either implicitly (omitting run) or explicitly (passing run='run-other')
+        t_foreign = self.state.task_create(spec="foreign-secret", run="run-other")["task"]["id"]
+        t_own_ready = self.state.task_create(spec="own-ready", run="run-t3")["task"]["id"]
+        bound_state = LocalStateStore(
+            self.state.db_path,
+            env={"OPEN_FLEET_DISPATCH_ID": "thr-1", "OPEN_FLEET_TERMINAL_HANDLE": "t3:thr-1"},
+        )
+        wt_calls: list[list[str]] = []
+
+        def guard_wt_runner(argv: list[str], **_kw: object) -> object:
+            wt_calls.append(list(argv))
+            return {}
+
+        bound_wt = WorktrunkProvider(
+            state=bound_state,
+            runner=guard_wt_runner,
+            install_hooks=lambda w, a, p: {},
+        )
+        t3_calls: list[dict[str, object]] = []
+
+        def guard_t3_runner(call: dict[str, object], **_kw: object) -> dict[str, object]:
+            t3_calls.append(dict(call))
+            return {"structuredContent": {}, "isError": False}
+
+        bound_t3 = T3CodeProvider(
+            state=bound_state,
+            runner=guard_t3_runner,
+            env={"OPEN_FLEET_T3_PROJECT_ID": "proj-1", "OPEN_FLEET_DISPATCH_ID": "thr-1"},
+            hooks=lambda w, a, p: {},
+        )
+        for bad_call in (
+            lambda: bound_wt.worker_start(task_id=t_foreign, agent="claude", profile="rw", prompt="go"),
+            lambda: bound_wt.worker_start(task_id=t_own_ready, agent="claude", profile="rw", prompt="go", run="run-other"),
+            lambda: bound_wt.worker_start(task_id=t_foreign, agent="claude", profile="rw"),
+            lambda: bound_t3.dispatch_inject(task_id=t_foreign, to_handle="t3:thr-1", prompt="go"),
+            lambda: bound_t3.dispatch_inject(task_id=t_own_ready, to_handle="t3:thr-1", prompt="go", run="run-other"),
+        ):
+            with self.assertRaises(ProviderError) as ctx_bound:
+                bad_call()
+            self.assertEqual(ctx_bound.exception.code, "cross_run_access")
+        self.assertEqual(wt_calls, [])
+        self.assertEqual(t3_calls, [])
+        self.assertEqual(
+            {t["id"]: t["status"] for t in self.state.task_list(run="run-other")["tasks"]}[t_foreign],
+            "ready",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
