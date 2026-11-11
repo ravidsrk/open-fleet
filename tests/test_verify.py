@@ -2911,6 +2911,27 @@ class EndToEndMutationGreen(MutationFixture):
                 )
                 self.assertIsNone(recs_alias)
                 self.assertIn('via alias', err_alias)
+
+                env_bin = shutil.which('env')
+                if env_bin:
+                    rel_env_wrap = ext_root / 'wrap-rel-env'
+                    rel_env_wrap.write_text(f'#!{env_bin} usr/bin/sh\nexit 0\n', encoding='utf-8')
+                    rel_env_wrap.chmod(0o755)
+                    prev_cwd = os.getcwd()
+                    try:
+                        os.chdir('/')
+                        recs_rel_env, err_rel_env = verify._Authority.nc_exec_identity(
+                            [str(rel_env_wrap)], str(self.repo)
+                        )
+                        recs_rel_tok, err_rel_tok = verify._Authority.nc_exec_identity(
+                            ['usr/bin/sh', 'scripts/run.sh'], str(self.repo)
+                        )
+                    finally:
+                        os.chdir(prev_cwd)
+                    self.assertIsNone(recs_rel_env)
+                    self.assertIn('relative shebang env target', err_rel_env)
+                    self.assertIsNone(recs_rel_tok)
+                    self.assertIn("relative path containing '/'", err_rel_tok)
         finally:
             shutil.rmtree(self.repo / 'bin', ignore_errors=True)
 

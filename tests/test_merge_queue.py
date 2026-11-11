@@ -774,14 +774,13 @@ class GateRunsIsolated(QueueCase):
                     self.w.env["MQ_GATE_SANDBOX_CMD"] = saved_sbx
             self.assertNotEqual(rc, 0, out)
             self.assertEqual(out.get("code"), "sandbox_unavailable", out)
-        # Even without MQ_REQUIRE_GATE_SANDBOX, absence of all real isolation fails closed:
+        # Even without MQ_REQUIRE_GATE_SANDBOX, absence of filesystem-isolating bwrap/MQ_GATE_SANDBOX_CMD fails closed:
         q = self.w.queue()
         q.env.pop("MQ_GATE_SANDBOX_CMD", None)
         q.env.pop("MQ_REQUIRE_GATE_SANDBOX", None)
         q_cls = type(q)
-        with unittest.mock.patch.object(q_cls, "_bwrap_mode", return_value=None), \
-             unittest.mock.patch.object(q_cls, "_unshare_mount_proc_argv", return_value=None), \
-             unittest.mock.patch.object(q_cls, "_unshare_hidepid_argv", return_value=None):
+        with unittest.mock.patch.object(q_cls, "_bwrap_mode", return_value=None):
+            self.assertFalse(q_cls._has_native_gate_isolation())
             with self.assertRaises(Exception) as ctx_sbx:
                 q._gate_exec_argv("true", self.w.tmp, self.w.tmp, self.w.tmp)
             self.assertEqual(getattr(ctx_sbx.exception, "code", None), "sandbox_unavailable")

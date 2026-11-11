@@ -1821,6 +1821,9 @@ class _Authority:
             if not interp_arg or interp_arg.startswith("-") or "=" in interp_arg or any(c in interp_arg for c in " \t"):
                 return None, (f"proof executable {label!r} shebang env argument {interp_arg!r} "
                               "alters lookup or splits options; fail-closed (#750 C19)")
+            if "/" in interp_arg and not os.path.isabs(interp_arg):
+                return None, (f"proof executable {label!r} uses relative shebang env target {interp_arg!r}; "
+                              "fail-closed (#750 C19)")
             env_resolved = interp_arg if os.path.isabs(interp_arg) else shutil.which(interp_arg, path=search_path)
             if not env_resolved:
                 return None, (f"proof executable {label!r} shebang env target {interp_arg!r} "
@@ -1890,6 +1893,9 @@ class _Authority:
                     roots.append(r)
         records = []
         for argv_idx, tok in indexed:
+            if "/" in tok and not os.path.isabs(tok):
+                return None, (f"proof executable {tok!r} uses a relative path containing '/'; "
+                              "fail-closed (#750 C19)")
             resolved = tok if os.path.isabs(tok) else shutil.which(tok, path=search_path)
             if not resolved:
                 return None, f"proof executable {tok!r} cannot be resolved on the scrubbed PATH"

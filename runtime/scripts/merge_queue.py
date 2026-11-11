@@ -3875,54 +3875,10 @@ class MergeQueue:
         mode = cls._bwrap_mode()
         return mode[0] if mode is not None else None
 
-    @staticmethod
-    @functools.lru_cache(maxsize=1)
-    def _unshare_mount_proc_argv() -> tuple[str, ...] | None:
-        un = shutil.which("unshare")
-        if not un:
-            return None
-        for map_flag in ("--map-current-user", "--map-root-user"):
-            argv = (un, "--user", map_flag, "--pid", "--mount", "--fork", "--mount-proc")
-            try:
-                r = subprocess.run(
-                    [*argv, "/bin/true"],
-                    capture_output=True, timeout=5, stdin=subprocess.DEVNULL,
-                )
-                if r.returncode == 0:
-                    return argv
-            except (OSError, subprocess.SubprocessError):
-                continue
-        return None
-
-    @staticmethod
-    @functools.lru_cache(maxsize=1)
-    def _unshare_hidepid_argv() -> tuple[str, ...] | None:
-        """Unprivileged user+PID namespace where kernel `hidepid=2`/`invisible` hides all outside PIDs."""
-        un = shutil.which("unshare")
-        if not un:
-            return None
-        argv = (un, "--user", "--pid", "--fork")
-        probe = (
-            "import os,sys; "
-            "outside=any(os.path.exists(f'/proc/{p}') for p in sys.argv[1:] if int(p) > 1); "
-            "sys.exit(0 if (os.getpid() == 1 and not outside) else 1)"
-        )
-        try:
-            r = subprocess.run(
-                [*argv, sys.executable, "-I", "-c", probe, str(os.getpid()), str(os.getppid())],
-                capture_output=True, timeout=5, stdin=subprocess.DEVNULL,
-            )
-            return argv if r.returncode == 0 else None
-        except (OSError, subprocess.SubprocessError):
-            return None
-
     @classmethod
     def _has_native_gate_isolation(cls, *, require_full_sandbox: bool = False) -> bool:
-        if cls._bwrap_mode() is not None or cls._unshare_mount_proc_argv() is not None:
-            return True
-        if not require_full_sandbox and cls._unshare_hidepid_argv() is not None:
-            return True
-        return False
+        _ = require_full_sandbox
+        return cls._bwrap_mode() is not None
 
     @staticmethod
     @contextlib.contextmanager
@@ -4221,11 +4177,6 @@ class MergeQueue:
 
     def _gate_exec_argv(self, gate_cmd: str, checkout: Path, gate_home: Path,
                         gate_tmp: Path) -> list[str]:
-        req_sbx = (
-            self.env.get("MQ_REQUIRE_GATE_SANDBOX")
-            or self.env.get("OPEN_FLEET_REQUIRE_GATE_SANDBOX")
-            or ""
-        ).strip().lower() in ("1", "true", "yes")
         custom_sbx = (
             self.env.get("MQ_GATE_SANDBOX_CMD")
             or self.env.get("OPEN_FLEET_GATE_SANDBOX_CMD")
@@ -4247,17 +4198,10 @@ class MergeQueue:
                 "/bin/sh", "-c", gate_cmd,
             ]
             return cmd
-        un_mp = self._unshare_mount_proc_argv()
-        if un_mp is not None and not req_sbx:
-            return [*un_mp, "/bin/sh", "-c", gate_cmd]
-        if not req_sbx:
-            un_hp = self._unshare_hidepid_argv()
-            if un_hp is not None:
-                return [*un_hp, "/bin/sh", "-c", gate_cmd]
         raise QueueError(
             "sandbox_unavailable",
-            "gate execution requires bubblewrap (bwrap), unshare with isolated /proc, or MQ_GATE_SANDBOX_CMD; "
-            "refusing to execute gate with conductor /proc exposed",
+            "gate execution requires bubblewrap (bwrap) or MQ_GATE_SANDBOX_CMD for filesystem and /proc "
+            "isolation; refusing to execute gate with host filesystem or conductor /proc exposed",
         )
 
     def _run_gate(self, gate_cmd: str, commit: str, e: dict[str, Any], timeout: float) -> dict[str, Any]:
