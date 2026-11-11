@@ -686,11 +686,8 @@ class LocalStateStore:
                             "cross_run_access",
                             f"parent task {parent!r} belongs to run {p_row['run_id']!r}, not {run_id!r}",
                         )
-                if initial_status is not None:
-                    status = initial_status
-                elif not deps_list:
-                    status = "ready"
-                else:
+                by_id: dict[str, str] = {}
+                if deps_list:
                     placeholders = ",".join("?" for _ in deps_list)
                     rows = conn.execute(
                         f"SELECT id, status, run_id FROM tasks WHERE id IN ({placeholders})",
@@ -709,12 +706,16 @@ class LocalStateStore:
                             "cross_run_access",
                             f"dependency task(s) {', '.join(foreign)} belong to another run, not {run_id!r}",
                         )
-                    if any(by_id.get(d) in ("failed", "blocked") for d in deps_list):
-                        status = "blocked"
-                    elif all(by_id.get(d) == "completed" for d in deps_list):
-                        status = "ready"
-                    else:
-                        status = "pending"
+                if initial_status is not None:
+                    status = initial_status
+                elif not deps_list:
+                    status = "ready"
+                elif any(by_id.get(d) in ("failed", "blocked") for d in deps_list):
+                    status = "blocked"
+                elif all(by_id.get(d) == "completed" for d in deps_list):
+                    status = "ready"
+                else:
+                    status = "pending"
                 conn.execute(
                     """
                     INSERT INTO tasks(id, run_id, title, display_name, spec, status, parent_id, sender, created_at, updated_at)
@@ -951,13 +952,19 @@ class LocalStateStore:
                 "SELECT run_id FROM dispatches WHERE dispatch_id = ? LIMIT 1",
                 (dispatch,),
             ).fetchone()
-            return row["run_id"] if row else None
-        with self._connect() as c:
-            row = c.execute(
-                "SELECT run_id FROM dispatches WHERE dispatch_id = ? LIMIT 1",
-                (dispatch,),
-            ).fetchone()
-            return row["run_id"] if row else None
+        else:
+            with self._connect() as c:
+                row = c.execute(
+                    "SELECT run_id FROM dispatches WHERE dispatch_id = ? LIMIT 1",
+                    (dispatch,),
+                ).fetchone()
+        bound_run = str(row["run_id"] or "") if row is not None else ""
+        if not bound_run:
+            raise ProviderError(
+                "cross_run_access",
+                f"launched worker dispatch {dispatch!r} has no registered run binding",
+            )
+        return bound_run
 
     def _resolve_caller_run(
         self,
@@ -1920,6 +1927,7 @@ class LocalStateStore:
         run: str | None = None,
     ) -> dict[str, Any]:
         """The ONE boundary every answer path (reply, gate-resolve, ask) crosses (#592 review)."""
+        eff_run = self._resolve_caller_run(run, default_run=None)
         who = resolver or self._resolve_terminal(None) or COORDINATOR_ALIAS
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -1927,11 +1935,11 @@ class LocalStateStore:
             if not row:
                 conn.execute("ROLLBACK")
                 raise ProviderError("gate_not_found", f"gate {gate_id!r} not found")
-            if run is not None and row["run_id"] != run:
+            if eff_run is not None and row["run_id"] != eff_run:
                 conn.execute("ROLLBACK")
                 raise ProviderError(
                     "cross_run_access",
-                    f"gate {row['gate_id']!r} belongs to run {row['run_id']!r}, not {run!r}",
+                    f"gate {row['gate_id']!r} belongs to run {row['run_id']!r}, not {eff_run!r}",
                 )
             try:
                 res = self._resolve_gate_in_tx(conn, row, answer, status=status, who=who)

@@ -151,6 +151,11 @@ class TestMailboxScoping(Base):
     def test_launched_worker_is_pinned_to_its_own_mailbox(self):
         self.store.send_message(subject="for coord", msg_type="worker_done", to="coordinator", run="default")
         self.store.send_message(subject="for me", msg_type="info", to="term_me", run="default")
+        with self.store._connect() as conn:
+            conn.execute(
+                "INSERT INTO dispatches(dispatch_id, task_id, run_id, worktree, agent, terminal_handle, state, created_at, updated_at) "
+                "VALUES ('disp_me', 't_me', 'default', '/w', 'claude', 'term_me', 'running', 0, 0)"
+            )
         worker = self.mod.LocalStateStore(self.db, env={"OPEN_FLEET_DISPATCH_ID": "disp_me", "OPEN_FLEET_TERMINAL_HANDLE": "term_me"})
         got = worker.check_messages(terminal="coordinator")
         self.assertEqual([m["subject"] for m in got["messages"]], ["for me"])
@@ -203,6 +208,11 @@ class TestHitlGates(Base):
         with self.assertRaises(self.mod.ProviderError) as ctx:
             self.store.reply_message(msg_id=res["messageId"], body="yes", sender="term_w")
         self.assertEqual(ctx.exception.code, "gate_answer_refused")
+        with self.store._connect() as conn:
+            conn.execute(
+                "INSERT INTO dispatches(dispatch_id, task_id, run_id, worktree, agent, terminal_handle, state, created_at, updated_at) "
+                "VALUES ('disp_x', 't_x', 'r1', '/w', 'claude', 'term_x', 'running', 0, 0)"
+            )
         worker = self.mod.LocalStateStore(self.db, env={"OPEN_FLEET_DISPATCH_ID": "disp_x", "OPEN_FLEET_TERMINAL_HANDLE": "term_x"})
         with self.assertRaises(self.mod.ProviderError):
             worker.reply_message(msg_id=res["messageId"], body="yes", sender="coordinator")
@@ -210,6 +220,11 @@ class TestHitlGates(Base):
 
     def test_gate_resolve_route_refuses_workers_too(self):
         res = self.store.ask_human(question="deploy?", sender="term_w", run="r1")
+        with self.store._connect() as conn:
+            conn.execute(
+                "INSERT INTO dispatches(dispatch_id, task_id, run_id, worktree, agent, terminal_handle, state, created_at, updated_at) "
+                "VALUES ('disp_w', 't_w', 'r1', '/w', 'claude', 'term_w', 'running', 0, 0)"
+            )
         worker = self.mod.LocalStateStore(self.db, env={"OPEN_FLEET_DISPATCH_ID": "disp_w", "OPEN_FLEET_TERMINAL_HANDLE": "term_w"})
         with self.assertRaises(self.mod.ProviderError) as ctx:
             worker.gate_resolve(gate_id=res["gateId"], resolution="yes")
@@ -594,10 +609,33 @@ class TestCoordinatorTakeoverAndWorkerBindingFence(Base):
             lambda: w_a.reply_message(msg_id=msg_b, body="no"),
             lambda: w_a.ask_human(question="bad?", run="run-b"),
             lambda: w_a.gate_resolve(gate_id=gate_b, resolution="yes"),
+            lambda: self.store.task_create(spec="bad-dep-init", run="run-a", deps=[t_b], initial_status="ready"),
         ):
             with self.assertRaises(self.mod.ProviderError) as ctx:
                 fn()
             self.assertEqual(ctx.exception.code, "cross_run_access")
+        with self.assertRaises(self.mod.ProviderError) as ctx_missing_dep:
+            self.store.task_create(spec="missing-dep-init", run="run-a", deps=["task_missing_999"], initial_status="ready")
+        self.assertEqual(ctx_missing_dep.exception.code, "task_not_found")
+        # Declared worker identity with no dispatches row fails closed across all routes:
+        w_unknown = self.mod.LocalStateStore(
+            self.db,
+            env={"OPEN_FLEET_DISPATCH_ID": "disp-unregistered", "OPEN_FLEET_TERMINAL_HANDLE": "worker-unregistered"},
+        )
+        for u_fn in (
+            lambda: w_unknown.task_list(),
+            lambda: w_unknown.task_create(spec="x", run="run-b"),
+            lambda: w_unknown.task_update(task_id=t_b, status="completed"),
+            lambda: w_unknown.send_message(subject="x", msg_type="info"),
+            lambda: w_unknown.check_messages(),
+            lambda: w_unknown.reply_message(msg_id=msg_b, body="no"),
+            lambda: w_unknown.ask_human(question="q?"),
+            lambda: w_unknown.gate_resolve(gate_id=gate_b, resolution="yes"),
+            lambda: w_unknown.request_show("any-req"),
+        ):
+            with self.assertRaises(self.mod.ProviderError) as ctx_unk:
+                u_fn()
+            self.assertEqual(ctx_unk.exception.code, "cross_run_access")
 
     def test_c30_died_settles_task_and_superseded_or_forged_sender_cannot_clobber(self):
         t1 = self.store.task_create(spec="die-parent", run="run-d")["task"]["id"]
