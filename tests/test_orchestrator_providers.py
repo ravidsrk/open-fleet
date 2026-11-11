@@ -923,6 +923,44 @@ class TestExternalAdversarialRemediation750(ProviderTestBase):
         st = {t["id"]: t["status"] for t in self.state.task_list(run="run-t3")["tasks"]}
         self.assertEqual(st[t_ambig], "dispatched")
 
+        # C29: Ambiguous t3_thread_send failure in dispatch_inject AFTER upstream contact also retains claim
+        t_inj_ambig = self.state.task_create(spec="inj-ambig", run="run-t3")["task"]["id"]
+
+        def ambig_inject_runner(call: dict[str, object], **_kw: object) -> object:
+            if call["tool"] == "t3_thread_send":
+                return "not-json-after-delivery"
+            return {"structuredContent": {}, "isError": False}
+
+        t3_inj_ambig = T3CodeProvider(
+            state=self.state,
+            runner=ambig_inject_runner,
+            env={"OPEN_FLEET_T3_PROJECT_ID": "proj-1"},
+            hooks=lambda w, a, p: {},
+        )
+        with self.assertRaises(ProviderError) as ctx_inj_ambig:
+            t3_inj_ambig.dispatch_inject(task_id=t_inj_ambig, to_handle="t3:thr-1", run="run-t3")
+        self.assertEqual(ctx_inj_ambig.exception.code, "t3code_bad_json")
+        st_inj = {t["id"]: t["status"] for t in self.state.task_list(run="run-t3")["tasks"]}
+        self.assertEqual(st_inj[t_inj_ambig], "dispatched")
+        with self.assertRaises(ProviderError) as ctx_dup:
+            t3.dispatch_inject(task_id=t_inj_ambig, to_handle="t3:thr-1", run="run-t3")
+        self.assertEqual(ctx_dup.exception.code, "task_not_startable")
+
+        # Pre-contact failure in dispatch_inject (missing endpoint/auth before t3 runs) releases claim to ready
+        t_inj_pre = self.state.task_create(spec="inj-pre", run="run-t3")["task"]["id"]
+        t3_unconf = T3CodeProvider(
+            state=self.state,
+            env={"OPEN_FLEET_T3_PROJECT_ID": "proj-1"},
+            hooks=lambda w, a, p: {},
+        )
+        with self.assertRaises(ProviderError) as ctx_pre:
+            t3_unconf.dispatch_inject(task_id=t_inj_pre, to_handle="t3:thr-1", run="run-t3")
+        self.assertEqual(ctx_pre.exception.code, "t3code_not_configured")
+        self.assertEqual(
+            {t["id"]: t["status"] for t in self.state.task_list(run="run-t3")["tasks"]}[t_inj_pre],
+            "ready",
+        )
+
         # C28/C29: Launched worker bound to run-t3 cannot claim, launch, or inject tasks in run-other
         # either implicitly (omitting run) or explicitly (passing run='run-other')
         t_foreign = self.state.task_create(spec="foreign-secret", run="run-other")["task"]["id"]

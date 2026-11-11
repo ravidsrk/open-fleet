@@ -236,9 +236,26 @@ def _marking_runtime_contact(runner):
         except FileNotFoundError:
             _REACHED_RUNTIME.set(before)
             raise
+        except ProviderError as exc:
+            if exc.code.endswith(("_not_configured", "_cli_missing")):
+                _REACHED_RUNTIME.set(before)
+            raise
 
     marked._marks_runtime_contact = True
     return marked
+
+
+def ensure_runner_marks_contact(provider: Any) -> contextvars.Token[bool]:
+    """Ensure `provider._runner` records runtime contact and return a fresh `_REACHED_RUNTIME` token."""
+    runner = getattr(provider, "_runner", None)
+    if callable(runner) and getattr(runner, "_marks_runtime_contact", False) is not True:
+        provider._runner = _marking_runtime_contact(runner)
+    return _REACHED_RUNTIME.set(not callable(runner))
+
+
+def runtime_was_reached() -> bool:
+    """Whether the current call has handed anything to its upstream runtime."""
+    return bool(_REACHED_RUNTIME.get())
 
 
 def release_claim_on_failure(worker_start):

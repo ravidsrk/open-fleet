@@ -577,9 +577,33 @@ class GateRunsIsolated(QueueCase):
         rc_m, out_m = self.w.cli("merge", "--token", tok_cmp, "--require-gate", compound_cmd)
         self.assertNotEqual(rc_m, 0, out_m)
         self.assertEqual(out_m.get("code"), "gate_not_run", out_m)
-        # Dynamic command words (`eval`) cannot establish executable identity and fail closed:
-        _, _, dyn_probs = mq_mod.MergeQueue._analyze_gate_command("eval /bin/true")
-        self.assertTrue(dyn_probs)
+        # Dynamic command words (`eval`) and lookup-mutating forms (`PATH=`, `env PATH=`, `env -C`, `cd`) fail closed:
+        for unsafe_gate in (
+            "eval /bin/true",
+            "PATH=/opt/alternate/bin gate-check",
+            'PATH="/opt/alternate/bin" gate-check',
+            "env PATH=/opt/alternate/bin gate-check",
+            "env 'PATH=/opt/alternate/bin' gate-check",
+            "env -C /tmp ./gate-check",
+            "env -i gate-check",
+            "env -u PATH gate-check",
+            "cd subdir && ./gate-check",
+            "export PATH=/opt/alternate/bin; gate-check",
+        ):
+            _, _, dyn_probs = mq_mod.MergeQueue._analyze_gate_command(unsafe_gate)
+            self.assertTrue(dyn_probs, f"expected fail-closed problem on {unsafe_gate!r}")
+        tok_path = self.acquire("c-path", "--takeover")
+        self.board(tok_path, self.w.unit("path-unit"))
+        rc_path, out_path = self.w.cli("plan", "--token", tok_path, "--gate-cmd", "PATH=/opt/alternate/bin true")
+        self.assertEqual(rc_path, 0, out_path)
+        self.assertEqual(out_path["planned"][0]["result"], "fail", out_path)
+        self.assertEqual(out_path["planned"][0]["reason"], "gate_failed", out_path)
+        self.assertEqual(out_path["planned"][0]["gate"]["fingerprint"], "", out_path)
+        # Resolve frozen failed entry so subsequent tests in this method can plan cleanly:
+        self.w.cli(
+            "resolve", "--token", tok_path, "--entry", out_path["planned"][0]["entry"],
+            "--action", "drop", "--reason", "lookup-test",
+        )
         # When MQ_REQUIRE_GATE_SANDBOX=1 and no sandbox binary/command is usable, fail closed:
         if mq_mod.MergeQueue._bwrap_bin() is None:
             token = self.acquire("c2", "--takeover")

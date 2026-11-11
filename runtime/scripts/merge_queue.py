@@ -1405,11 +1405,15 @@ class MergeQueue:
     _REDIR_OPS = (
         "&>>", "&>", "<<-", ">>", ">&", "<>", "<<", "<&", ">|", ">", "<",
     )
+    _LOOKUP_VARS = frozenset({
+        "PATH", "IFS", "CDPATH", "ENV", "BASH_ENV",
+        "LD_PRELOAD", "LD_LIBRARY_PATH", "PYTHONPATH",
+    })
 
     @classmethod
     def _allowed_extra_keep(cls, name: str) -> bool:
         up = name.upper()
-        if up in cls.GATE_ENV_ISOLATED_KEYS or up == "PATH":
+        if up in cls.GATE_ENV_ISOLATED_KEYS or up in cls._LOOKUP_VARS:
             return False
         if up.startswith(cls.GATE_ENV_FORBID_PREFIX) or up.endswith(cls.GATE_ENV_FORBID_SUFFIX):
             return False
@@ -1609,7 +1613,9 @@ class MergeQueue:
                 tokens.append(("op", matched_op, False))
                 i += len(matched_op)
                 continue
-            # Read one shell word
+            # Read one shell word; detect POSIX unquoted assignment prefix (`NAME=`) before quotes
+            m_asgn = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=", cmd[i:])
+            assign_var = m_asgn.group(1) if m_asgn else None
             buf: list[str] = []
             quoted = False
             dynamic = False
@@ -1665,7 +1671,11 @@ class MergeQueue:
             word = "".join(buf)
             if "__MQ_CMDSUB__" in word:
                 dynamic = True
-            flag_val: Any = (dynamic or False) if not quoted else (True if dynamic else "quoted")
+            flag_val: dict[str, Any] = {
+                "quoted": quoted,
+                "dynamic": dynamic,
+                "assign_var": assign_var,
+            }
             tokens.append(("word", word, flag_val))
         return tokens, problems
 
@@ -1687,10 +1697,13 @@ class MergeQueue:
         problems.extend(lex_problems)
 
         def is_unquoted(flag: Any) -> bool:
-            return flag is False
+            return isinstance(flag, dict) and not flag.get("quoted") and not flag.get("dynamic")
 
         def is_dynamic(flag: Any) -> bool:
-            return flag is True
+            return bool(isinstance(flag, dict) and flag.get("dynamic"))
+
+        def assign_var_of(flag: Any) -> str | None:
+            return flag.get("assign_var") if isinstance(flag, dict) else None
 
         expect_cmd = True
         in_for_header = False
@@ -1750,7 +1763,12 @@ class MergeQueue:
                 continue
 
             # Command position: peel assignments and compound keywords
-            if is_unquoted(flag) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tok):
+            avar = assign_var_of(flag)
+            if avar is not None:
+                if avar.upper() in cls._LOOKUP_VARS:
+                    problems.append(
+                        f"assignment to {avar!r} alters executable lookup context and cannot be statically fingerprinted"
+                    )
                 idx += 1
                 continue
             if is_unquoted(flag) and tok in cls._COMPOUND_PREFIX_KEYWORDS:
@@ -1827,56 +1845,149 @@ class MergeQueue:
             wi = 0
             while wi < len(cmd_words):
                 cw, cflag = cmd_words[wi]
-                if is_unquoted(cflag) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", cw):
+                c_avar = assign_var_of(cflag)
+                if c_avar is not None:
+                    if c_avar.upper() in cls._LOOKUP_VARS:
+                        problems.append(
+                            f"assignment to {c_avar!r} alters executable lookup context and cannot be statically fingerprinted"
+                        )
                     wi += 1
                     continue
                 if is_dynamic(cflag):
                     problems.append(f"dynamic command word {cw!r} cannot be statically fingerprinted")
                     wi = len(cmd_words)
                     break
-                if cw in ("env", "/usr/bin/env"):
+                cw_base = Path(cw).name
+                if cw_base == "env":
                     executables.append(cw)
                     wi += 1
                     broke_env_s = False
+                    # Phase A: env options
                     while wi < len(cmd_words):
                         a, aflag = cmd_words[wi]
                         if a == "--":
                             wi += 1
                             break
-                        if a == "-S" and wi + 1 < len(cmd_words):
-                            sa, sflag = cmd_words[wi + 1]
-                            if is_dynamic(sflag):
-                                problems.append("env -S: dynamic argument cannot be fingerprinted")
-                            else:
-                                e2, s2, p2 = cls._analyze_gate_command(sa, _depth + 1)
-                                executables.extend(e2)
-                                sourced.extend(s2)
-                                problems.extend(p2)
-                            wi = len(cmd_words)
-                            broke_env_s = True
-                            break
-                        if a.startswith("-S") and len(a) > 2:
-                            if is_dynamic(aflag):
-                                problems.append("env -S: dynamic argument cannot be fingerprinted")
-                            else:
-                                e2, s2, p2 = cls._analyze_gate_command(a[2:], _depth + 1)
-                                executables.extend(e2)
-                                sourced.extend(s2)
-                                problems.extend(p2)
-                            wi = len(cmd_words)
-                            broke_env_s = True
-                            break
-                        if a in ("-u", "--unset", "-C", "--chdir") and wi + 1 < len(cmd_words):
-                            wi += 2
-                            continue
-                        if a.startswith("-") or (is_unquoted(aflag) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", a)):
+                        if a == "-" or a == "--ignore-environment":
+                            problems.append("env -i/--ignore-environment alters PATH lookup context")
                             wi += 1
                             continue
-                        break
+                        if not a.startswith("-"):
+                            break
+                        if is_dynamic(aflag):
+                            problems.append(f"env: dynamic option {a!r} cannot be fingerprinted")
+                            wi += 1
+                            continue
+                        if a in ("-S", "--split-string"):
+                            if wi + 1 >= len(cmd_words) or is_dynamic(cmd_words[wi + 1][1]):
+                                problems.append("env -S: missing or dynamic argument cannot be fingerprinted")
+                            else:
+                                e2, s2, p2 = cls._analyze_gate_command(cmd_words[wi + 1][0], _depth + 1)
+                                executables.extend(e2)
+                                sourced.extend(s2)
+                                problems.extend(p2)
+                            wi = len(cmd_words)
+                            broke_env_s = True
+                            break
+                        if a.startswith("--split-string="):
+                            e2, s2, p2 = cls._analyze_gate_command(a.split("=", 1)[1], _depth + 1)
+                            executables.extend(e2)
+                            sourced.extend(s2)
+                            problems.extend(p2)
+                            wi = len(cmd_words)
+                            broke_env_s = True
+                            break
+                        if a in ("-C", "--chdir") or a.startswith("--chdir="):
+                            problems.append("env -C/--chdir alters working-directory lookup context")
+                            wi += 2 if a in ("-C", "--chdir") and wi + 1 < len(cmd_words) else 1
+                            continue
+                        if a in ("-P", "--default-path") or a.startswith("--default-path="):
+                            problems.append("env -P/--default-path alters PATH lookup context")
+                            wi += 2 if a in ("-P", "--default-path") and wi + 1 < len(cmd_words) else 1
+                            continue
+                        if a in ("-u", "--unset") or a.startswith("--unset="):
+                            if a.startswith("--unset="):
+                                uvar, udyn = a.split("=", 1)[1], False
+                                wi += 1
+                            elif wi + 1 < len(cmd_words):
+                                uvar, udyn = cmd_words[wi + 1][0], is_dynamic(cmd_words[wi + 1][1])
+                                wi += 2
+                            else:
+                                uvar, udyn = "", True
+                                wi += 1
+                            if udyn or uvar.upper() in cls._LOOKUP_VARS:
+                                problems.append("env -u/--unset alters executable lookup variable")
+                            continue
+                        if a.startswith("--"):
+                            wi += 1
+                            continue
+                        # Short option cluster (`-i`, `-uPATH`, `-C/dir`, `-S...`, etc.)
+                        short = a[1:]
+                        si = 0
+                        consumed_next = False
+                        while si < len(short):
+                            ch_opt = short[si]
+                            rest = short[si + 1:]
+                            if ch_opt == "i":
+                                problems.append("env -i alters PATH lookup context")
+                                si += 1
+                                continue
+                            if ch_opt == "C":
+                                problems.append("env -C alters working-directory lookup context")
+                                if not rest and wi + 1 < len(cmd_words):
+                                    consumed_next = True
+                                break
+                            if ch_opt == "P":
+                                problems.append("env -P alters PATH lookup context")
+                                if not rest and wi + 1 < len(cmd_words):
+                                    consumed_next = True
+                                break
+                            if ch_opt == "u":
+                                if rest:
+                                    uvar, udyn = rest, False
+                                elif wi + 1 < len(cmd_words):
+                                    uvar, udyn = cmd_words[wi + 1][0], is_dynamic(cmd_words[wi + 1][1])
+                                    consumed_next = True
+                                else:
+                                    uvar, udyn = "", True
+                                if udyn or uvar.upper() in cls._LOOKUP_VARS:
+                                    problems.append("env -u alters executable lookup variable")
+                                break
+                            if ch_opt == "S":
+                                if rest:
+                                    e2, s2, p2 = cls._analyze_gate_command(rest, _depth + 1)
+                                    executables.extend(e2)
+                                    sourced.extend(s2)
+                                    problems.extend(p2)
+                                elif wi + 1 < len(cmd_words) and not is_dynamic(cmd_words[wi + 1][1]):
+                                    e2, s2, p2 = cls._analyze_gate_command(cmd_words[wi + 1][0], _depth + 1)
+                                    executables.extend(e2)
+                                    sourced.extend(s2)
+                                    problems.extend(p2)
+                                else:
+                                    problems.append("env -S: missing or dynamic argument cannot be fingerprinted")
+                                broke_env_s = True
+                                break
+                            si += 1
+                        if broke_env_s:
+                            wi = len(cmd_words)
+                            break
+                        wi += 2 if consumed_next else 1
                     if broke_env_s:
                         break
+                    # Phase B: env NAME=VALUE operands (honored by env even when shell-quoted)
+                    while wi < len(cmd_words) and "=" in cmd_words[wi][0]:
+                        ea, eaflag = cmd_words[wi]
+                        lhs = ea.split("=", 1)[0]
+                        if is_dynamic(eaflag) and ("$" in lhs or "__MQ_CMDSUB__" in lhs):
+                            problems.append("env: dynamic variable assignment cannot be statically fingerprinted")
+                        elif lhs.upper() in cls._LOOKUP_VARS:
+                            problems.append(
+                                f"env {lhs}=... alters executable lookup context and cannot be statically fingerprinted"
+                            )
+                        wi += 1
                     continue
-                if cw == "nice":
+                if cw_base == "nice":
                     executables.append(cw)
                     wi += 1
                     while wi < len(cmd_words) and cmd_words[wi][0].startswith("-"):
@@ -1885,7 +1996,7 @@ class MergeQueue:
                             break
                         wi += 2 if cmd_words[wi][0] in ("-n", "--adjustment") else 1
                     continue
-                if cw == "timeout":
+                if cw_base == "timeout":
                     executables.append(cw)
                     wi += 1
                     while wi < len(cmd_words) and cmd_words[wi][0].startswith("-"):
@@ -1896,7 +2007,7 @@ class MergeQueue:
                     if wi < len(cmd_words):
                         wi += 1  # duration
                     continue
-                if cw == "nohup":
+                if cw_base == "nohup":
                     executables.append(cw)
                     wi += 1
                     while wi < len(cmd_words) and cmd_words[wi][0].startswith("-"):
@@ -1937,7 +2048,24 @@ class MergeQueue:
                 problems.append(f"dynamic command word {final_word!r} cannot be statically fingerprinted")
                 continue
             if final_word == "eval":
-                problems.append("eval cannot be statically fingerprinted")
+                problems.append("shell 'eval' builtin cannot be statically fingerprinted")
+                continue
+            if final_word in ("cd", "pushd", "popd"):
+                problems.append(f"shell {final_word!r} builtin alters working-directory lookup context")
+                continue
+            if final_word in ("alias", "unalias", "hash"):
+                problems.append(f"shell {final_word!r} builtin alters command lookup table")
+                continue
+            if final_word in ("export", "unset", "readonly", "typeset", "declare", "local"):
+                for arg_w, arg_f in cmd_words[wi + 1:]:
+                    if arg_w.startswith("-") and arg_w != "--":
+                        continue
+                    vname = arg_w.split("=", 1)[0]
+                    if is_dynamic(arg_f) or vname.upper() in cls._LOOKUP_VARS:
+                        problems.append(
+                            f"shell {final_word!r} builtin touching lookup variable cannot be statically fingerprinted"
+                        )
+                        break
                 continue
             if final_word in (".", "source"):
                 if wi + 1 >= len(cmd_words) or is_dynamic(cmd_words[wi + 1][1]):
@@ -2079,6 +2207,8 @@ class MergeQueue:
             except OSError as exc:
                 problems.append(f"{tok}: {exc}")
                 items.append({"tok": tok, "error": str(exc)})
+        if problems:
+            return "", problems
         payload = json.dumps({"path": clean_path, "items": items}, sort_keys=True).encode("utf-8")
         return hashlib.sha256(payload).hexdigest(), problems
 
@@ -2257,6 +2387,15 @@ class MergeQueue:
             plan_fp, plan_problems = self._gate_fingerprint(gate_cmd, commit=commit)
             pre_state = self._conductor_state_digest()
             exec_argv = self._gate_exec_argv(gate_cmd, checkout, gate_home, gate_tmp)
+            if pre_problems or plan_problems:
+                why = "; ".join(pre_problems or plan_problems)
+                return {
+                    "cmd": gate_cmd,
+                    "exit": 1,
+                    "tail": f"[C19: {why}]"[-500:],
+                    "commit": commit,
+                    "fingerprint": "",
+                }
             # Its own session, so a timeout kills everything the gate started: a grandchild left
             # holding the output pipe would otherwise stretch the timeout to its own lifetime.
             with self._non_dumpable_conductor():

@@ -42,16 +42,20 @@ from .base import (
 )
 from .local_state import LocalStateStore
 from .posix import checkout_worktree
-from ._external import _ensure_ctx_task_claimed, release_claim_on_failure
 from ._external import (
+    _REACHED_RUNTIME,
+    _ensure_ctx_task_claimed,
     claim_local_task,
+    ensure_runner_marks_contact,
     insert_dispatch,
     load_dispatch,
     local_worker_list,
     record_fence,
     ref_safe,
+    release_claim_on_failure,
     release_local_task,
     run_cli_text,
+    runtime_was_reached,
     show_from_row,
 )
 
@@ -329,12 +333,15 @@ class T3CodeProvider(RuntimeProvider):
         args: dict[str, Any] = {"threadId": thread_id, "message": message, "mode": "queue"}
         if kwargs.get("retry_request"):
             args["clientRequestId"] = str(kwargs["retry_request"])
+        token = ensure_runner_marks_contact(self)
         try:
             raw = self._tool("t3_thread_send", args)
         except BaseException:
-            if claimed:
+            if claimed and not runtime_was_reached():
                 release_local_task(self.state, task_id)
             raise
+        finally:
+            _REACHED_RUNTIME.reset(token)
         if claimed:
             inject_dispatch_id = f"{thread_id}:inject:{uuid.uuid4().hex[:8]}"
             insert_dispatch(
