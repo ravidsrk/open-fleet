@@ -2367,8 +2367,30 @@ class MergeQueue:
                 if final_word in ("cd", "pushd", "popd"):
                     problems.append(f"shell {final_word!r} builtin alters working-directory lookup context")
                     continue
-                if final_word in ("alias", "unalias", "hash", "enable", "shopt"):
-                    problems.append(f"shell {final_word!r} builtin alters command lookup table")
+                if final_word in (
+                    "alias", "unalias", "hash", "enable", "shopt",
+                    "mapfile", "readarray", "compgen", "complete", "compopt",
+                    "bind", "fc", "history", "jobs",
+                ):
+                    problems.append(f"shell {final_word!r} builtin alters command lookup or executes callbacks")
+                    continue
+                if final_word == "set":
+                    for sw, sf in cmd_words[wi + 1:]:
+                        if sw in ("--", "-"):
+                            break
+                        if not sw.startswith(("-", "+")):
+                            break
+                        if is_dynamic(sf) or "A" in sw[1:]:
+                            problems.append("shell 'set' dynamic or array-assigning option cannot be statically fingerprinted")
+                            break
+                    continue
+                if final_word == "wait":
+                    for ww, wf in cmd_words[wi + 1:]:
+                        if ww == "--":
+                            break
+                        if ww.startswith("-") and len(ww) > 1 and (is_dynamic(wf) or "p" in ww[1:]):
+                            problems.append("shell 'wait -p' or dynamic option cannot be statically fingerprinted")
+                            break
                     continue
                 if final_word in ("export", "unset", "readonly", "typeset", "declare", "local"):
                     if final_word in ("typeset", "declare"):
@@ -2404,19 +2426,33 @@ class MergeQueue:
                             break
                     continue
                 if final_word == "read":
+                    saw_read_dd = False
                     for rw, rf in cmd_words[wi + 1:]:
+                        if not saw_read_dd and rw == "--":
+                            saw_read_dd = True
+                            continue
+                        if not saw_read_dd and rw.startswith("-") and len(rw) > 1:
+                            if is_dynamic(rf) or any(ch_r in rw[1:] for ch_r in ("a", "e")):
+                                problems.append("shell 'read' array/readline/dynamic option cannot be statically fingerprinted")
+                                break
+                            continue
                         if is_dynamic(rf) or cls._touches_lookup_var(rw.split("=", 1)[0]):
                             problems.append("shell 'read' builtin touching lookup variable cannot be statically fingerprinted")
                             break
                     continue
                 if final_word == "printf":
                     pi = wi + 1
+                    printf_bad = False
                     while pi < len(cmd_words):
                         pw, pf = cmd_words[pi]
-                        if pw == "--" or not pw.startswith("-") or pw == "-":
+                        if pw == "--":
+                            pi += 1
+                            break
+                        if not pw.startswith("-") or pw == "-":
                             break
                         if is_dynamic(pf):
                             problems.append("shell 'printf' dynamic option cannot be statically fingerprinted")
+                            printf_bad = True
                             break
                         if pw == "-v":
                             if pi + 1 >= len(cmd_words) or is_dynamic(cmd_words[pi + 1][1]) or (
@@ -2425,6 +2461,7 @@ class MergeQueue:
                                 problems.append(
                                     "shell 'printf -v' touching lookup variable cannot be statically fingerprinted"
                                 )
+                                printf_bad = True
                                 break
                             pi += 2
                             continue
@@ -2433,11 +2470,24 @@ class MergeQueue:
                                 problems.append(
                                     "shell 'printf -v' touching lookup variable cannot be statically fingerprinted"
                                 )
+                                printf_bad = True
                                 break
                             pi += 1
                             continue
                         problems.append(f"shell 'printf' unsupported option {pw!r} cannot be statically fingerprinted")
+                        printf_bad = True
                         break
+                    if not printf_bad and pi < len(cmd_words):
+                        fmt_w, fmt_f = cmd_words[pi]
+                        if is_dynamic(fmt_f):
+                            problems.append("shell 'printf' dynamic format string cannot be statically fingerprinted")
+                        elif any(
+                            not re.match(r"^(?:[0-9$*+# '.-]*[hlLqjzt]*)?[diouxXfFeEgGaAcsbq]", part)
+                            for part in fmt_w.replace("%%", "").split("%")[1:]
+                        ):
+                            problems.append(
+                                "shell 'printf' non-printable or '%n' format directive cannot be statically fingerprinted"
+                            )
                     continue
                 if final_word == "getopts":
                     if wi + 2 >= len(cmd_words) or is_dynamic(cmd_words[wi + 2][1]) or (
