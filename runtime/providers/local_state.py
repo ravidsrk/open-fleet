@@ -111,7 +111,7 @@ BUSY_SECONDS = 30.0
 # place, as always); a store stamped HIGHER than this was written by a newer open-fleet and is
 # refused rather than silently read with an older layout (2026-10-26 review). Bump it with any
 # change to the schema or to `_migrate`.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _ensure_wal(conn: sqlite3.Connection, seconds: float = BUSY_SECONDS) -> None:
@@ -300,7 +300,14 @@ class LocalStateStore:
                     method TEXT NOT NULL,
                     state TEXT NOT NULL,
                     response_json TEXT,
-                    created_at REAL NOT NULL
+                    created_at REAL NOT NULL,
+                    payload_sha256 TEXT,
+                    intent_id TEXT,
+                    claim_pid INTEGER,
+                    claim_host TEXT,
+                    caller_scope TEXT,
+                    contacted_runtime INTEGER NOT NULL DEFAULT 0,
+                    claimed_task_id TEXT
                 );
                 CREATE TABLE IF NOT EXISTS file_touches (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -377,6 +384,8 @@ class LocalStateStore:
                 "claim_pid": "INTEGER",
                 "claim_host": "TEXT",
                 "caller_scope": "TEXT",
+                "contacted_runtime": "INTEGER NOT NULL DEFAULT 0",
+                "claimed_task_id": "TEXT",
             },
         }
         for table, cols in wanted.items():
@@ -423,11 +432,16 @@ class LocalStateStore:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT method, state, response_json, payload_sha256, created_at, claim_pid, claim_host, caller_scope "
-                "FROM requests WHERE request_id = ?",
+                "SELECT method, state, response_json, payload_sha256, created_at, claim_pid, claim_host, "
+                "caller_scope, contacted_runtime FROM requests WHERE request_id = ?",
                 (request_id,),
             ).fetchone()
-            if row and row["state"] == "pending" and not row["response_json"]:
+            if (
+                row
+                and row["state"] == "pending"
+                and not row["response_json"]
+                and not int(row["contacted_runtime"] or 0)
+            ):
                 stale = now - float(row["created_at"] or now) > PENDING_STALE_S
                 claimer_gone = (row["claim_host"] == host and int(row["claim_pid"] or 0) > 0
                                 and not _pid_alive(int(row["claim_pid"])))
@@ -457,15 +471,47 @@ class LocalStateStore:
         return {"state": row["state"], "requestId": request_id}
 
     def release_request(self, request_id: str | None) -> None:
-        """Drop a pending claim this caller could not complete, so a retry acts instead of
-        reading a marker for PENDING_STALE_S. A completed row is never released."""
+        """Drop a pre-contact pending claim this caller could not complete, so a retry acts instead
+        of reading a marker for PENDING_STALE_S. A completed or post-contact row is never released."""
         if not request_id:
             return
         with self._connect() as conn:
             conn.execute(
-                "DELETE FROM requests WHERE request_id = ? AND state = 'pending' AND response_json IS NULL",
+                "DELETE FROM requests WHERE request_id = ? AND state = 'pending' AND response_json IS NULL "
+                "AND COALESCE(contacted_runtime, 0) = 0",
                 (request_id,),
             )
+
+    def mark_request_contacted(
+        self,
+        request_id: str | None,
+        *,
+        contacted: bool = True,
+        task_id: str | None = None,
+        settled_ambiguous: bool = False,
+    ) -> None:
+        """Persist whether an in-flight pending request has reached its upstream runtime (#750).
+
+        Once `contacted` is true, neither `get_or_record_request` (even after CLI exit or
+        `PENDING_STALE_S`) nor `release_request` may reclaim the row without explicit operator
+        reconciliation (`reconcile_ambiguous_request(..., takeover=True)`)."""
+        if not request_id:
+            return
+        with self._connect() as conn:
+            if settled_ambiguous and contacted:
+                conn.execute(
+                    "UPDATE requests SET contacted_runtime = 1, "
+                    "claimed_task_id = COALESCE(?, claimed_task_id), claim_pid = NULL "
+                    "WHERE request_id = ? AND state = 'pending' AND response_json IS NULL",
+                    (task_id or None, request_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE requests SET contacted_runtime = ?, "
+                    "claimed_task_id = COALESCE(?, claimed_task_id) "
+                    "WHERE request_id = ? AND state = 'pending' AND response_json IS NULL",
+                    (1 if contacted else 0, task_id or None, request_id),
+                )
 
     @staticmethod
     def check_request_payload(request_id: str, recorded: str | None, offered: str | None) -> None:
@@ -528,7 +574,8 @@ class LocalStateStore:
         bound = self._worker_bound_run()
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT state, response_json, intent_id, caller_scope FROM requests WHERE request_id = ?",
+                "SELECT state, response_json, intent_id, caller_scope, contacted_runtime, claimed_task_id "
+                "FROM requests WHERE request_id = ?",
                 (request_id,),
             ).fetchone()
             if not row:
@@ -542,6 +589,10 @@ class LocalStateStore:
                     {"requestId": request_id},
                 )
             out: dict[str, Any] = {"requestId": request_id, "state": row["state"]}
+            if row["state"] == "pending" and not row["response_json"] and int(row["contacted_runtime"] or 0) != 0:
+                out["ambiguousContact"] = True
+                if row["claimed_task_id"]:
+                    out["taskId"] = row["claimed_task_id"]
             intent = conn.execute(
                 "SELECT intent_id, phase, outcome, dispatch_id, task_id, run_id FROM launch_intents WHERE intent_id = ?",
                 (row["intent_id"],),
@@ -561,6 +612,132 @@ class LocalStateStore:
                     "taskId": intent["task_id"],
                 }
             return out
+
+    def reconcile_ambiguous_request(
+        self,
+        request_id: str | None = None,
+        *,
+        intent_id: str | None = None,
+        takeover: bool = False,
+    ) -> dict[str, Any]:
+        """Inspect or reclaim pending external launch claims that reached upstream (#750).
+
+        Without `takeover=True`, post-contact ambiguous claims remain in `requests` so retries
+        cannot launch duplicate workers after a lost reply and CLI exit. With `takeover=True`
+        (after the coordinator has checked/stopped any upstream worker), dead/settled ambiguous
+        claims are cleared and any unrecorded local `'dispatched'` task is returned to `'ready'`."""
+        bound = self._worker_bound_run()
+        if bound or self._own_worker_identity():
+            raise ProviderError(
+                "worker_cannot_be_coordinator",
+                "a worker cannot reconcile ambiguous launch claims; only the coordinator may inspect upstream and takeover",
+            )
+        if intent_id:
+            if self.launch_intent(intent_id) is None:
+                raise ProviderError("intent_not_found", f"launch intent {intent_id!r} not found")
+            raise ProviderError("unsupported_operation", "launch intent reconciliation requires posix launch-reconcile")
+        host = socket.gethostname()
+        now = time.time()
+        receipts: list[dict[str, Any]] = []
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if request_id:
+                single = conn.execute(
+                    "SELECT request_id, method, state, response_json, contacted_runtime, claimed_task_id, "
+                    "claim_pid, claim_host, created_at FROM requests WHERE request_id = ?",
+                    (request_id,),
+                ).fetchone()
+                if single is None:
+                    conn.execute("ROLLBACK")
+                    raise ProviderError("request_not_found", f"request {request_id!r} not found")
+                rows = [single]
+            else:
+                rows = conn.execute(
+                    "SELECT request_id, method, state, response_json, contacted_runtime, claimed_task_id, "
+                    "claim_pid, claim_host, created_at FROM requests "
+                    "WHERE state = 'pending' AND response_json IS NULL AND COALESCE(contacted_runtime, 0) != 0 "
+                    "ORDER BY created_at ASC",
+                ).fetchall()
+            for r in rows:
+                req_id = str(r["request_id"])
+                if r["state"] != "pending" or r["response_json"]:
+                    receipts.append({
+                        "requestId": req_id,
+                        "method": r["method"],
+                        "state": r["state"],
+                        "resolution": "already_settled",
+                    })
+                    continue
+                live_local = (
+                    r["claim_host"] == host
+                    and int(r["claim_pid"] or 0) > 0
+                    and _pid_alive(int(r["claim_pid"]))
+                )
+                contacted = int(r["contacted_runtime"] or 0) != 0
+                if not contacted:
+                    stale = now - float(r["created_at"] or now) > PENDING_STALE_S
+                    if live_local and not takeover and not stale:
+                        receipts.append({
+                            "requestId": req_id,
+                            "method": r["method"],
+                            "state": "pending",
+                            "ambiguousContact": False,
+                            "resolution": "in_flight",
+                        })
+                    elif live_local and takeover:
+                        conn.execute("ROLLBACK")
+                        raise ProviderError(
+                            "request_in_flight",
+                            f"request {req_id!r} is still actively executing in pid {r['claim_pid']} on {host}",
+                        )
+                    else:
+                        conn.execute("DELETE FROM requests WHERE request_id = ?", (req_id,))
+                        receipts.append({
+                            "requestId": req_id,
+                            "method": r["method"],
+                            "state": "absent",
+                            "ambiguousContact": False,
+                            "resolution": "reclaimed_pre_contact",
+                        })
+                    continue
+                if not takeover:
+                    receipts.append({
+                        "requestId": req_id,
+                        "method": r["method"],
+                        "state": "pending",
+                        "ambiguousContact": True,
+                        "taskId": r["claimed_task_id"],
+                        "resolution": "inspect_upstream_then_takeover",
+                    })
+                    continue
+                if live_local:
+                    conn.execute("ROLLBACK")
+                    raise ProviderError(
+                        "request_in_flight",
+                        f"request {req_id!r} is still actively executing in pid {r['claim_pid']} on {host}",
+                    )
+                t_id = r["claimed_task_id"]
+                if t_id:
+                    active_disp = conn.execute(
+                        "SELECT 1 FROM dispatches WHERE task_id = ? AND state IN ('running', 'launching', 'ready') LIMIT 1",
+                        (t_id,),
+                    ).fetchone()
+                    if active_disp is None:
+                        conn.execute(
+                            "UPDATE tasks SET status = 'ready', updated_at = ? WHERE id = ? AND status = 'dispatched'",
+                            (now, t_id),
+                        )
+                conn.execute("DELETE FROM requests WHERE request_id = ?", (req_id,))
+                receipts.append({
+                    "requestId": req_id,
+                    "method": r["method"],
+                    "state": "absent",
+                    "ambiguousContact": True,
+                    "taskId": t_id,
+                    "resolution": "reclaimed_after_takeover",
+                })
+            conn.execute("COMMIT")
+        return {"reconciled": receipts, "count": len(receipts)}
 
     # --- #597: launch intents (crash-recoverable worker launch) ---
     def launch_intent(self, intent_id: str) -> dict[str, Any] | None:

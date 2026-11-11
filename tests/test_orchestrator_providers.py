@@ -107,6 +107,48 @@ class AFailedLaunchReleasesItsClaim(ProviderTestBase):
         self.assertEqual(again, {"state": "pending", "requestId": "req-lost"})
         self.assertEqual(len(slings), 1, "a retry must not launch a second worker")
 
+    def test_ambiguous_launch_claim_survives_dead_claimer_until_explicit_takeover(self):
+        slings = []
+        reply_ok = False
+
+        def runner(argv, **_kw):
+            if argv[:3] == ["ov", "spec", "write"]:
+                return {"success": True, "path": "/repo/.overstory/specs/t1.md"}
+            if argv[:2] == ["ov", "sling"]:
+                slings.append(argv)
+                if reply_ok:
+                    return {"success": True, "agentName": "builder-1", "worktree": "/repo/.overstory/worktrees/b1"}
+                return {"success": True}  # malformed reply after launch reached upstream
+            raise AssertionError(argv)
+
+        prov = OverstoryProvider(state=self.state, runner=runner, env={})
+        with self.assertRaises(ProviderError):
+            prov.worker_start(task_id="nonlocal-task", agent="claude", profile="rw", prompt="Build",
+                              retry_request="req-cli-exit")
+        # Simulate short-lived CLI exit + PENDING_STALE_S expiry: dead PID and ancient timestamp.
+        with self.state._connect() as conn:
+            conn.execute(
+                "UPDATE requests SET claim_pid = 99999999, created_at = 1.0 WHERE request_id = 'req-cli-exit'"
+            )
+        shown = prov.request_show("req-cli-exit")
+        self.assertEqual(shown["state"], "pending")
+        self.assertTrue(shown.get("ambiguousContact"))
+        again = prov.worker_start(task_id="nonlocal-task", agent="claude", profile="rw", prompt="Build",
+                                  retry_request="req-cli-exit")
+        self.assertEqual(again, {"state": "pending", "requestId": "req-cli-exit"})
+        self.assertEqual(len(slings), 1, "dead CLI PID + stale age must not auto-reclaim an upstream-contacted launch")
+        held = prov.dispatch(["orchestration", "launch-reconcile", "--request", "req-cli-exit"])
+        self.assertEqual(held["reconciled"][0]["resolution"], "inspect_upstream_then_takeover")
+        self.assertIsNotNone(self.state.request_row("req-cli-exit"))
+        cleared = prov.dispatch(["orchestration", "launch-reconcile", "--request", "req-cli-exit", "--takeover"])
+        self.assertEqual(cleared["reconciled"][0]["resolution"], "reclaimed_after_takeover")
+        self.assertIsNone(self.state.request_row("req-cli-exit"))
+        reply_ok = True
+        launched = prov.worker_start(task_id="nonlocal-task", agent="claude", profile="rw", prompt="Build",
+                                     retry_request="req-cli-exit")
+        self.assertEqual(launched["state"], "ready")
+        self.assertEqual(len(slings), 2)
+
     def test_a_cli_that_is_not_installed_releases_the_claim(self):
         # Nothing ran: the binary was never found, so no worker can exist and a retry may act.
         def runner(argv, **_kw):

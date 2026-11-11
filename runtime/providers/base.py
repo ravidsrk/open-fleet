@@ -900,12 +900,22 @@ class RuntimeProvider:
                     manifest=flags.get("manifest"),
                 )
             if sub == "dispatch":
-                return self.dispatch_inject(
-                    task_id=flags.get("task", ""),
-                    to_handle=flags.get("to", ""),
-                    run=flags.get("run"),
-                    sender=flags.get("from"),
-                )
+                disp_kw: dict[str, Any] = {
+                    "task_id": flags.get("task", ""),
+                    "to_handle": flags.get("to", ""),
+                    "run": flags.get("run"),
+                    "sender": flags.get("from"),
+                }
+                if "retry-request" in flags and type(self).dispatch_inject is not RuntimeProvider.dispatch_inject:
+                    try:
+                        sig = inspect.signature(self.dispatch_inject)
+                        params = set(sig.parameters)
+                        has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+                    except (TypeError, ValueError):
+                        params, has_var_kw = set(), False
+                    if "retry_request" in params or has_var_kw:
+                        disp_kw["retry_request"] = flags.get("retry-request")
+                return self.dispatch_inject(**disp_kw)
             if sub == "request-show":
                 return self.request_show(request_id=flags.get("request", ""))
             if sub == "launch-reconcile":
@@ -1136,7 +1146,14 @@ class RuntimeProvider:
         return self._unsupported("dispatch_inject", kwargs)
 
     def launch_reconcile(self, **kwargs: Any) -> dict[str, Any]:
-        """Settle worker launches a crashed coordinator left open (`posix` only, #597)."""
+        """Settle worker launches a crashed coordinator left open (#597 / #750)."""
+        state = getattr(self, "state", None)
+        if state is not None and hasattr(state, "reconcile_ambiguous_request"):
+            return state.reconcile_ambiguous_request(
+                request_id=kwargs.get("request"),
+                intent_id=kwargs.get("intent"),
+                takeover=bool(kwargs.get("takeover")),
+            )
         return self._unsupported("launch_reconcile", kwargs)
 
     def request_show(self, **kwargs: Any) -> dict[str, Any]:

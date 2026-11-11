@@ -3737,6 +3737,47 @@ class ProofOracleProtection(RepoCase):
                 self.assertFalse(any('worktree' in c.args[0] for c in run.call_args_list))
                 apply.assert_not_called()
 
+    def test_python_module_mode_rejects_untracked_or_flag_smuggling_runners_and_pins_repo_module(self):
+        py = shlex.quote(sys.executable)
+        for command in (
+            f'{py} -m timeit -n 1 -r 1 -s "exec(open(\'/tmp/external_proof.py\').read())" pass',
+            f'{py} -m pdb runner.py',
+            f'{py} -I -m runner',
+            f'{py} -m runner --eval-external',
+            f'{py} -m runner /tmp/external_proof.py',
+            f'{py} -m untracked_ghost_mod',
+        ):
+            with self.subTest(command=command):
+                self.cmd = command
+                m = self.manifest('revert')
+                m['negative_control']['paths'] = ['app.py']
+                with mock.patch.object(verify, '_apply_control') as apply:
+                    ok, errors = verify.execute_negative_control(m, command)
+                self.assertFalse(ok, errors)
+                self.assertTrue(
+                    any('unsupported proof command' in e or 'outside the staged commit' in e for e in errors),
+                    errors,
+                )
+                apply.assert_not_called()
+        # A tracked repo module that mutates itself during a phase also fails closed.
+        self.write(
+            'self_mutating_runner.py',
+            'from pathlib import Path\n'
+            'import app\n'
+            'Path("self_mutating_runner.py").write_text("# tampered\\n")\n'
+            'assert app.VALUE == 2\n',
+        )
+        self.write('app.py', 'VALUE = 1\n')
+        self.base = self.commit()
+        self.write('app.py', 'VALUE = 2\n')
+        self.head = self.commit()
+        self.cmd = f'{py} -m self_mutating_runner'
+        m = self.manifest('revert')
+        m['negative_control']['paths'] = ['app.py']
+        ok, errors = verify.execute_negative_control(m, self.cmd)
+        self.assertFalse(ok, errors)
+        self.assertTrue(any('self_mutating_runner.py' in e and 'changed during' in e for e in errors), errors)
+
 
 
 class PerRunCaches(RepoCase):

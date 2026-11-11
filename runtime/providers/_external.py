@@ -229,16 +229,36 @@ def _marking_runtime_contact(runner):
     @functools.wraps(runner)
     def marked(*args, **kwargs):
         _ensure_ctx_task_claimed()
+        ctx = _LAUNCH_CLAIM_CTX.get()
         before = _REACHED_RUNTIME.get()
+        if not before and ctx is not None:
+            st = ctx.get("state")
+            req_id = ctx.get("retry_request")
+            if req_id and st is not None and hasattr(st, "mark_request_contacted"):
+                st.mark_request_contacted(
+                    req_id,
+                    contacted=True,
+                    task_id=ctx.get("task_id") if ctx.get("claimed") else None,
+                )
         _REACHED_RUNTIME.set(True)
         try:
             return runner(*args, **kwargs)
         except FileNotFoundError:
             _REACHED_RUNTIME.set(before)
+            if not before and ctx is not None:
+                st = ctx.get("state")
+                req_id = ctx.get("retry_request")
+                if req_id and st is not None and hasattr(st, "mark_request_contacted"):
+                    st.mark_request_contacted(req_id, contacted=False)
             raise
         except ProviderError as exc:
             if exc.code.endswith(("_not_configured", "_cli_missing")):
                 _REACHED_RUNTIME.set(before)
+                if not before and ctx is not None:
+                    st = ctx.get("state")
+                    req_id = ctx.get("retry_request")
+                    if req_id and st is not None and hasattr(st, "mark_request_contacted"):
+                        st.mark_request_contacted(req_id, contacted=False)
             raise
 
     marked._marks_runtime_contact = True
@@ -305,6 +325,7 @@ def release_claim_on_failure(worker_start):
             "state": state_obj,
             "task_id": payload_args.get("task_id"),
             "run": resolved_run,
+            "retry_request": retry_request,
             "checked": False,
             "claimed": False,
             "effective_run": resolved_run,
@@ -316,11 +337,22 @@ def release_claim_on_failure(worker_start):
         except BaseException:
             if claim_ctx.get("claimed") and not claim_ctx.get("recorded") and not _REACHED_RUNTIME.get():
                 release_local_task(claim_ctx.get("state"), claim_ctx.get("task_id"))
-            if retry_request and not _REACHED_RUNTIME.get():
-                row = self.state.request_row(retry_request)
-                if (row and row.get("state") == "pending" and not row.get("response_json")
-                        and int(row.get("claim_pid") or 0) == os.getpid()):
-                    self.state.release_request(retry_request)
+            if retry_request and state_obj is not None:
+                row = state_obj.request_row(retry_request)
+                if row and row.get("state") == "pending" and not row.get("response_json"):
+                    if not _REACHED_RUNTIME.get():
+                        if int(row.get("claim_pid") or 0) == os.getpid():
+                            state_obj.release_request(retry_request)
+                    elif hasattr(state_obj, "mark_request_contacted") and (
+                        int(row.get("contacted_runtime") or 0) != 0
+                        or int(row.get("claim_pid") or 0) == os.getpid()
+                    ):
+                        state_obj.mark_request_contacted(
+                            retry_request,
+                            contacted=True,
+                            task_id=claim_ctx.get("task_id") if claim_ctx.get("claimed") else None,
+                            settled_ambiguous=True,
+                        )
             raise
         finally:
             _LAUNCH_CLAIM_CTX.reset(ctx_token)

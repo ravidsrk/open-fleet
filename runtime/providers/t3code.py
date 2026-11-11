@@ -40,7 +40,7 @@ from .base import (
     parse_json_strict,
     require_id,
 )
-from .local_state import LocalStateStore
+from .local_state import LocalStateStore, request_payload_sha256
 from .posix import checkout_worktree
 from ._external import (
     _REACHED_RUNTIME,
@@ -323,74 +323,102 @@ class T3CodeProvider(RuntimeProvider):
         run: str | None = None,
         sender: str | None = None,
         prompt: str | None = None,
+        retry_request: str | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        thread_id = to_handle.split(":", 1)[1] if to_handle.startswith("t3:") else to_handle
-        if not thread_id:
-            raise ProviderError("invalid_handle", "dispatch --to needs a t3:<threadId> handle")
-        with self.state._connect() as conn:
-            inj_row = conn.execute(
-                "SELECT dispatch_id, session_id, terminal_handle, launch_effective FROM dispatches WHERE backend = ? AND dispatch_id = ? LIMIT 1",
-                (self.name, thread_id),
-            ).fetchone()
-        if inj_row:
-            thread_id = self._thread_id_of_row(dict(inj_row))
-        resolved_run = self.state._resolve_caller_run(run, default_run=None)
-        message = self.resolve_task_prompt(task_id, prompt)
-        claimed, eff_run = claim_local_task(self.state, task_id, resolved_run)
-        target_run = eff_run or resolved_run or "default"
-        with self.state._connect() as conn:
-            orig = conn.execute(
-                "SELECT worktree, agent, profile, run_id FROM dispatches WHERE backend = ? AND (dispatch_id = ? OR session_id = ? OR terminal_handle = ?) ORDER BY created_at ASC LIMIT 1",
-                (self.name, thread_id, thread_id, f"t3:{thread_id}"),
-            ).fetchone()
-            bound = conn.execute(
-                "SELECT run_id FROM dispatches WHERE backend = ? AND (dispatch_id = ? OR session_id = ? OR terminal_handle = ?) AND run_id != ? LIMIT 1",
-                (self.name, thread_id, thread_id, f"t3:{thread_id}", target_run),
-            ).fetchone()
-        if bound:
+        payload_sha = request_payload_sha256(
+            {"task_id": task_id, "to_handle": to_handle, "run": run, "sender": sender, "prompt": prompt}
+        )
+        cached = self.state.get_or_record_request(retry_request, "dispatch", payload_sha)
+        if cached:
+            return cached
+        claimed = False
+        try:
+            thread_id = to_handle.split(":", 1)[1] if to_handle.startswith("t3:") else to_handle
+            if not thread_id:
+                raise ProviderError("invalid_handle", "dispatch --to needs a t3:<threadId> handle")
+            with self.state._connect() as conn:
+                inj_row = conn.execute(
+                    "SELECT dispatch_id, session_id, terminal_handle, launch_effective FROM dispatches WHERE backend = ? AND dispatch_id = ? LIMIT 1",
+                    (self.name, thread_id),
+                ).fetchone()
+            if inj_row:
+                thread_id = self._thread_id_of_row(dict(inj_row))
+            resolved_run = self.state._resolve_caller_run(run, default_run=None)
+            message = self.resolve_task_prompt(task_id, prompt)
+            claimed, eff_run = claim_local_task(self.state, task_id, resolved_run)
+            target_run = eff_run or resolved_run or "default"
+            with self.state._connect() as conn:
+                orig = conn.execute(
+                    "SELECT worktree, agent, profile, run_id FROM dispatches WHERE backend = ? AND (dispatch_id = ? OR session_id = ? OR terminal_handle = ?) ORDER BY created_at ASC LIMIT 1",
+                    (self.name, thread_id, thread_id, f"t3:{thread_id}"),
+                ).fetchone()
+                bound = conn.execute(
+                    "SELECT run_id FROM dispatches WHERE backend = ? AND (dispatch_id = ? OR session_id = ? OR terminal_handle = ?) AND run_id != ? LIMIT 1",
+                    (self.name, thread_id, thread_id, f"t3:{thread_id}", target_run),
+                ).fetchone()
+            if bound:
+                raise ProviderError(
+                    "cross_run_access",
+                    f"thread {thread_id!r} is bound to run {bound['run_id']!r}, not {target_run!r}",
+                )
+        except BaseException:
             if claimed:
                 release_local_task(self.state, task_id)
-            raise ProviderError(
-                "cross_run_access",
-                f"thread {thread_id!r} is bound to run {bound['run_id']!r}, not {target_run!r}",
-            )
+            if retry_request:
+                self.state.release_request(retry_request)
+            raise
         args: dict[str, Any] = {"threadId": thread_id, "message": message, "mode": "queue"}
-        if kwargs.get("retry_request"):
-            args["clientRequestId"] = str(kwargs["retry_request"])
+        if retry_request:
+            args["clientRequestId"] = str(retry_request)
+            self.state.mark_request_contacted(retry_request, contacted=True, task_id=task_id if claimed else None)
         token = ensure_runner_marks_contact(self)
         try:
             raw = self._tool("t3_thread_send", args)
+            if not isinstance(raw, dict):
+                raise ProviderError("t3code_bad_json", "t3_thread_send returned non-object payload", {"response": raw})
+            res: dict[str, Any] = {
+                "injected": True,
+                "threadId": thread_id,
+                "taskId": task_id,
+                "delivery": raw.get("delivery"),
+                "upstream": raw,
+            }
+            if claimed:
+                inject_dispatch_id = f"{thread_id}:inject:{uuid.uuid4().hex[:8]}"
+                insert_dispatch(
+                    self.state,
+                    dispatch_id=inject_dispatch_id,
+                    task_id=task_id,
+                    run=target_run,
+                    worktree=str(orig["worktree"] or "") if orig else "",
+                    agent=str(orig["agent"] or "claude") if orig else "claude",
+                    profile=str(orig["profile"] or "ro") if orig else "ro",
+                    handle=f"t3:{thread_id}",
+                    backend=self.name,
+                    effective={"threadId": thread_id, "mechanism": "mcp.t3_thread_send", "inject": True},
+                    session_id=thread_id,
+                )
+                res["dispatchId"] = inject_dispatch_id
+            self.state.save_request(retry_request, "dispatch", "completed", res, payload_sha)
+            return res
         except BaseException:
-            if claimed and not runtime_was_reached():
-                release_local_task(self.state, task_id)
+            if not runtime_was_reached():
+                if claimed:
+                    release_local_task(self.state, task_id)
+                if retry_request:
+                    self.state.mark_request_contacted(retry_request, contacted=False)
+                    self.state.release_request(retry_request)
+            elif retry_request:
+                self.state.mark_request_contacted(
+                    retry_request,
+                    contacted=True,
+                    task_id=task_id if claimed else None,
+                    settled_ambiguous=True,
+                )
             raise
         finally:
             _REACHED_RUNTIME.reset(token)
-        res: dict[str, Any] = {
-            "injected": True,
-            "threadId": thread_id,
-            "taskId": task_id,
-            "delivery": raw.get("delivery"),
-            "upstream": raw,
-        }
-        if claimed:
-            inject_dispatch_id = f"{thread_id}:inject:{uuid.uuid4().hex[:8]}"
-            insert_dispatch(
-                self.state,
-                dispatch_id=inject_dispatch_id,
-                task_id=task_id,
-                run=target_run,
-                worktree=str(orig["worktree"] or "") if orig else "",
-                agent=str(orig["agent"] or "claude") if orig else "claude",
-                profile=str(orig["profile"] or "ro") if orig else "ro",
-                handle=f"t3:{thread_id}",
-                backend=self.name,
-                effective={"threadId": thread_id, "mechanism": "mcp.t3_thread_send", "inject": True},
-                session_id=thread_id,
-            )
-            res["dispatchId"] = inject_dispatch_id
-        return res
 
     def worker_list(
         self, *, run: str | None = None, task: str | None = None, limit: int | None = None, **kwargs: Any

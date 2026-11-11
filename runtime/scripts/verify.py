@@ -1163,6 +1163,22 @@ class _Authority:
                 scan_idx = pi + 2 if rest[pi] == "-m" else pi + 1
                 if mod in ("pytest", "unittest"):
                     program = mod
+                else:
+                    mod_root = mod.split(".", 1)[0]
+                    forbid_mods = (
+                        (set(getattr(sys, "stdlib_module_names", ())) | set(sys.builtin_module_names)) - {"unittest"}
+                    ) | {"pip", "setuptools", "wheel", "virtualenv", "nox", "tox", "coverage", "ipython", "IPython"}
+                    if mod_root in forbid_mods:
+                        return None, (
+                            f"unsupported proof command: {tok!r} invokes module runner '-m {mod}'; "
+                            "only '-m pytest', '-m unittest', or a staged repo module is permitted (#750 C19)"
+                        )
+                    if "-I" in rest[:pi]:
+                        return None, (
+                            f"unsupported proof command: {tok!r} cannot combine '-I' with repo module '-m {mod}'; "
+                            "fail-closed (#750 C19)"
+                        )
+                    program = "py_module"
             else:
                 if rest[pi] == "--":
                     pi += 1
@@ -1354,6 +1370,16 @@ class _Authority:
                 err = cls._check_rel_operand(tok, p_part, "test path")
                 if err:
                     return None, err
+            elif program == "py_module":
+                if a.startswith("-"):
+                    return None, (
+                        f"unsupported proof command: {tok!r} passes unsupported option {a!r} to '-m {mod}'; "
+                        "fail-closed (#750 C19)"
+                    )
+                err = cls._check_rel_operand(tok, a, "operand")
+                if err:
+                    return None, err
+                staged.append(a)
             elif program == "grep" and not a.startswith("-"):
                 grep_pos.append(a)
             i += 1
@@ -1364,6 +1390,12 @@ class _Authority:
                     err = cls._check_rel_operand(tok, p_part, "test path")
                     if err:
                         return None, err
+            elif program == "py_module":
+                for post_a in rest[i + 1:]:
+                    err = cls._check_rel_operand(tok, post_a, "operand")
+                    if err:
+                        return None, err
+                    staged.append(post_a)
             elif program == "grep":
                 grep_pos.extend(rest[i + 1:])
         if program == "grep":
@@ -1373,6 +1405,24 @@ class _Authority:
                 if err:
                     return None, err
         return staged, None
+
+    @classmethod
+    def _python_module_target(cls, argv):
+        """Return dotted `-m <mod>` target when `argv` runs Python module mode outside pytest/unittest."""
+        indexed, err = cls._unwrap_nc_indexed(argv)
+        if err or not indexed:
+            return None
+        target_idx, target_tok = indexed[-1]
+        tail = argv[target_idx + 1:]
+        if not re.fullmatch(r"(?:python(?:[0-9.]+)?|pypy[0-9]*)", Path(target_tok).name):
+            return None
+        pi = 0
+        while pi < len(tail) and tail[pi] in {"-B", "-E", "-I", "-O", "-OO", "-s", "-S", "-u", "-q"}:
+            pi += 1
+        if pi >= len(tail) or not tail[pi].startswith("-m"):
+            return None
+        mod = (tail[pi + 1] if pi + 1 < len(tail) else "") if tail[pi] == "-m" else tail[pi][2:]
+        return None if (not mod or mod in ("pytest", "unittest")) else mod
 
     @classmethod
     def _staged_script_operands(cls, argv):
@@ -2247,6 +2297,13 @@ def _command_oracle_paths(command):
         if python and arg.startswith("-m"):
             name = (argv[i + 1] if i + 1 < len(argv) else "") if arg == "-m" else arg[2:]
             if not re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", name):
+                return None
+            mod_root = name.split(".", 1)[0]
+            if mod_root != "unittest" and (
+                mod_root in getattr(sys, "stdlib_module_names", ())
+                or mod_root in sys.builtin_module_names
+                or mod_root in {"pip", "setuptools", "wheel", "virtualenv", "nox", "tox", "coverage", "ipython", "IPython"}
+            ):
                 return None
             module = name.replace(".", "/")
             scan_from = i + 2 if arg == "-m" else i + 1
@@ -3281,7 +3338,7 @@ def execute_negative_control(m, nc_command=None):
             return f"could not check out the {phase} commit: {gerr.strip()}"
         return None
 
-    def _phase_run(top, head, commit, phase, argv, pinned_exec=None):
+    def _phase_run(top, head, commit, phase, argv, pinned_exec=None, extra_staged_ops=(), absent_mod_paths=()):
         """Run the bound command once in a FRESH repository at `commit`, under a FRESH empty
         HOME and TMPDIR. Returns (rc, stdout, stderr), or (None, None, err) when no repo was made.
 
@@ -3298,13 +3355,17 @@ def execute_negative_control(m, nc_command=None):
             err = _stage_phase_repo(top, head, commit, repo, phase)
             if err:
                 return None, None, err
-            staged_ops = _Authority._staged_script_operands(argv)
+            staged_ops = list(dict.fromkeys([*_Authority._staged_script_operands(argv), *extra_staged_ops]))
             pre_op_digests = {}
             for s_op in staged_ops:
                 s_digest, s_err = _Authority._verify_staged_rel_file(repo, s_op)
                 if s_err:
                     return None, None, s_err
                 pre_op_digests[s_op] = s_digest
+            for abs_rel in absent_mod_paths:
+                if os.path.lexists(os.path.join(repo, abs_rel)):
+                    return None, None, (f"proof module shadow {abs_rel!r} appeared before {phase}; "
+                                        "fail-closed (#750 C19)")
             exec_argv = list(argv)
             if pinned_exec is not None:
                 _, exec_err = _Authority.nc_exec_identity(
@@ -3322,6 +3383,10 @@ def execute_negative_control(m, nc_command=None):
                     return None, None, post_s_err
                 if post_digest != want_digest:
                     return None, None, (f"proof input {s_op!r} changed during {phase}; "
+                                        "fail-closed (#750 C19)")
+            for abs_rel in absent_mod_paths:
+                if os.path.lexists(os.path.join(repo, abs_rel)):
+                    return None, None, (f"proof module shadow {abs_rel!r} appeared during {phase}; "
                                         "fail-closed (#750 C19)")
             if pinned_exec is not None:
                 _, post_err = _Authority.nc_exec_identity(
@@ -3355,6 +3420,45 @@ def execute_negative_control(m, nc_command=None):
     pinned_exec, exec_err = _Authority.nc_exec_identity(argv, top)
     if exec_err:
         return False, [f"--execute-nc: {exec_err}"]
+    extra_staged_ops, absent_mod_paths = [], []
+    py_mod = _Authority._python_module_target(argv)
+    if py_mod is not None:
+        mod_parts = py_mod.split(".")
+        mod_rel = "/".join(mod_parts)
+        entry_cands = [f"{mod_rel}.py", f"{mod_rel}/__main__.py"]
+        pkg_cands = [f"{'/'.join(mod_parts[:k])}/__init__.py" for k in range(1, len(mod_parts) + 1)]
+        all_cands = list(dict.fromkeys([*entry_cands, *pkg_cands]))
+        ls_rc, ls_out, _ = _run(
+            [_Authority.git_bin(), "-C", top, "--literal-pathspecs", "ls-tree", "-r", "-z", head, "--", *all_cands],
+            timeout=10, env=_Authority.git_env())
+        tracked_mods = {}
+        if ls_rc == 0 and ls_out:
+            for rec_line in ls_out.split("\0"):
+                if not rec_line or "\t" not in rec_line:
+                    continue
+                meta, rel_p = rec_line.split("\t", 1)
+                parts_m = meta.split()
+                if parts_m and parts_m[0] in ("100644", "100755"):
+                    tracked_mods[rel_p] = parts_m[0]
+        if not any(ec in tracked_mods for ec in entry_cands):
+            return False, [f"--execute-nc: unsupported proof command: module '-m {py_mod}' is not a tracked "
+                           "regular file in head_sha; fail-closed (#750 C19)"]
+        req_pkgs = [
+            f"{'/'.join(mod_parts[:k])}/__init__.py"
+            for k in range(
+                1,
+                len(mod_parts) + (1 if f"{mod_rel}/__main__.py" in tracked_mods and f"{mod_rel}.py" not in tracked_mods else 0),
+            )
+        ]
+        if any(rp not in tracked_mods for rp in req_pkgs):
+            return False, [f"--execute-nc: unsupported proof command: package hierarchy for '-m {py_mod}' "
+                           "is missing tracked __init__.py in head_sha; fail-closed (#750 C19)"]
+        extra_staged_ops = [c for c in all_cands if c in tracked_mods]
+        absent_mod_paths = [c for c in all_cands if c not in tracked_mods]
+        for k in range(1, len(mod_parts)):
+            sib_py = f"{'/'.join(mod_parts[:k])}.py"
+            if sib_py not in tracked_mods:
+                absent_mod_paths.append(sib_py)
     for st_op in _Authority._staged_script_operands(argv):
         norm_st_op = Path(os.path.normpath(st_op)).as_posix()
         if os.path.isabs(st_op) or norm_st_op in ("", ".") or ".." in Path(norm_st_op).parts:
@@ -3377,7 +3481,9 @@ def execute_negative_control(m, nc_command=None):
         return False, [f"--execute-nc: {err}"]
     msgs = []
     for phase, commit in (("clean", head), ("control", mutant), ("clean", head)):
-        rc, out, errout = _phase_run(top, head, commit, phase, argv, pinned_exec)
+        rc, out, errout = _phase_run(
+            top, head, commit, phase, argv, pinned_exec, extra_staged_ops, absent_mod_paths
+        )
         if rc is None:
             return False, [f"--execute-nc: {errout}"]
         tail = (errout.strip() or out.strip())[-300:]
