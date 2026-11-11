@@ -905,17 +905,21 @@ class GateRunsIsolated(QueueCase):
         tools_dir = self.w.tmp / "bin" / "ver-interp"
         tools_dir.mkdir(parents=True, exist_ok=True)
         ruby31 = tools_dir / "ruby3.1"
-        ruby31.write_text("#!/bin/sh\nexec /bin/sh \"$1\"\n", encoding="utf-8")
+        ruby31.write_text(
+            f"#!{sys.executable} -I\nimport pathlib, sys\n"
+            "exec(compile(pathlib.Path(sys.argv[1]).read_bytes(), sys.argv[1], 'exec'))\n",
+            encoding="utf-8",
+        )
         ruby31.chmod(0o755)
         ext_rb = tools_dir / "check.rb"
-        ext_rb.write_text("exit 0\n", encoding="utf-8")
+        ext_rb.write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
         gate_cmd = f"{ruby31} {ext_rb}"
         tok = self.acquire("c-ver-interp")
         self.board(tok, self.w.unit("ver-interp-unit"))
         rc_p, out_p = self.w.cli("plan", "--token", tok, "--gate-cmd", gate_cmd)
         self.assertEqual(rc_p, 0, out_p)
         self.assertEqual(out_p["planned"][0]["result"], "tested", out_p)
-        ext_rb.write_text("exit 1\n", encoding="utf-8")
+        ext_rb.write_text("import sys\nsys.exit(1)\n", encoding="utf-8")
         rc_m, out_m = self.w.cli("merge", "--token", tok, "--require-gate", gate_cmd)
         self.assertNotEqual(rc_m, 0, out_m)
         self.assertEqual(out_m.get("code"), "gate_not_run", out_m)
@@ -1007,10 +1011,12 @@ class GateRunsIsolated(QueueCase):
 
         # `rg --pre` is rejected fail-closed in `plan`, and `rg -f <pattern_file>` invalidates `plan_passed` on replacement:
         rg_bin = tools_dir / "rg"
-        rg_bin.write_text('#!/bin/sh\nexec grep "$@"\n', encoding="utf-8")
+        grep_src = shutil.which("grep")
+        assert grep_src is not None
+        shutil.copyfile(grep_src, rg_bin)
         rg_bin.chmod(0o755)
         pre_prog = tools_dir / "rg-pre-check"
-        pre_prog.write_text("#!/bin/sh\ncat \"$1\"\n", encoding="utf-8")
+        pre_prog.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         pre_prog.chmod(0o755)
         tok_rg = self.acquire("c-rg-pre", "--takeover")
         self.board(tok_rg, self.w.unit("rg-pre-unit"))
@@ -1035,6 +1041,79 @@ class GateRunsIsolated(QueueCase):
         rc_rfm, out_rfm = self.w.cli("merge", "--token", tok_rg, "--require-gate", rg_file_cmd)
         self.assertNotEqual(rc_rfm, 0, out_rfm)
         self.assertEqual(out_rfm.get("code"), "gate_not_run", out_rfm)
+
+    def test_directly_executed_shell_scripts_fingerprint_inner_dependencies_and_fail_closed(self):
+        tools_dir = self.w.tmp / "bin" / "direct-sh"
+        tools_dir.mkdir(parents=True, exist_ok=True)
+        inner_check = tools_dir / "inner-check"
+        inner_check.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        inner_check.chmod(0o755)
+
+        # 1. Directly executed repo-relative `#!/bin/sh` script invalidates `plan_passed` when inner executable changes:
+        (self.w.worker / "ci").mkdir(parents=True, exist_ok=True)
+        rel_gate = self.w.worker / "ci" / "gate.sh"
+        rel_gate.write_text(f"#!/bin/sh\nexec {inner_check}\n", encoding="utf-8")
+        rel_gate.chmod(0o755)
+        self.w.git(self.w.worker, "add", "--chmod=+x", "ci/gate.sh")
+        self.w.git(self.w.worker, "commit", "-q", "-m", "add ci/gate.sh")
+        self.w.git(self.w.worker, "push", "-q", "origin", f"HEAD:refs/heads/{W.BASE}")
+        self.w.git(self.w.conductor, "fetch", "-q", "origin")
+
+        tok = self.acquire("c-direct-rel-sh")
+        self.board(tok, self.w.unit("direct-rel-sh-unit"))
+        rc_rp, out_rp = self.w.cli("plan", "--token", tok, "--gate-cmd", "./ci/gate.sh")
+        self.assertEqual(rc_rp, 0, out_rp)
+        self.assertEqual(out_rp["planned"][0]["result"], "tested", out_rp)
+        inner_check.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        rc_rm, out_rm = self.w.cli("merge", "--token", tok, "--require-gate", "./ci/gate.sh")
+        self.assertNotEqual(rc_rm, 0, out_rm)
+        self.assertEqual(out_rm.get("code"), "gate_not_run", out_rm)
+        self.w.cli(
+            "resolve", "--token", tok, "--entry", out_rp["planned"][0]["entry"],
+            "--action", "drop", "--reason", "stale-rel-sh",
+        )
+
+        # 2. Directly executed external `#!/usr/bin/env sh` script also fingerprints inner dependencies:
+        inner_check2 = tools_dir / "inner-check-2"
+        inner_check2.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        inner_check2.chmod(0o755)
+        ext_gate = tools_dir / "ext-gate.sh"
+        ext_gate.write_text(f"#!/usr/bin/env sh\nexec {inner_check2}\n", encoding="utf-8")
+        ext_gate.chmod(0o755)
+
+        self.board(tok, self.w.unit("direct-ext-sh-unit"))
+        rc_ep, out_ep = self.w.cli("plan", "--token", tok, "--gate-cmd", str(ext_gate))
+        self.assertEqual(rc_ep, 0, out_ep)
+        self.assertEqual(out_ep["planned"][0]["result"], "tested", out_ep)
+        inner_check2.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        rc_em, out_em = self.w.cli("merge", "--token", tok, "--require-gate", str(ext_gate))
+        self.assertNotEqual(rc_em, 0, out_em)
+        self.assertEqual(out_em.get("code"), "gate_not_run", out_em)
+
+        # 3. Dynamic inner dispatch, ENOEXEC shebang-less scripts, and option-permuting `#!` tools fail closed:
+        q = self.w.queue()
+        dyn_sh = tools_dir / "dyn-gate.sh"
+        dyn_sh.write_text('#!/bin/sh\nexec "$1"\n', encoding="utf-8")
+        dyn_sh.chmod(0o755)
+        fp_dyn, probs_dyn = q._gate_fingerprint(f"{dyn_sh} {inner_check2}")
+        self.assertEqual(fp_dyn, "")
+        self.assertTrue(probs_dyn)
+
+        no_sb = tools_dir / "no-shebang.sh"
+        no_sb.write_text(f"exec {inner_check2}\n", encoding="utf-8")
+        no_sb.chmod(0o755)
+        fp_nosb, probs_nosb = q._gate_fingerprint(str(no_sb))
+        self.assertEqual(fp_nosb, "")
+        self.assertTrue(probs_nosb)
+
+        find_bin = shutil.which("find")
+        if find_bin:
+            sb_find = tools_dir / "shebang-find"
+            sb_find.write_text(f"#!{find_bin}\n", encoding="utf-8")
+            sb_find.chmod(0o755)
+            fp_sbf, probs_sbf = q._gate_fingerprint(f"{sb_find} . -exec {inner_check2} \\;")
+            self.assertEqual(fp_sbf, "")
+            self.assertTrue(probs_sbf)
 
     def test_bwrap_filtered_path_and_dangling_symlinks_fingerprint_sandbox_view(self):
         fake_home = self.w.tmp / "bw-fp-home"

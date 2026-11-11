@@ -3755,6 +3755,36 @@ class MergeQueue:
             return None, err
         return hashlib.sha256(raw_bytes).hexdigest(), None
 
+    _DISALLOWED_SHEBANG_FAMILIES = frozenset({
+        "interp:deno", "interp:bun", "interp:sed", "interp:awk",
+        "interp:rg", "interp:grep", "interp:git", "interp:pytest",
+    })
+
+    @staticmethod
+    def _is_native_binary_bytes(raw_bytes: bytes) -> bool:
+        return raw_bytes.startswith((b"\x7fELF", b"MZ", b"\x00asm")) or raw_bytes[:4] in (
+            b"\xfe\xed\xfa\xce", b"\xce\xfa\xed\xfe",
+            b"\xfe\xed\xfa\xcf", b"\xcf\xfa\xed\xfe",
+            b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca",
+            b"\xca\xfe\xba\xbf", b"\xbf\xba\xfe\xca",
+        )
+
+    @classmethod
+    def _is_disallowed_shebang_interp(cls, names: set[str], raw_base: str, *, allow_env: bool) -> bool:
+        forbid_wrappers = {
+            "nice", "gnice", "timeout", "gtimeout", "nohup", "gnohup",
+            "command", "builtin", "find", "gfind",
+        }
+        if not allow_env:
+            forbid_wrappers |= {"env", "genv"}
+        return (
+            any(cls._is_mux_wrapper(n) for n in names)
+            or bool(names & forbid_wrappers)
+            or any(re.fullmatch(r"(?:csh|tcsh)(?:[-.]?\d+(?:\.\d+)*)?", n) for n in names)
+            or (raw_base != "sh" and any(re.fullmatch(r"r?zsh(?:[-.]?\d+(?:\.\d+)*)?", n) for n in names))
+            or any(cls._exec_family(n) in cls._DISALLOWED_SHEBANG_FAMILIES for n in names)
+        )
+
     @staticmethod
     def _shebang_arg_allowed(interp_names: set[str], interp_arg: str) -> bool:
         if not interp_arg:
@@ -3765,8 +3795,6 @@ class MergeQueue:
             return bool(re.fullmatch(r"-[abefhmnuvxBCEHP]+", interp_arg))
         if any(re.fullmatch(r"perl(?:[-.]?\d+(?:\.\d+)*)?", n) for n in interp_names):
             return bool(re.fullmatch(r"-[wTt]+", interp_arg))
-        if any(re.fullmatch(r"(?:[gmnb]?awk|sed|[gs]sed)(?:[-.]?\d+(?:\.\d+)*)?", n) for n in interp_names):
-            return interp_arg == "-f"
         return False
 
     def _fingerprint_shebang_chain(
@@ -3777,11 +3805,20 @@ class MergeQueue:
         _depth: int = 0,
         *,
         ro_binds: tuple[str, ...] | None = None,
+        analyze_body: bool = False,
+        cwd: Path | None = None,
+        commit: str | None = None,
+        gate_depth: int = 0,
     ) -> tuple[list[dict[str, Any]], list[str]]:
-        """Fingerprint `#!` interpreter chains (including `#!/usr/bin/env <prog>`) for executable scripts."""
+        """Fingerprint `#!` interpreter chains (including `#!/usr/bin/env <prog>`) and recursively
+        fingerprint shell script bodies for directly executed scripts."""
         if _depth > 4:
             return [], [f"{label}: shebang recursion depth exceeded"]
         if not raw_bytes.startswith(b"#!"):
+            if analyze_body and not self._is_native_binary_bytes(raw_bytes):
+                return [], [
+                    f"{label}: executable lacks '#!' shebang and native binary header and cannot be statically fingerprinted"
+                ]
             return [], []
         nl = raw_bytes.find(b"\n")
         first_line = raw_bytes[2:nl] if nl != -1 else raw_bytes[2:]
@@ -3795,6 +3832,28 @@ class MergeQueue:
             return [], [f"{label}: relative or empty shebang interpreter {interp!r} cannot be statically fingerprinted"]
         chain: list[dict[str, Any]] = []
         probs: list[str] = []
+
+        def _fingerprint_shell_body() -> None:
+            body_bytes = raw_bytes[nl + 1:] if nl != -1 else b""
+            if b"\x00" in body_bytes:
+                probs.append(f"{label}: NUL byte in shell script body cannot be statically fingerprinted")
+                return
+            try:
+                body_text = body_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                probs.append(f"{label}: non-UTF-8 bytes in shell script body cannot be statically fingerprinted")
+                return
+            body_fp, body_probs = self._gate_fingerprint(
+                body_text,
+                cwd=cwd,
+                commit=commit,
+                _depth=gate_depth + 1,
+                _has_ro_binds=True,
+                _ro_binds=ro_binds,
+            )
+            probs.extend(body_probs)
+            chain.append({"body_sub_fp": body_fp})
+
         i_real = self._sandbox_resolve_path(interp, ro_binds)
         if not i_real:
             return [], [f"{label}: shebang interpreter {interp!r} is not accessible inside gate sandbox"]
@@ -3808,7 +3867,15 @@ class MergeQueue:
             return [], [f"{label}: shebang interpreter {interp!r}: {exc}"]
         chain.append({"interp": interp, "real": i_real, "dev": i_st.st_dev, "ino": i_st.st_ino, "sha256": i_sha})
         sub_chain, sub_probs = self._fingerprint_shebang_chain(
-            i_bytes, f"{label}#!{interp}", clean_path, _depth + 1, ro_binds=ro_binds
+            i_bytes,
+            f"{label}#!{interp}",
+            clean_path,
+            _depth + 1,
+            ro_binds=ro_binds,
+            analyze_body=analyze_body,
+            cwd=cwd,
+            commit=commit,
+            gate_depth=gate_depth,
         )
         chain.extend(sub_chain)
         probs.extend(sub_probs)
@@ -3820,13 +3887,7 @@ class MergeQueue:
             else i_real_base
         )
         interp_names = {i_base, eff_i_real_base}
-        if (
-            self._is_mux_wrapper(i_base)
-            or self._is_mux_wrapper(eff_i_real_base)
-            or (interp_names & {"nice", "gnice", "timeout", "gtimeout", "nohup", "gnohup", "command", "builtin"})
-            or any(re.fullmatch(r"(?:csh|tcsh)(?:[-.]?\d+(?:\.\d+)*)?", n) for n in interp_names)
-            or (i_base != "sh" and any(re.fullmatch(r"r?zsh(?:[-.]?\d+(?:\.\d+)*)?", n) for n in interp_names))
-        ):
+        if self._is_disallowed_shebang_interp(interp_names, i_base, allow_env=True):
             probs.append(f"{label}: shebang multiplexer or wrapper {interp!r} cannot be statically fingerprinted")
             return chain, probs
         if interp_names & {"env", "genv"}:
@@ -3853,13 +3914,7 @@ class MergeQueue:
                 else e_real_base
             )
             e_names = {e_base, eff_e_real_base}
-            if (
-                self._is_mux_wrapper(e_base)
-                or self._is_mux_wrapper(eff_e_real_base)
-                or (e_names & {"env", "genv", "nice", "gnice", "timeout", "gtimeout", "nohup", "gnohup", "command", "builtin"})
-                or any(re.fullmatch(r"(?:csh|tcsh)(?:[-.]?\d+(?:\.\d+)*)?", n) for n in e_names)
-                or (e_base != "sh" and any(re.fullmatch(r"r?zsh(?:[-.]?\d+(?:\.\d+)*)?", n) for n in e_names))
-            ):
+            if self._is_disallowed_shebang_interp(e_names, e_base, allow_env=False):
                 probs.append(
                     f"{label}: shebang env target {interp_arg!r} resolves to multiplexer or wrapper and cannot be statically fingerprinted"
                 )
@@ -3878,13 +3933,26 @@ class MergeQueue:
                 "env_target": interp_arg, "real": e_real, "dev": e_st.st_dev, "ino": e_st.st_ino, "sha256": e_sha,
             })
             e_sub, e_probs = self._fingerprint_shebang_chain(
-                e_bytes, f"{label}#!env:{interp_arg}", clean_path, _depth + 1, ro_binds=ro_binds
+                e_bytes,
+                f"{label}#!env:{interp_arg}",
+                clean_path,
+                _depth + 1,
+                ro_binds=ro_binds,
+                analyze_body=analyze_body,
+                cwd=cwd,
+                commit=commit,
+                gate_depth=gate_depth,
             )
             chain.extend(e_sub)
             probs.extend(e_probs)
+            if analyze_body and any(self._is_shell_name(n) for n in e_names):
+                _fingerprint_shell_body()
             return chain, probs
         if interp_arg and not self._shebang_arg_allowed(interp_names, interp_arg):
             probs.append(f"{label}: shebang option {interp_arg!r} cannot be statically fingerprinted")
+            return chain, probs
+        if analyze_body and any(self._is_shell_name(n) for n in interp_names):
+            _fingerprint_shell_body()
         return chain, probs
 
     def _read_sourced_gate_script(
@@ -3898,17 +3966,23 @@ class MergeQueue:
             real_s = self._sandbox_resolve_path(tok, ro_binds)
             if real_s is None:
                 return None
-            p = Path(real_s)
-            if p.is_file():
-                try:
-                    return p.read_text(encoding="utf-8", errors="replace")
-                except OSError:
+            try:
+                s_st = os.stat(real_s)
+                if not stat.S_ISREG(s_st.st_mode):
                     return None
+                raw_bytes = Path(real_s).read_bytes()
+            except OSError:
+                return None
+        else:
+            raw_bytes, err = self._read_rel_gate_bytes(tok, cwd, commit)
+            if err or raw_bytes is None:
+                return None
+        if b"\x00" in raw_bytes:
             return None
-        raw_bytes, err = self._read_rel_gate_bytes(tok, cwd, commit)
-        if err or raw_bytes is None:
+        try:
+            return raw_bytes.decode("utf-8")
+        except UnicodeDecodeError:
             return None
-        return raw_bytes.decode("utf-8", errors="replace")
 
     def _gate_fingerprint(
         self,
@@ -3922,6 +3996,8 @@ class MergeQueue:
     ) -> tuple[str, list[str]]:
         if _depth > 4:
             return "", ["sourced script recursion depth exceeded"]
+        if "\x00" in gate_cmd:
+            return "", ["NUL byte in gate command cannot be statically fingerprinted"]
         clean_path = self._clean_gate_path()
         ro_binds = _ro_binds if _has_ro_binds else self._bwrap_ro_binds()
         items: list[dict[str, Any]] = []
@@ -4044,7 +4120,14 @@ class MergeQueue:
                     s_bytes = Path(s_real).read_bytes()
                     s_digest = hashlib.sha256(s_bytes).hexdigest()
                     s_sb, s_sb_probs = self._fingerprint_shebang_chain(
-                        s_bytes, fn_name, clean_path, ro_binds=ro_binds
+                        s_bytes,
+                        fn_name,
+                        clean_path,
+                        ro_binds=ro_binds,
+                        analyze_body=tok.startswith("__opt_builtin__:"),
+                        cwd=cwd,
+                        commit=commit,
+                        gate_depth=_depth,
                     )
                     problems.extend(s_sb_probs)
                     items.append({
@@ -4093,6 +4176,10 @@ class MergeQueue:
                 continue
             if "/" in tok and not os.path.isabs(tok):
                 norm_tok = Path(os.path.normpath(tok)).as_posix()
+                if tok in exec_tokens and tok.startswith("-"):
+                    problems.append(
+                        f"{tok}: executable path starting with '-' cannot be statically fingerprinted"
+                    )
                 rel_bytes, rel_err = self._read_rel_gate_bytes(tok, cwd, commit)
                 rel_digest = hashlib.sha256(rel_bytes).hexdigest() if rel_bytes is not None else None
                 if rel_err:
@@ -4100,7 +4187,14 @@ class MergeQueue:
                 rel_item: dict[str, Any] = {"tok": norm_tok, "kind": "relative", "sha256": rel_digest}
                 if tok in exec_tokens and rel_bytes is not None:
                     rel_sb, rel_sb_probs = self._fingerprint_shebang_chain(
-                        rel_bytes, norm_tok, clean_path, ro_binds=ro_binds
+                        rel_bytes,
+                        norm_tok,
+                        clean_path,
+                        ro_binds=ro_binds,
+                        analyze_body=True,
+                        cwd=cwd,
+                        commit=commit,
+                        gate_depth=_depth,
                     )
                     problems.extend(rel_sb_probs)
                     rel_item["shebang"] = rel_sb
@@ -4146,7 +4240,14 @@ class MergeQueue:
                             f"{tok}: resolves to {real_target!r} ({real_fam}) without matching operand analysis"
                         )
                     ext_sb, ext_sb_probs = self._fingerprint_shebang_chain(
-                        raw_bytes, tok, clean_path, ro_binds=ro_binds
+                        raw_bytes,
+                        tok,
+                        clean_path,
+                        ro_binds=ro_binds,
+                        analyze_body=True,
+                        cwd=cwd,
+                        commit=commit,
+                        gate_depth=_depth,
                     )
                     problems.extend(ext_sb_probs)
                     ext_item["shebang"] = ext_sb
