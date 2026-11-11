@@ -1474,11 +1474,13 @@ class MergeQueue:
 
     @staticmethod
     def _fold_line_continuations(cmd: str) -> str:
-        """Remove POSIX `\\<newline>` line continuations outside single quotes before tokenization."""
+        """Remove POSIX `\\<newline>` line continuations outside single quotes and `#` comments."""
         out: list[str] = []
         i, n = 0, len(cmd)
         in_sq = False
         in_dq = False
+        at_tok = True
+        sub_stack: list[tuple[bool, bool, bool]] = []
         while i < n:
             ch = cmd[i]
             if in_sq:
@@ -1486,6 +1488,12 @@ class MergeQueue:
                 if ch == "'":
                     in_sq = False
                 i += 1
+                at_tok = False
+                continue
+            if not in_dq and at_tok and ch == "#":
+                while i < n and cmd[i] != "\n":
+                    out.append(cmd[i])
+                    i += 1
                 continue
             if ch == "\\" and i + 1 < n:
                 if cmd[i + 1] == "\n":
@@ -1493,19 +1501,131 @@ class MergeQueue:
                     continue
                 out.append(cmd[i:i + 2])
                 i += 2
+                at_tok = False
+                continue
+            if ch == "$" and i + 1 < n and cmd[i + 1] == "(":
+                sub_stack.append((True, in_sq, in_dq))
+                in_sq = False
+                in_dq = False
+                at_tok = True
+                out.append("$(")
+                i += 2
+                continue
+            if sub_stack and not in_dq and ch == "(":
+                sub_stack.append((False, False, False))
+                at_tok = True
+                out.append(ch)
+                i += 1
+                continue
+            if sub_stack and not in_dq and ch == ")":
+                is_cmdsub, prev_sq, prev_dq = sub_stack.pop()
+                if is_cmdsub:
+                    in_sq, in_dq = prev_sq, prev_dq
+                    at_tok = False
+                else:
+                    at_tok = True
+                out.append(ch)
+                i += 1
                 continue
             if ch == "'" and not in_dq:
                 in_sq = True
+                at_tok = False
             elif ch == '"':
                 in_dq = not in_dq
+                at_tok = False
+            else:
+                at_tok = (not in_dq) and (ch in " \t\r\n;|&()><")
             out.append(ch)
             i += 1
         return "".join(out)
 
     @classmethod
+    def _find_matching_paren(cls, cmd: str, start: int) -> tuple[int, list[str]]:
+        """Find the index of `)` matching the `(` at `start - 1`, respecting shell quotes, comments, and nesting."""
+        n = len(cmd)
+        j = start
+        at_tok = True
+        while j < n:
+            c = cmd[j]
+            if c == "\\":
+                j += 2
+                at_tok = False
+                continue
+            if at_tok and c == "#":
+                while j < n and cmd[j] != "\n":
+                    j += 1
+                continue
+            if c == "$" and j + 1 < n and cmd[j + 1] in ("'", '"'):
+                return -1, ["ANSI-C or locale $'...' / $\"...\" quoting cannot be statically fingerprinted"]
+            if c == "'":
+                j += 1
+                while j < n and cmd[j] != "'":
+                    j += 1
+                if j >= n:
+                    return -1, ["unterminated single quote in command substitution"]
+                j += 1
+                at_tok = False
+                continue
+            if c == '"':
+                j += 1
+                while j < n and cmd[j] != '"':
+                    if cmd[j] == "\\":
+                        j += 2
+                        continue
+                    if cmd[j] == "$" and j + 1 < n and cmd[j + 1] == "(":
+                        ec, ep = cls._find_matching_paren(cmd, j + 2)
+                        if ec < 0:
+                            return -1, ep
+                        j = ec + 1
+                        continue
+                    if cmd[j] == "`":
+                        j += 1
+                        while j < n and cmd[j] != "`":
+                            j += 2 if (cmd[j] == "\\" and j + 1 < n and cmd[j + 1] in ("\\", "`", "$", '"')) else 1
+                        if j >= n:
+                            return -1, ["unterminated backtick command substitution"]
+                        j += 1
+                        continue
+                    j += 1
+                if j >= n:
+                    return -1, ["unterminated double quote in command substitution"]
+                j += 1
+                at_tok = False
+                continue
+            if c == "`":
+                j += 1
+                while j < n and cmd[j] != "`":
+                    j += 2 if (cmd[j] == "\\" and j + 1 < n and cmd[j + 1] in ("\\", "`", "$", '"')) else 1
+                if j >= n:
+                    return -1, ["unterminated backtick command substitution"]
+                j += 1
+                at_tok = False
+                continue
+            if c == "$" and j + 1 < n and cmd[j + 1] == "(":
+                ec, ep = cls._find_matching_paren(cmd, j + 2)
+                if ec < 0:
+                    return -1, ep
+                j = ec + 1
+                at_tok = False
+                continue
+            if c == "(":
+                ec, ep = cls._find_matching_paren(cmd, j + 1)
+                if ec < 0:
+                    return -1, ep
+                j = ec + 1
+                at_tok = True
+                continue
+            if c == ")":
+                return j, []
+            at_tok = c in " \t\r\n;|&()><"
+            j += 1
+        return -1, ["unterminated $(...) command substitution"]
+
+    @classmethod
     def _strip_cmd_substitutions(cls, cmd: str) -> tuple[str, list[str], list[str]]:
-        """Replace `$(...)` and backtick command substitutions outside single quotes with a sentinel
-        token while returning every inner command string for recursive fingerprinting."""
+        """Replace `$(...)`, `$((...))`, `<(...)`/`>(...)`, and backtick substitutions outside single
+        quotes with a dynamic sentinel token while returning every inner command string for recursive
+        fingerprinting."""
         cmd = cls._fold_line_continuations(cmd)
         out: list[str] = []
         subs: list[str] = []
@@ -1513,6 +1633,7 @@ class MergeQueue:
         i, n = 0, len(cmd)
         in_sq = False
         in_dq = False
+        at_tok = True
         while i < n:
             ch = cmd[i]
             if in_sq:
@@ -1520,80 +1641,83 @@ class MergeQueue:
                 if ch == "'":
                     in_sq = False
                 i += 1
+                at_tok = False
+                continue
+            if not in_dq and at_tok and ch == "#":
+                while i < n and cmd[i] != "\n":
+                    out.append(cmd[i])
+                    i += 1
                 continue
             if ch == "\\":
                 out.append(cmd[i:i + 2])
                 i += 2
+                at_tok = False
                 continue
+            if not in_dq and ch == "$" and i + 1 < n and cmd[i + 1] in ("'", '"'):
+                problems.append("ANSI-C or locale $'...' / $\"...\" quoting cannot be statically fingerprinted")
+                break
             if ch == "'" and not in_dq:
                 in_sq = True
                 out.append(ch)
                 i += 1
+                at_tok = False
                 continue
             if ch == '"':
                 in_dq = not in_dq
                 out.append(ch)
                 i += 1
+                at_tok = False
                 continue
+            if not in_dq and ch in ("<", ">") and i + 1 < n and cmd[i + 1] == "(":
+                ec, ep = cls._find_matching_paren(cmd, i + 2)
+                if ec < 0:
+                    problems.extend(ep)
+                    break
+                subs.append(cmd[i + 2:ec])
+                out.append("__MQ_CMDSUB__")
+                i = ec + 1
+                at_tok = False
+                continue
+            if ch == "$" and i + 1 < n and cmd[i + 1] == "{":
+                m_pe = re.match(r"^\$\{([A-Za-z_][A-Za-z0-9_]*):?=", cmd[i:])
+                if m_pe and m_pe.group(1).upper() in cls._LOOKUP_VARS:
+                    problems.append(
+                        f"parameter expansion assigning to {m_pe.group(1)!r} alters executable lookup context"
+                    )
             if ch == "$" and i + 1 < n and cmd[i + 1] == "(":
                 if i + 2 < n and cmd[i + 2] == "(":
-                    # Arithmetic expansion `$(( ... ))` — find matching `))`
-                    depth = 1
-                    j = i + 2
-                    while j < n and depth > 0:
-                        if cmd[j] == "\\":
-                            j += 2
-                            continue
-                        if cmd[j] == "(":
-                            depth += 1
-                        elif cmd[j] == ")":
-                            depth -= 1
-                        j += 1
-                    if depth == 0 and j < n and cmd[j] == ")":
-                        arith_body = cmd[i + 3:j - 1]
-                        for ident in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", arith_body):
-                            if ident.upper() in cls._LOOKUP_VARS:
+                    # Distinguish `$(( arith ))` from `$( (subshell); cmd )` by matching the second `(`.
+                    ic, ip = cls._find_matching_paren(cmd, i + 3)
+                    if ic < 0:
+                        problems.extend(ip)
+                        break
+                    if ic + 1 < n and cmd[ic + 1] == ")":
+                        arith_body = cmd[i + 3:ic]
+                        arith_san, arith_subs, arith_probs = cls._strip_cmd_substitutions(arith_body)
+                        subs.extend(arith_subs)
+                        problems.extend(arith_probs)
+                        if "'" in arith_san or '"' in arith_san:
+                            problems.append(
+                                "quoted string inside arithmetic expansion cannot be statically fingerprinted"
+                            )
+                        for ident in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", arith_san):
+                            if ident != "__MQ_CMDSUB__" and ident.upper() in cls._LOOKUP_VARS:
                                 problems.append(
                                     f"arithmetic expansion touching {ident!r} cannot be statically fingerprinted"
                                 )
                                 break
-                        out.append("0")
-                        i = j + 1
+                        out.append("__MQ_CMDSUB__")
+                        i = ic + 2
+                        at_tok = False
                         continue
-                depth = 1
-                j = i + 2
-                sub_sq = False
-                sub_dq = False
-                while j < n and depth > 0:
-                    c2 = cmd[j]
-                    if sub_sq:
-                        if c2 == "'":
-                            sub_sq = False
-                        j += 1
-                        continue
-                    if c2 == "\\":
-                        j += 2
-                        continue
-                    if c2 == "'" and not sub_dq:
-                        sub_sq = True
-                    elif c2 == '"':
-                        sub_dq = not sub_dq
-                    elif not sub_dq and c2 == "(":
-                        depth += 1
-                    elif not sub_dq and c2 == ")":
-                        depth -= 1
-                        if depth == 0:
-                            break
-                    elif sub_dq and c2 == "$" and j + 1 < n and cmd[j + 1] == "(":
-                        depth += 1
-                        j += 1
-                    j += 1
-                if depth != 0:
-                    problems.append("unterminated $(...) command substitution")
+                ec, ep = cls._find_matching_paren(cmd, i + 2)
+                if ec < 0:
+                    problems.extend(ep)
                     break
-                subs.append(cmd[i + 2:j])
+                subs.append(cmd[i + 2:ec])
                 out.append("__MQ_CMDSUB__")
-                i = j + 1
+                i = ec + 1
+                at_tok = False
                 continue
             if ch == "`":
                 j = i + 1
@@ -1611,7 +1735,9 @@ class MergeQueue:
                 subs.append("".join(buf))
                 out.append("__MQ_CMDSUB__")
                 i = j + 1
+                at_tok = False
                 continue
+            at_tok = (not in_dq) and (ch in " \t\r\n;|&()><")
             out.append(ch)
             i += 1
         if in_sq or in_dq:
@@ -1763,6 +1889,7 @@ class MergeQueue:
         in_for_header = False
         in_case_header = False
         case_depth = 0
+        paren_depth = 0
         in_case_pattern = False
         in_double_bracket = False
         defined_funcs: set[str] = set()
@@ -1777,17 +1904,34 @@ class MergeQueue:
                 continue
             if kind == "redir":
                 idx += 1
-                if idx < total and lex_tokens[idx][0] == "word":
-                    idx += 1  # skip redirection target ( never an executable )
+                if idx >= total or lex_tokens[idx][0] != "word":
+                    problems.append("redirection missing target word in gate command")
+                    continue
+                idx += 1  # skip redirection target ( never an executable )
                 continue
             if kind == "op":
-                if tok in (";;", ";&", ";;&") and case_depth > 0:
-                    in_case_pattern = True
-                    expect_cmd = False
-                    in_for_header = False
+                if tok in (";;", ";&", ";;&"):
+                    if case_depth <= 0:
+                        problems.append(f"unmatched {tok!r} outside case statement")
+                    else:
+                        in_case_pattern = True
+                        expect_cmd = False
+                        in_for_header = False
+                elif tok == "(" and in_case_pattern:
+                    pass
                 elif tok == ")" and in_case_pattern:
                     in_case_pattern = False
                     expect_cmd = True
+                elif tok == "(":
+                    paren_depth += 1
+                    in_for_header = False
+                    expect_cmd = True
+                elif tok == ")":
+                    paren_depth -= 1
+                    if paren_depth < 0:
+                        problems.append("unmatched ')' in gate command")
+                    in_for_header = False
+                    expect_cmd = False
                 else:
                     in_for_header = False
                     expect_cmd = True
@@ -1833,7 +1977,9 @@ class MergeQueue:
                 idx += 1
                 continue
             if is_unquoted(flag) and tok == "esac":
-                if case_depth > 0:
+                if case_depth <= 0:
+                    problems.append("unmatched 'esac' in gate command")
+                else:
                     case_depth -= 1
                 expect_cmd = False
                 idx += 1
@@ -2302,6 +2448,12 @@ class MergeQueue:
                 i_exe, i_prob = cls._analyze_interpreter_invocation(final_word, cmd_words[wi + 1:])
                 executables.extend(i_exe)
                 problems.extend(i_prob)
+        if paren_depth != 0:
+            problems.append("unbalanced parentheses in gate command")
+        if case_depth != 0:
+            problems.append("unclosed case statement in gate command")
+        if in_double_bracket:
+            problems.append("unclosed [[ conditional in gate command")
         return executables, sourced, problems
 
     @classmethod

@@ -746,6 +746,42 @@ class GateRunsIsolated(QueueCase):
         self.assertNotEqual(rc_hm, 0, out_hm)
         self.assertEqual(out_hm.get("code"), "gate_not_run", out_hm)
 
+    def test_arithmetic_expansion_and_comment_quote_substitutions_fingerprint_or_fail_closed(self):
+        probe = self.w.tmp / "bin" / "arith-probe"
+        probe.write_text("#!/bin/sh\necho 0\n", encoding="utf-8")
+        probe.chmod(0o755)
+        gate_cmd = f"(exit $(( $({probe}) )))"
+        exes, _, probs = mq_mod.MergeQueue._analyze_gate_command(gate_cmd)
+        self.assertEqual(probs, [])
+        self.assertIn(str(probe), exes)
+        for sub_form in (
+            f"(exit $(( `{probe}` )))",
+            f"test $(( 1 + $({probe}) )) -eq 1",
+            f"echo $(({probe}); true)",
+            f"true # '\necho $({probe}) # '",
+            f"echo $(case x in (x) {probe} ;; esac)",
+        ):
+            sub_exes, _, sub_probs = mq_mod.MergeQueue._analyze_gate_command(sub_form)
+            self.assertEqual(sub_probs, [], sub_form)
+            self.assertIn(str(probe), sub_exes, sub_form)
+        for unsafe_form in (
+            "runner$((1+1))",
+            f"echo $'\\'' $({probe}) $'\\''",
+            ': "${PYTHONPATH:=/tmp}"',
+            f"echo $(case x in x) {probe} ;; esac)",
+        ):
+            _, _, bad_probs = mq_mod.MergeQueue._analyze_gate_command(unsafe_form)
+            self.assertTrue(bad_probs, f"expected fail-closed problem on {unsafe_form!r}")
+        tok = self.acquire("c-arith")
+        self.board(tok, self.w.unit("arith-unit"))
+        rc_p, out_p = self.w.cli("plan", "--token", tok, "--gate-cmd", gate_cmd)
+        self.assertEqual(rc_p, 0, out_p)
+        self.assertEqual(out_p["planned"][0]["result"], "tested", out_p)
+        probe.write_text("#!/bin/sh\necho 1\n", encoding="utf-8")
+        rc_m, out_m = self.w.cli("merge", "--token", tok, "--require-gate", gate_cmd)
+        self.assertNotEqual(rc_m, 0, out_m)
+        self.assertEqual(out_m.get("code"), "gate_not_run", out_m)
+
 
 class GitLaneFreshness(Freshness):
     mode = "git"
