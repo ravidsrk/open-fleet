@@ -35,7 +35,7 @@ jobs:
       - run: uv run pytest
 
   ruff:
-    runs-on: codebuild-gha-open-fleet-${{ github.run_id }}-${{ github.run_attempt }}
+    runs-on: ubuntu-latest  # CodeBuild project gha-open-fleet allows 1 concurrent build; sibling jobs queued at once got HTTP 400 and never started
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (same pin as validate.yml)
@@ -65,7 +65,7 @@ jobs:
 
   migrate:
     # F3 freeze proof: boot pins 0002 while 0003 sits pending on disk.
-    runs-on: codebuild-gha-open-fleet-${{ github.run_id }}-${{ github.run_attempt }}
+    runs-on: ubuntu-latest  # CodeBuild project gha-open-fleet allows 1 concurrent build; sibling jobs queued at once got HTTP 400 and never started
     timeout-minutes: 20
     defaults:
       run:
