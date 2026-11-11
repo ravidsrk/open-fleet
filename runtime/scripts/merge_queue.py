@@ -1707,9 +1707,17 @@ class MergeQueue:
                 at_tok = False
                 continue
             if ch == "$" and i + 1 < n and cmd[i + 1] == "{":
-                if re.match(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\[", cmd[i:]):
+                if cmd[i + 2:i + 3] == "!":
+                    problems.append(
+                        "indirect ${!...} parameter expansion cannot be statically fingerprinted"
+                    )
+                if re.match(r"^\$\{!?[A-Za-z_0-9@*]+\[", cmd[i:]):
                     problems.append(
                         "array subscript parameter expansion cannot be statically fingerprinted"
+                    )
+                if re.match(r"^\$\{[A-Za-z_0-9@*]+:(?![-=+?])", cmd[i:]):
+                    problems.append(
+                        "substring ${var:offset} arithmetic parameter expansion cannot be statically fingerprinted"
                     )
                 m_pe = re.match(r"^\$\{([A-Za-z_][A-Za-z0-9_]*):?=", cmd[i:])
                 if m_pe and cls._touches_lookup_var(m_pe.group(1)):
@@ -1728,16 +1736,15 @@ class MergeQueue:
                         arith_san, arith_subs, arith_probs = cls._strip_cmd_substitutions(arith_body)
                         subs.extend(arith_subs)
                         problems.extend(arith_probs)
-                        if "'" in arith_san or '"' in arith_san or "[" in arith_san or "]" in arith_san:
+                        arith_check = arith_san.replace("__MQ_CMDSUB__", " 0 ")
+                        if (
+                            any(ch_a in arith_check for ch_a in ("$", "'", '"', "[", "]"))
+                            or re.search(r"(?<![=!<>])=(?!=)", arith_check)
+                            or re.search(r"(?<![0-9A-Za-z_#@])[A-Za-z_][A-Za-z0-9_]*", arith_check)
+                        ):
                             problems.append(
-                                "quoted or subscripted expression inside arithmetic expansion cannot be statically fingerprinted"
+                                "variable, indirect, or mutating expression inside arithmetic expansion cannot be statically fingerprinted"
                             )
-                        for ident in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", arith_san):
-                            if ident != "__MQ_CMDSUB__" and cls._touches_lookup_var(ident):
-                                problems.append(
-                                    f"arithmetic expansion touching {ident!r} cannot be statically fingerprinted"
-                                )
-                                break
                         out.append("__MQ_CMDSUB__")
                         i = ic + 2
                         at_tok = False
@@ -1933,7 +1940,8 @@ class MergeQueue:
                 if kind == "word" and is_unquoted(flag) and tok == "]]":
                     in_double_bracket = False
                 elif kind == "word" and (
-                    "[" in tok
+                    tok in ("-eq", "-ne", "-lt", "-le", "-gt", "-ge", "=~")
+                    or "[" in tok
                     or "]" in tok
                     or any(
                         ident != "__MQ_CMDSUB__" and cls._touches_lookup_var(ident)
@@ -1941,7 +1949,7 @@ class MergeQueue:
                     )
                 ):
                     problems.append(
-                        "[[ ... ]] conditional touching lookup or subscripted variable cannot be statically fingerprinted"
+                        "[[ ... ]] conditional using arithmetic/regex or lookup/subscripted variable cannot be statically fingerprinted"
                     )
                 idx += 1
                 continue
@@ -2374,8 +2382,12 @@ class MergeQueue:
                             if is_dynamic(arg_f):
                                 problems.append(f"{final_word}: dynamic option cannot be statically fingerprinted")
                                 break
-                            if final_word in ("declare", "typeset", "local") and "n" in arg_w[1:]:
-                                problems.append(f"{final_word} -n nameref alias cannot be statically fingerprinted")
+                            if final_word in ("declare", "typeset", "local") and any(
+                                ch_d in arg_w[1:] for ch_d in ("n", "i", "a", "A")
+                            ):
+                                problems.append(
+                                    f"{final_word} {arg_w} nameref/integer/array attribute cannot be statically fingerprinted"
+                                )
                                 break
                             if final_word == "unset" and "f" in arg_w[1:]:
                                 problems.append("unset -f alters function/executable dispatch")
@@ -2434,13 +2446,7 @@ class MergeQueue:
                         problems.append("shell 'getopts' touching lookup variable cannot be statically fingerprinted")
                     continue
                 if final_word == "let":
-                    executables.append("__opt_builtin__:let")
-                    for lw, lf in cmd_words[wi + 1:]:
-                        if is_dynamic(lf) or "[" in lw or "]" in lw or any(
-                            cls._touches_lookup_var(ident) for ident in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", lw)
-                        ):
-                            problems.append("shell 'let' touching lookup variable cannot be statically fingerprinted")
-                            break
+                    problems.append("shell 'let' arithmetic builtin cannot be statically fingerprinted")
                     continue
                 if final_word == "trap":
                     t_args = cmd_words[wi + 1:]
