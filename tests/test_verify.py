@@ -2746,6 +2746,14 @@ class EndToEndMutationGreen(MutationFixture):
         self.assertIn('shell -c', err_sh)
         for bad_env_argv in (
             ['env', 'PATH=./bin:/usr/bin:/bin', 'python3', 'test.py'],
+            ['env', 'LD_AUDIT=/tmp/audit.so', 'python3', 'proof.py'],
+            ['env', 'GLIBC_TUNABLES=glibc.rtld.audit=/tmp/audit.so', 'python3', 'proof.py'],
+            ['env', 'PYTHONSAFEPATH=1', sys.executable, '-m', 'runner'],
+            ['env', 'PYTHONPYCACHEPREFIX=/tmp/cache', sys.executable, 'proof.py'],
+            ['env', 'SHELLOPTS=keyword', 'bash', './proof.sh'],
+            ['bash', '-eo', 'keyword', '/tmp/external_proof.sh'],
+            ['node', 'inspect', '/tmp/external_proof.js'],
+            ['deno', 'run', '/tmp/external_proof.ts'],
             ['env', '-S', 'sh -c true'],
             ['env', '-i', 'python3', 'test.py'],
             ['env', '-C', '/tmp', 'python3', 'test.py'],

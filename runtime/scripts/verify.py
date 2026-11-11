@@ -1064,32 +1064,61 @@ class _Authority:
         return not bool(_extract_diff(raw.decode("utf-8", "replace")))
 
     _SHELL_NAMES = frozenset({"sh", "bash", "dash", "zsh", "ksh", "ash", "csh", "tcsh"})
+    _SAFE_SHELL_O_OPTIONS = frozenset({
+        "allexport", "braceexpand", "errexit", "errtrace", "functrace",
+        "hashall", "histexpand", "monitor", "noclobber", "noexec",
+        "noglob", "notify", "nounset", "physical", "pipefail", "posix",
+        "verbose", "xtrace",
+    })
     _NC_FORBID_ENV_VARS = frozenset({
         "PATH", "IFS", "CDPATH", "ENV", "BASH_ENV",
-        "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH",
-        "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP",
-        "NODE_OPTIONS", "RUBYOPT", "PERL5OPT", "PERL5LIB",
-        "HOME", "TMPDIR", "TMP", "TEMP",
+        "SHELLOPTS", "BASHOPTS", "BASH_LOADABLES_PATH", "BASH_COMPAT",
+        "POSIXLY_CORRECT", "ZDOTDIR", "FPATH", "GLOBIGNORE", "EXECIGNORE",
+        "PROMPT_COMMAND", "PS0", "PS4",
+        "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "GLIBC_TUNABLES",
+        "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH",
+        "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONSAFEPATH",
+        "PYTHONPYCACHEPREFIX", "PYTHONWARNINGS", "PYTHONINSPECT",
+        "PYTHONUSERBASE", "VIRTUAL_ENV",
+        "NODE_OPTIONS", "NODE_PATH", "NODE_REPL_EXTERNAL_MODULE",
+        "DENO_DIR", "BUN_INSTALL",
+        "PERL5OPT", "PERL5LIB", "PERLLIB",
+        "RUBYOPT", "RUBYLIB", "GEM_HOME", "GEM_PATH", "BUNDLE_GEMFILE",
+        "AWKPATH", "AWKLIBPATH",
+        "PHPRC", "PHP_INI_SCAN_DIR",
+        "R_PROFILE", "R_PROFILE_USER", "R_ENVIRON", "R_ENVIRON_USER",
+        "R_LIBS", "R_LIBS_USER", "R_LIBS_SITE",
+        "HOME", "TMPDIR", "TMP", "TEMP", "XDG_CONFIG_HOME", "GH_CONFIG_DIR",
         "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
         "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
     })
+    _NC_FORBID_ENV_PREFIXES = (
+        "GIT_", "ORCA_", "OPEN_FLEET_", "GH_", "GITHUB_",
+        "LD_", "DYLD_", "LUA_", "BASH_FUNC_",
+        "PYTHON", "NODE_", "PERL", "RUBY", "GEM_", "BUNDLE_",
+        "DENO_", "BUN_", "AWK", "PHP", "R_",
+    )
     _NC_FORBID_MUX_EXES = frozenset({
         "busybox", "xargs", "find", "stdbuf", "setsid", "flock", "chrt", "ionice",
         "taskset", "script", "su", "sudo", "chroot", "nsenter", "unshare", "bwrap",
         "time", "parallel", "watch", "strace", "ltrace",
-        "sed", "awk", "gawk", "mawk", "nawk",
+        "sed", "awk", "gawk", "mawk", "nawk", "deno", "bun",
     })
 
     @classmethod
     def _env_var_forbidden(cls, var_name):
+        if "[" in var_name or "]" in var_name:
+            return True
         up = var_name.upper()
         if up in cls._NC_FORBID_ENV_VARS:
             return True
-        return up.startswith(("GIT_", "ORCA_", "OPEN_FLEET_", "GH_", "GITHUB_"))
+        return up.startswith(cls._NC_FORBID_ENV_PREFIXES)
 
     @classmethod
     def _parse_shell_script_operand(cls, tok, rest):
         """Parse shell argv tail `rest` and return `(script_op, err)` enforcing staged repo-relative path."""
+        if Path(tok).name in ("csh", "tcsh"):
+            return None, f"proof executable {tok!r} invokes non-POSIX shell; fail-closed (#750 C19)"
         si = 0
         while si < len(rest):
             arg = rest[si]
@@ -1107,16 +1136,20 @@ class _Authority:
                     continue
                 return None, (f"proof executable {tok!r} uses unsupported shell option {arg!r}; "
                               "fail-closed (#750 C19)")
-            if arg in ("-o", "+o", "-O", "+O"):
-                if si + 1 >= len(rest):
-                    return None, f"proof executable {tok!r} {arg} missing option argument (#750 C19)"
+            if arg in ("-O", "+O"):
+                return None, (f"proof executable {tok!r} {arg} alters shell lookup/parsing; "
+                              "fail-closed (#750 C19)")
+            if arg in ("-o", "+o"):
+                if si + 1 >= len(rest) or rest[si + 1] not in cls._SAFE_SHELL_O_OPTIONS:
+                    return None, (f"proof executable {tok!r} {arg} missing or unsupported option; "
+                                  "fail-closed (#750 C19)")
                 si += 2
                 continue
             short = arg[1:]
             if arg.startswith("-") and any(ch in short for ch in ("l", "i", "s", "r")):
                 return None, (f"proof executable {tok!r} invokes interactive/login/stdin shell mode; "
                               "fail-closed (#750 C19)")
-            if any(ch not in "abefhmnuvxBCHPoO" for ch in short):
+            if any(ch not in "abefhmnuvxBCHP" for ch in short):
                 return None, (f"proof executable {tok!r} uses unsupported shell option {arg!r}; "
                               "fail-closed (#750 C19)")
             if "o" in short or "O" in short:
@@ -1191,12 +1224,14 @@ class _Authority:
                     return None, err
                 staged.append(rest[pi])
                 scan_idx = pi + 1
-        elif re.fullmatch(r"(?:node(?:js)?|deno|bun|ruby|perl|php|lua|Rscript)(?:[0-9.]+)?", name):
+        elif re.fullmatch(r"(?:node(?:js)?|ruby|perl|php|lua|Rscript)(?:[0-9.]+)?", name):
             pi = 1 if rest[:1] == ["--"] else 0
             if pi >= len(rest) or rest[pi].startswith("-"):
                 bad_opt = rest[pi] if pi < len(rest) else ""
                 return None, (f"proof executable {tok!r} uses unsupported interpreter option "
                               f"{bad_opt!r} or missing script; fail-closed (#750 C19)")
+            if name.startswith("node") and rest[pi] in ("inspect", "debug"):
+                return None, f"proof executable {tok!r} invokes debugger subcommand {rest[pi]!r}; fail-closed (#750 C19)"
             err = cls._check_rel_operand(tok, rest[pi], "script")
             if err:
                 return None, err
