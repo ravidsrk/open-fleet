@@ -596,15 +596,27 @@ class MulticlaudeProvider(ExternalDispatchMixin, RuntimeProvider):
         attrs: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        eff_run = self.state._resolve_caller_run(run, default_run="default") or "default"
+        if to and self.state._worker_bound_run():
+            with self.state._connect() as conn:
+                foreign = conn.execute(
+                    "SELECT run_id FROM dispatches WHERE backend = ? AND (dispatch_id = ? OR terminal_handle = ?) AND run_id != ? LIMIT 1",
+                    (self.name, to, to, eff_run),
+                ).fetchone()
+            if foreign:
+                raise ProviderError(
+                    "cross_run_access",
+                    f"recipient {to!r} belongs to run {foreign['run_id']!r}, not {eff_run!r}",
+                )
         local = self.state.send_message(
             subject=subject, msg_type=msg_type, to=to, outcome=outcome, sender=sender,
-            payload=payload, run=run, attrs=attrs,
+            payload=payload, run=eff_run, attrs=attrs,
         )
         if to:
             with self.state._connect() as conn:
                 row = conn.execute(
-                    "SELECT session_id, launch_effective FROM dispatches WHERE backend = ? AND (dispatch_id = ? OR terminal_handle = ?)",
-                    (self.name, to, to),
+                    "SELECT session_id, launch_effective FROM dispatches WHERE backend = ? AND run_id = ? AND (dispatch_id = ? OR terminal_handle = ?)",
+                    (self.name, eff_run, to, to),
                 ).fetchone()
             if row:
                 repo = self._effective(row).get("repo") or self._repo()

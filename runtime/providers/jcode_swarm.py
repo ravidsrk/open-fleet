@@ -311,18 +311,33 @@ class JCodeSwarmProvider(ExternalDispatchMixin, RuntimeProvider):
         attrs: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        eff_run = self.state._resolve_caller_run(run, default_run="default") or "default"
+        bound = self.state._worker_bound_run()
+        broadcast = to in ("all", "broadcast", "*")
+        if broadcast and bound:
+            raise ProviderError("cross_run_access", "launched worker cannot broadcast across runs")
+        if to and not broadcast and bound:
+            with self.state._connect() as conn:
+                foreign = conn.execute(
+                    "SELECT run_id FROM dispatches WHERE backend = ? AND (dispatch_id = ? OR terminal_handle = ?) AND run_id != ? LIMIT 1",
+                    (self.name, to, to, eff_run),
+                ).fetchone()
+            if foreign:
+                raise ProviderError(
+                    "cross_run_access",
+                    f"recipient {to!r} belongs to run {foreign['run_id']!r}, not {eff_run!r}",
+                )
         local = self.state.send_message(
             subject=subject, msg_type=msg_type, to=to, outcome=outcome, sender=sender,
-            payload=payload, run=run, attrs=attrs,
+            payload=payload, run=eff_run, attrs=attrs,
         )
         body = payload if payload is not None else subject
         target: str | None = None
-        broadcast = to in ("all", "broadcast", "*")
         if to and not broadcast:
             with self.state._connect() as conn:
                 row = conn.execute(
-                    "SELECT session_id FROM dispatches WHERE backend = ? AND (dispatch_id = ? OR terminal_handle = ?)",
-                    (self.name, to, to),
+                    "SELECT session_id FROM dispatches WHERE backend = ? AND run_id = ? AND (dispatch_id = ? OR terminal_handle = ?)",
+                    (self.name, eff_run, to, to),
                 ).fetchone()
             target = str(row["session_id"]) if row else None
         if broadcast or target:

@@ -55,6 +55,7 @@ from ._external import (
     load_dispatch,
     preserve_worker_head,
     record_fence,
+    resolve_worker_list_run,
     run_cli_text,
     show_from_row,
 )
@@ -375,6 +376,7 @@ class SupersetProvider(RuntimeProvider):
         cursor: str | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        run = resolve_worker_list_run(self.state, run, include_remote=bool(include_remote))
         raw = self._run_json(["superset", "snapshot", "--json"])
         live: set[str] = set()
         for ws in (raw.get("workspaces") if isinstance(raw, dict) else None) or []:

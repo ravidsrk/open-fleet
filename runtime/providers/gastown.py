@@ -58,6 +58,7 @@ from ._external import (
     local_worker_list,
     preserve_worker_head,
     record_fence,
+    resolve_worker_list_run,
     run_cli_text,
     show_from_row,
 )
@@ -428,6 +429,7 @@ class GastownProvider(RuntimeProvider):
     def worker_list(
         self, *, rig: str | None = None, run: str | None = None, task: str | None = None, limit: int | None = None, **kwargs: Any
     ) -> dict[str, Any]:
+        run = resolve_worker_list_run(self.state, run, include_remote=bool(kwargs.get("include_remote")))
         target = rig or self.default_rig
         argv = ["gt", "polecat", "list", "--json"] + ([str(target)] if target else ["--all"])
         raw = self._run_json(argv)

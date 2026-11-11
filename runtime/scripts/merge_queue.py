@@ -1400,6 +1400,12 @@ class MergeQueue:
         "if", "then", "else", "elif", "fi", "for", "select", "in", "while", "until",
         "do", "done", "case", "esac",
     })
+    _SAFE_SHELL_O_OPTIONS = frozenset({
+        "allexport", "braceexpand", "errexit", "errtrace", "functrace",
+        "hashall", "histexpand", "monitor", "noclobber", "noexec",
+        "noglob", "notify", "nounset", "physical", "pipefail", "posix",
+        "verbose", "xtrace",
+    })
     _MUX_WRAPPERS = frozenset({
         "busybox", "xargs", "stdbuf", "setsid", "flock", "chrt", "ionice",
         "taskset", "parallel", "watch", "time", "script", "su", "sudo",
@@ -2485,14 +2491,39 @@ class MergeQueue:
                     problems.append(f"shell {final_word!r} builtin alters command lookup or executes callbacks")
                     continue
                 if final_word == "set":
-                    for sw, sf in cmd_words[wi + 1:]:
+                    allowed_set_short = set("abefhmnuvxBCEHPTo")
+                    si = wi + 1
+                    while si < len(cmd_words):
+                        sw, sf = cmd_words[si]
                         if sw in ("--", "-"):
                             break
-                        if not sw.startswith(("-", "+")):
+                        if not sw.startswith(("-", "+")) or sw == "+":
                             break
-                        if is_dynamic(sf) or "A" in sw[1:]:
-                            problems.append("shell 'set' dynamic or array-assigning option cannot be statically fingerprinted")
+                        if is_dynamic(sf):
+                            problems.append("shell 'set' dynamic option cannot be statically fingerprinted")
                             break
+                        s_short = sw[1:]
+                        if any(ch_s not in allowed_set_short for ch_s in s_short):
+                            problems.append(
+                                f"shell 'set {sw}' unsupported or lookup-altering option cannot be statically fingerprinted"
+                            )
+                            break
+                        if "o" in s_short:
+                            if not (s_short.endswith("o") and s_short.count("o") == 1):
+                                problems.append(
+                                    f"shell 'set {sw}' ambiguous -o option cluster cannot be statically fingerprinted"
+                                )
+                                break
+                            if si + 1 < len(cmd_words) and cmd_words[si + 1][0] != "--":
+                                oname, oflag = cmd_words[si + 1]
+                                if is_dynamic(oflag) or oname not in cls._SAFE_SHELL_O_OPTIONS:
+                                    problems.append(
+                                        f"shell 'set {sw} {oname}' unsupported or lookup-altering option cannot be statically fingerprinted"
+                                    )
+                                    break
+                                si += 2
+                                continue
+                        si += 1
                     continue
                 if final_word == "wait":
                     for ww, wf in cmd_words[wi + 1:]:
@@ -2715,8 +2746,8 @@ class MergeQueue:
         def is_dynamic(flag: Any) -> bool:
             return bool(isinstance(flag, dict) and flag.get("dynamic"))
 
-        allowed_dash = set("abefhmnuvxBCHPcoO")
-        allowed_plus = set("abefhmnuvxBCHPoO")
+        allowed_dash = set("abefhmnuvxBCHPco")
+        allowed_plus = set("abefhmnuvxBCHPo")
         j = 0
         used_dash_c = False
         while j < len(args):
@@ -2735,9 +2766,14 @@ class MergeQueue:
                     continue
                 problems.append(f"{shell_word}: option {a!r} cannot be statically fingerprinted")
                 return sourced, executables, problems
-            if a in ("-o", "+o", "-O", "+O"):
-                if j + 1 >= len(args) or is_dynamic(args[j + 1][1]):
-                    problems.append(f"{shell_word} {a}: missing or dynamic option name cannot be fingerprinted")
+            if a in ("-O", "+O"):
+                problems.append(f"{shell_word} {a}: shopt option alters shell lookup or parsing and cannot be fingerprinted")
+                return sourced, executables, problems
+            if a in ("-o", "+o"):
+                if j + 1 >= len(args) or is_dynamic(args[j + 1][1]) or args[j + 1][0] not in cls._SAFE_SHELL_O_OPTIONS:
+                    problems.append(
+                        f"{shell_word} {a}: missing, dynamic, or lookup-altering option cannot be statically fingerprinted"
+                    )
                     return sourced, executables, problems
                 j += 2
                 continue
@@ -2749,12 +2785,14 @@ class MergeQueue:
             if any(ch_s not in allowed for ch_s in short):
                 problems.append(f"{shell_word} {a}: unsupported option cannot be statically fingerprinted")
                 return sourced, executables, problems
-            if "o" in short or "O" in short:
-                if not (short.endswith(("o", "O")) and (short.count("o") + short.count("O") == 1) and "c" not in short):
+            if "o" in short:
+                if not (short.endswith("o") and short.count("o") == 1 and "c" not in short):
                     problems.append(f"{shell_word} {a}: ambiguous -o option cluster cannot be statically fingerprinted")
                     return sourced, executables, problems
-                if j + 1 >= len(args) or is_dynamic(args[j + 1][1]):
-                    problems.append(f"{shell_word} {a}: missing or dynamic option name cannot be fingerprinted")
+                if j + 1 >= len(args) or is_dynamic(args[j + 1][1]) or args[j + 1][0] not in cls._SAFE_SHELL_O_OPTIONS:
+                    problems.append(
+                        f"{shell_word} {a}: missing, dynamic, or lookup-altering option cannot be statically fingerprinted"
+                    )
                     return sourced, executables, problems
                 j += 2
                 continue

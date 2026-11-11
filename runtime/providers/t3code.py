@@ -54,6 +54,7 @@ from ._external import (
     ref_safe,
     release_claim_on_failure,
     release_local_task,
+    resolve_worker_list_run,
     run_cli_text,
     runtime_was_reached,
     show_from_row,
@@ -394,6 +395,7 @@ class T3CodeProvider(RuntimeProvider):
     def worker_list(
         self, *, run: str | None = None, task: str | None = None, limit: int | None = None, **kwargs: Any
     ) -> dict[str, Any]:
+        run = resolve_worker_list_run(self.state, run, include_remote=bool(kwargs.get("include_remote")))
         if not self.project_id:
             raise ProviderError("missing_project", "t3_thread_list from outside T3 needs OPEN_FLEET_T3_PROJECT_ID")
         raw = self._tool("t3_thread_list", {"projectId": self.project_id})

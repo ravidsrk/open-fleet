@@ -48,6 +48,7 @@ from ._external import (
     local_worker_list,
     preserve_worker_head,
     record_fence,
+    resolve_worker_list_run,
     run_cli_text,
     show_from_row,
 )
@@ -227,6 +228,7 @@ class OverstoryProvider(RuntimeProvider):
 
     def worker_list(self, *, run: str | None = None, task: str | None = None, limit: int | None = None, **kwargs: Any) -> dict[str, Any]:
         """OUR dispatch rows; `ov status` only annotates `stage` (it also lists agents we never slung)."""
+        run = resolve_worker_list_run(self.state, run, include_remote=bool(kwargs.get("include_remote")))
         raw = self._ov(["ov", "status", "--json"])
         agents = raw.get("agents")
         if not isinstance(agents, list):

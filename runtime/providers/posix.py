@@ -3263,6 +3263,9 @@ if {repr(self.backend)} == "cmux":
         limit: int | None = None,
         cursor: str | None = None,
     ) -> dict[str, Any]:
+        run = self.state._resolve_caller_run(run, default_run=None)
+        if include_remote and self.state._worker_bound_run():
+            raise ProviderError("cross_run_access", "launched worker cannot list unfiltered remote workers across runs")
         q = "WHERE 1=1"
         params: list[Any] = []
         if run:
@@ -3309,10 +3312,14 @@ if {repr(self.backend)} == "cmux":
         return {"workers": workers, "scope": {"source": "posix"}, "page": {"nextCursor": next_cursor}}
 
     def worker_show(self, dispatch_id: str) -> dict[str, Any]:
+        bound = self.state._resolve_caller_run(None, default_run=None)
         self._reconcile_dead_intents()
         rows = self._dispatch_rows("WHERE dispatch_id = ?", (dispatch_id,))
         if not rows:
             raise ProviderError("dispatch_not_found", f"dispatch {dispatch_id!r} not found")
+        row_run = str(rows[0]["run_id"] or "default")
+        if bound and row_run != bound:
+            raise ProviderError("cross_run_access", f"dispatch {dispatch_id!r} belongs to run {row_run!r}, not {bound!r}")
         self._sweep_liveness(rows)
         r = self._dispatch_rows("WHERE dispatch_id = ?", (dispatch_id,))[0]
         return normalize_show(
@@ -3345,10 +3352,14 @@ if {repr(self.backend)} == "cmux":
         limit: int = 50,
         cursor: str | int | None = None,
     ) -> dict[str, Any]:
+        bound = self.state._resolve_caller_run(None, default_run=None)
         rows = self._dispatch_rows("WHERE dispatch_id = ?", (dispatch_id,))
         if not rows:
             raise ProviderError("dispatch_not_found", f"dispatch {dispatch_id!r} not found")
         r = rows[0]
+        row_run = str(r["run_id"] or "default")
+        if bound and row_run != bound:
+            raise ProviderError("cross_run_access", f"dispatch {dispatch_id!r} belongs to run {row_run!r}, not {bound!r}")
         log_file = Path(r["lane_dir"]) / "events.jsonl" if r["lane_dir"] else None
         all_lines: list[str] = []
         if log_file and log_file.is_file():
@@ -3405,6 +3416,16 @@ if {repr(self.backend)} == "cmux":
         reason: str | None = None,
         retry_request: str | None = None,
     ) -> dict[str, Any]:
+        bound = self.state._resolve_caller_run(None, default_run=None)
+        if bound:
+            rows_chk = self._dispatch_rows("WHERE dispatch_id = ?", (dispatch_id,))
+            if rows_chk:
+                row_run = str(rows_chk[0]["run_id"] or "default")
+                if row_run != bound:
+                    raise ProviderError(
+                        "cross_run_access",
+                        f"dispatch {dispatch_id!r} belongs to run {row_run!r}, not {bound!r}",
+                    )
         payload_sha = _launch_payload_sha256({"verb": verb, "dispatch_id": dispatch_id, "reason": reason})
         method = f"worker-{verb}"
         cached = self.state.get_or_record_request(retry_request, method, payload_sha)
@@ -3579,10 +3600,24 @@ if {repr(self.backend)} == "cmux":
         return {"terminal": {"handle": handle, "id": handle, "title": title or handle, "worktree": wt_path}}
 
     def _terminal_row(self, terminal: str) -> Any:
+        bound = self.state._resolve_caller_run(None, default_run=None)
         with self.state._connect() as conn:
             r = conn.execute("SELECT * FROM terminals WHERE handle = ?", (terminal,)).fetchone()
+            foreign = (
+                conn.execute(
+                    "SELECT run_id FROM dispatches WHERE terminal_handle = ? AND run_id != ? LIMIT 1",
+                    (terminal, bound),
+                ).fetchone()
+                if bound
+                else None
+            )
         if not r:
             raise ProviderError("terminal_not_found", f"terminal {terminal!r} not found")
+        if foreign:
+            raise ProviderError(
+                "cross_run_access",
+                f"terminal {terminal!r} is bound to run {foreign['run_id']!r}, not {bound!r}",
+            )
         return r
 
     def _screen(self, r: Any) -> str | None:
@@ -3697,8 +3732,20 @@ if {repr(self.backend)} == "cmux":
         limit: int | None = None,
         include_visual_layouts: bool = False,
     ) -> dict[str, Any]:
+        bound = self.state._resolve_caller_run(None, default_run=None)
         with self.state._connect() as conn:
             rows = conn.execute("SELECT * FROM terminals ORDER BY created_at DESC").fetchall()
+            foreign_handles = (
+                {
+                    str(fr["terminal_handle"])
+                    for fr in conn.execute(
+                        "SELECT DISTINCT terminal_handle FROM dispatches WHERE terminal_handle != '' AND run_id != ?",
+                        (bound,),
+                    ).fetchall()
+                }
+                if bound
+                else set()
+            )
         terms = [
             {
                 "handle": r["handle"],
@@ -3707,7 +3754,7 @@ if {repr(self.backend)} == "cmux":
                 "state": r["state"],
             }
             for r in rows
-            if not worktree or r["worktree"] == worktree
+            if r["handle"] not in foreign_handles and (not worktree or r["worktree"] == worktree)
         ]
         truncated = False
         if limit and len(terms) > int(limit):

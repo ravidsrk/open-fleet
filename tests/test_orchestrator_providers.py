@@ -1043,18 +1043,58 @@ class TestExternalAdversarialRemediation750(ProviderTestBase):
             env={"OPEN_FLEET_T3_PROJECT_ID": "proj-1", "OPEN_FLEET_DISPATCH_ID": "thr-1"},
             hooks=lambda w, a, p: {},
         )
+        # Start a foreign T3 worker on run-other as coordinator so we can verify observation/fencing isolation:
+        t_foreign_disp = self.state.task_create(spec="foreign-disp", run="run-other")["task"]["id"]
+
+        def foreign_t3_runner(call: dict[str, object], **_kw: object) -> dict[str, object]:
+            if call["tool"] == "t3_thread_launch":
+                return {"structuredContent": {"threadId": "thr-other", "runId": "r2"}, "isError": False}
+            if call["tool"] == "t3_thread_read":
+                return {"structuredContent": {"thread": {"worktreePath": str(wt_t3), "status": "running"}}, "isError": False}
+            return {"structuredContent": {}, "isError": False}
+
+        T3CodeProvider(
+            state=self.state,
+            runner=foreign_t3_runner,
+            env={"OPEN_FLEET_T3_PROJECT_ID": "proj-1"},
+            hooks=lambda w, a, p: {},
+        ).worker_start(task_id=t_foreign_disp, worktree=str(wt_t3), agent="codex", profile="rw", run="run-other")
+
         for bad_call in (
             lambda: bound_wt.worker_start(task_id=t_foreign, agent="claude", profile="rw", prompt="go"),
             lambda: bound_wt.worker_start(task_id=t_own_ready, agent="claude", profile="rw", prompt="go", run="run-other"),
             lambda: bound_wt.worker_start(task_id=t_foreign, agent="claude", profile="rw"),
             lambda: bound_t3.dispatch_inject(task_id=t_foreign, to_handle="t3:thr-1", prompt="go"),
             lambda: bound_t3.dispatch_inject(task_id=t_own_ready, to_handle="t3:thr-1", prompt="go", run="run-other"),
+            lambda: bound_t3.worker_list(run="run-other"),
+            lambda: bound_t3.worker_list(include_remote=True),
+            lambda: bound_t3.worker_show(dispatch_id="thr-other"),
+            lambda: bound_t3.worker_read(dispatch_id="thr-other"),
+            lambda: bound_t3.worker_fence(verb="stop", dispatch_id="thr-other", reason="cross-run"),
+            lambda: bound_wt.worker_list(run="run-other"),
         ):
             with self.assertRaises(ProviderError) as ctx_bound:
                 bad_call()
             self.assertEqual(ctx_bound.exception.code, "cross_run_access")
         self.assertEqual(wt_calls, [])
         self.assertEqual(t3_calls, [])
+        # Implicit `worker_list()` from a bound worker scopes strictly to its bound run (`run-t3`), omitting `thr-other`:
+        bound_list_t3 = T3CodeProvider(
+            state=bound_state,
+            runner=lambda call, **_kw: {
+                "structuredContent": {
+                    "threads": [
+                        {"threadId": "thr-1", "status": "running"},
+                        {"threadId": "thr-other", "status": "running"},
+                    ]
+                },
+                "isError": False,
+            },
+            env={"OPEN_FLEET_T3_PROJECT_ID": "proj-1", "OPEN_FLEET_DISPATCH_ID": "thr-1"},
+            hooks=lambda w, a, p: {},
+        ).worker_list()
+        self.assertNotIn("thr-other", [w["dispatchId"] for w in bound_list_t3["workers"]])
+        self.assertEqual([t["threadId"] for t in bound_list_t3["upstream"]["threads"]], ["thr-1"])
         self.assertEqual(
             {t["id"]: t["status"] for t in self.state.task_list(run="run-other")["tasks"]}[t_foreign],
             "ready",

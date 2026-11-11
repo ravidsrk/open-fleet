@@ -339,6 +339,11 @@ class ExternalDispatchMixin:
     def _dispatch_row(self, dispatch_id: str) -> Any:
         if not dispatch_id:
             raise ProviderError("dispatch_not_found", "no --dispatch id given")
+        bound = (
+            self.state._resolve_caller_run(None, default_run=None)
+            if hasattr(self.state, "_resolve_caller_run")
+            else None
+        )
         with self.state._connect() as conn:
             row = conn.execute(
                 "SELECT * FROM dispatches WHERE dispatch_id = ? AND backend = ?",
@@ -346,6 +351,12 @@ class ExternalDispatchMixin:
             ).fetchone()
         if not row:
             raise ProviderError("dispatch_not_found", f"{self.name}: dispatch {dispatch_id!r} not found")
+        row_run = str(row["run_id"] or "default")
+        if bound and row_run != bound:
+            raise ProviderError(
+                "cross_run_access",
+                f"dispatch {dispatch_id!r} belongs to run {row_run!r}, not {bound!r}",
+            )
         return row
 
     @staticmethod
@@ -651,10 +662,23 @@ def insert_dispatch(
         )
 
 
+def resolve_worker_list_run(
+    state: LocalStateStore,
+    run: str | None,
+    *,
+    include_remote: bool = False,
+) -> str | None:
+    eff_run = state._resolve_caller_run(run, default_run=None) if hasattr(state, "_resolve_caller_run") else run
+    if include_remote and hasattr(state, "_worker_bound_run") and state._worker_bound_run():
+        raise ProviderError("cross_run_access", "launched worker cannot list unfiltered remote workers across runs")
+    return eff_run
+
+
 def load_dispatch(state: LocalStateStore, dispatch_id: str, backend: str) -> dict[str, Any]:
     """The locally recorded dispatch for `backend`, with `launch_effective` decoded."""
     if not dispatch_id:
         raise ProviderError("dispatch_not_found", "no dispatch id given")
+    bound = state._resolve_caller_run(None, default_run=None) if hasattr(state, "_resolve_caller_run") else None
     with state._connect() as conn:
         row = conn.execute(
             "SELECT * FROM dispatches WHERE dispatch_id = ? AND backend = ?",
@@ -663,6 +687,12 @@ def load_dispatch(state: LocalStateStore, dispatch_id: str, backend: str) -> dic
     if not row:
         raise ProviderError("dispatch_not_found", f"{backend}: dispatch {dispatch_id!r} not found")
     rec = dict(row)
+    row_run = str(rec.get("run_id") or "default")
+    if bound and row_run != bound:
+        raise ProviderError(
+            "cross_run_access",
+            f"dispatch {dispatch_id!r} belongs to run {row_run!r}, not {bound!r}",
+        )
     try:
         rec["effective"] = json.loads(rec.get("launch_effective") or "{}")
     except json.JSONDecodeError:
@@ -781,6 +811,7 @@ def local_worker_list(
     Upstream listings name workers open-fleet never dispatched (and reused slots); they may only
     annotate a row's `stage` (keyed by dispatch id), never become rows themselves.
     """
+    run = resolve_worker_list_run(state, run, include_remote=bool(include_remote))
     q = "SELECT * FROM dispatches WHERE backend = ?"
     params: list[Any] = [backend]
     if run:
