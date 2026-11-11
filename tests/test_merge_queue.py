@@ -718,6 +718,34 @@ class GateRunsIsolated(QueueCase):
                 q._gate_exec_argv("true", self.w.tmp, self.w.tmp, self.w.tmp)
             self.assertEqual(getattr(ctx_sbx.exception, "code", None), "sandbox_unavailable")
 
+    def test_hidden_relative_gate_scripts_preserve_leading_dots(self):
+        ext_hidden_bin = self.w.tmp / "bin" / "hidden-gate-check"
+        ext_hidden_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        ext_hidden_bin.chmod(0o755)
+        (self.w.worker / ".ci").mkdir(parents=True, exist_ok=True)
+        (self.w.worker / "ci").mkdir(parents=True, exist_ok=True)
+        hidden_unit = self.w.unit(
+            "hidden-gate-unit",
+            files={
+                ".ci/gate.sh": f"{ext_hidden_bin}\n",
+                "ci/gate.sh": "true\n",
+                ".ci/only.sh": "true\n",
+            },
+        )
+        tok = self.acquire("c-hidden")
+        self.board(tok, hidden_unit)
+        for gate_cmd in ("sh .ci/only.sh", "sh ./.ci/only.sh"):
+            rc_ho, out_ho = self.w.cli("plan", "--token", tok, "--gate-cmd", gate_cmd)
+            self.assertEqual(rc_ho, 0, out_ho)
+            self.assertEqual(out_ho["planned"][0]["result"], "tested", out_ho)
+        rc_hp, out_hp = self.w.cli("plan", "--token", tok, "--gate-cmd", "sh .ci/gate.sh")
+        self.assertEqual(rc_hp, 0, out_hp)
+        self.assertEqual(out_hp["planned"][0]["result"], "tested", out_hp)
+        ext_hidden_bin.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        rc_hm, out_hm = self.w.cli("merge", "--token", tok, "--require-gate", "sh .ci/gate.sh")
+        self.assertNotEqual(rc_hm, 0, out_hm)
+        self.assertEqual(out_hm.get("code"), "gate_not_run", out_hm)
+
 
 class GitLaneFreshness(Freshness):
     mode = "git"

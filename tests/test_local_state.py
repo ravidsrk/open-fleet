@@ -644,8 +644,9 @@ class TestCoordinatorTakeoverAndWorkerBindingFence(Base):
         self.assertEqual(by_id[t_mr], "failed")
         self.assertEqual(by_id[t_mr_child], "blocked")
 
-        # Superseded dispatch cannot clobber a newer active retry dispatch's task
+        # Superseded dispatch cannot clobber a newer active or crashed retry dispatch's task
         tr = self.store.task_create(spec="retried", run="run-d")["task"]["id"]
+        tr_child = self.store.task_create(spec="retried-child", deps=[tr], run="run-d")["task"]["id"]
         self.store.task_update(task_id=tr, status="dispatched", run="run-d")
         with self.store._connect() as conn:
             conn.execute(
@@ -661,11 +662,30 @@ class TestCoordinatorTakeoverAndWorkerBindingFence(Base):
         w_old = self.mod.LocalStateStore(
             self.db, env={"OPEN_FLEET_DISPATCH_ID": "disp-old", "OPEN_FLEET_TERMINAL_HANDLE": "w-old"}
         )
-        w_old.send_message(subject="late", msg_type="worker_done", outcome="failed")
+        w_old.send_message(subject="late", msg_type="worker_done", outcome="failed", run="run-d")
         self.assertEqual(
             next(t["status"] for t in self.store.task_list(run="run-d")["tasks"] if t["id"] == tr),
             "dispatched",
         )
+        # Newer retry crashes (`state='died'`, leaving task `dispatched` per #597): neither a late
+        # `worker_done(succeeded)` from superseded `disp-old` nor one from already-died `disp-new`
+        # may settle `tr` or release `tr_child`.
+        new_died = self.store.ensure_terminal_or_died(
+            dispatch_id="disp-new", worker_handle="w-new", exit_code=1, run_id="run-d"
+        )
+        self.assertTrue(new_died["syntheticDied"])
+        w_old.send_message(subject="late-ok", msg_type="worker_done", outcome="succeeded", run="run-d")
+        w_new = self.mod.LocalStateStore(
+            self.db, env={"OPEN_FLEET_DISPATCH_ID": "disp-new", "OPEN_FLEET_TERMINAL_HANDLE": "w-new"}
+        )
+        w_new.send_message(subject="post-crash-ok", msg_type="worker_done", outcome="succeeded", run="run-d")
+        again = self.store.ensure_terminal_or_died(
+            dispatch_id="disp-new", worker_handle="w-new", exit_code=1, run_id="run-d"
+        )
+        self.assertFalse(again["syntheticDied"])
+        by_id_retry = {t["id"]: t["status"] for t in self.store.task_list(run="run-d")["tasks"]}
+        self.assertEqual(by_id_retry[tr], "dispatched")
+        self.assertEqual(by_id_retry[tr_child], "pending")
 
     def test_c35_default_run_fencing_and_human_sender_rejected_on_fenced_gate(self):
         self.store.run_create(run="default", sender="coord-main")

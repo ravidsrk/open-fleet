@@ -2634,8 +2634,8 @@ class MergeQueue:
                 except OSError:
                     return None
             return None
-        norm_tok = Path(os.path.normpath(tok)).as_posix().lstrip("./")
-        if commit and norm_tok and not norm_tok.startswith(".."):
+        norm_tok = Path(os.path.normpath(tok)).as_posix()
+        if commit and norm_tok not in ("", ".") and ".." not in Path(norm_tok).parts:
             try:
                 proc = subprocess.run(
                     [self.git.bin, *self.git.HARDENED_CONFIG, "-C", self.git.repo_dir,
@@ -2687,7 +2687,7 @@ class MergeQueue:
                 continue
             resolved: str | None
             if "/" in tok and not os.path.isabs(tok):
-                norm_tok = Path(os.path.normpath(tok)).as_posix().lstrip("./")
+                norm_tok = Path(os.path.normpath(tok)).as_posix()
                 if cwd is not None:
                     cand = (cwd / tok).resolve()
                     cwd_real = cwd.resolve()
@@ -2711,7 +2711,7 @@ class MergeQueue:
                         items.append({"tok": tok, "kind": "relative", "resolved": None})
                 else:
                     blob_sha: str | None = None
-                    if commit and norm_tok and not norm_tok.startswith(".."):
+                    if commit and norm_tok not in ("", ".") and ".." not in Path(norm_tok).parts:
                         try:
                             proc = subprocess.run(
                                 [self.git.bin, *self.git.HARDENED_CONFIG, "-C", self.git.repo_dir,

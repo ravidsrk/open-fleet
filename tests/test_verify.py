@@ -2784,9 +2784,10 @@ class EndToEndMutationGreen(MutationFixture):
         self.assertFalse(ok_ush, msgs_ush)
         self.assertTrue(any('not a tracked regular file in head_sha' in x for x in msgs_ush), msgs_ush)
         untracked_sh.unlink()
-        # Tracked regular shell proof script `sh ./proof.sh` succeeds across clean -> control -> clean:
+        # Tracked regular shell proof script `sh ./proof.sh` and hidden `.ci/proof.sh` succeed across clean -> control -> clean:
         self.write('proof.sh', f'#!/bin/sh\nexec {shlex.quote(sys.executable)} check.py\n')
-        sh_head = self.commit('add tracked proof.sh')
+        self.write('.ci/proof.sh', f'#!/bin/sh\nexec {shlex.quote(sys.executable)} check.py\n')
+        sh_head = self.commit('add tracked proof.sh and .ci/proof.sh')
         try:
             m_tracked_sh = {
                 'base_sha': self.base_sha,
@@ -2799,8 +2800,21 @@ class EndToEndMutationGreen(MutationFixture):
             }
             ok_tsh, msgs_tsh = verify.execute_negative_control(m_tracked_sh, 'sh ./proof.sh')
             self.assertTrue(ok_tsh, msgs_tsh)
+            for hid_cmd in ('sh .ci/proof.sh', 'sh ./.ci/proof.sh'):
+                m_hid_sh = {
+                    'base_sha': self.base_sha,
+                    'head_sha': sh_head,
+                    'negative_control': {
+                        'tool': 'revert',
+                        'paths': ['app.py'],
+                        'command': hid_cmd,
+                    },
+                }
+                ok_hsh, msgs_hsh = verify.execute_negative_control(m_hid_sh, hid_cmd)
+                self.assertTrue(ok_hsh, msgs_hsh)
         finally:
             self.git('reset', '--hard', self.head_sha)
+            shutil.rmtree(self.repo / '.ci', ignore_errors=True)
         with tempfile.TemporaryDirectory() as ext_dir:
             os.chmod(ext_dir, 0o755)
             writable_bin = Path(ext_dir) / 'runner'

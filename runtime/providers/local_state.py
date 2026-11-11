@@ -1060,7 +1060,7 @@ class LocalStateStore:
         task_id = row["task_id"]
         newer = conn.execute(
             "SELECT 1 FROM dispatches WHERE task_id = ? AND dispatch_id != ? "
-            "AND rowid > ? AND state NOT IN ('stopped','abandoned','released','died') LIMIT 1",
+            "AND rowid > ? LIMIT 1",
             (task_id, dispatch_id, row["rid"]),
         ).fetchone()
         if newer:
@@ -1142,12 +1142,12 @@ class LocalStateStore:
                     elif sender_id not in ("worker", COORDINATOR_ALIAS):
                         disp_row = conn.execute(
                             "SELECT dispatch_id, state FROM dispatches WHERE run_id = ? AND (dispatch_id = ? OR terminal_handle = ?) "
-                            "ORDER BY created_at DESC LIMIT 1",
+                            "ORDER BY created_at DESC, rowid DESC LIMIT 1",
                             (run_id, sender_id, sender_id),
                         ).fetchone()
                     else:
                         disp_row = None
-                    if disp_row and disp_row["state"] not in FENCED_DISPATCH_STATES:
+                    if disp_row and disp_row["state"] not in (*FENCED_DISPATCH_STATES, "died", "completed"):
                         self._settle_dispatch_task(conn, disp_row["dispatch_id"], succeeded=(outcome == "succeeded"), now=now)
                 message = {
                     "id": msg_id,
@@ -1909,18 +1909,22 @@ class LocalStateStore:
             eff_run = disp["run_id"] or run_id
             row = self._terminal_report(conn, eff_run, senders)
             if row:
-                conn.execute(
-                    "UPDATE dispatches SET state = 'completed', terminal_state = 'exited', head_sha = COALESCE(NULLIF(?, ''), head_sha), "
-                    "updated_at = ? WHERE dispatch_id = ? AND state NOT IN ('stopped','abandoned','released')",
-                    (worktree_head_sha, now, dispatch_id),
-                )
-                if row["msg_type"] in ("worker_done", "merge_ready"):
-                    succeeded = (row["msg_type"] == "merge_ready" and row["outcome"] != "failed") or (
-                        row["msg_type"] == "worker_done" and row["outcome"] == "succeeded"
+                if disp["state"] != "completed":
+                    conn.execute(
+                        "UPDATE dispatches SET state = 'completed', terminal_state = 'exited', head_sha = COALESCE(NULLIF(?, ''), head_sha), "
+                        "updated_at = ? WHERE dispatch_id = ? AND state NOT IN ('stopped','abandoned','released')",
+                        (worktree_head_sha, now, dispatch_id),
                     )
-                    self._settle_dispatch_task(conn, dispatch_id, succeeded=succeeded, now=now)
+                    if row["msg_type"] in ("worker_done", "merge_ready"):
+                        succeeded = (row["msg_type"] == "merge_ready" and row["outcome"] != "failed") or (
+                            row["msg_type"] == "worker_done" and row["outcome"] == "succeeded"
+                        )
+                        self._settle_dispatch_task(conn, dispatch_id, succeeded=succeeded, now=now)
                 conn.execute("COMMIT")
                 return {"syntheticDied": False, "existingMessageId": row["id"], "type": row["msg_type"]}
+            if disp["state"] == "completed":
+                conn.execute("COMMIT")
+                return {"syntheticDied": False, "alreadyCompleted": True}
             conn.execute(
                 "UPDATE dispatches SET state = 'died', terminal_state = 'failed', head_sha = COALESCE(NULLIF(?, ''), head_sha), "
                 "updated_at = ? WHERE dispatch_id = ?",

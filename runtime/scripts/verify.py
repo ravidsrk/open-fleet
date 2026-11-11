@@ -3356,7 +3356,10 @@ def execute_negative_control(m, nc_command=None):
     if exec_err:
         return False, [f"--execute-nc: {exec_err}"]
     for st_op in _Authority._staged_script_operands(argv):
-        norm_st_op = Path(os.path.normpath(st_op)).as_posix().lstrip("./")
+        norm_st_op = Path(os.path.normpath(st_op)).as_posix()
+        if os.path.isabs(st_op) or norm_st_op in ("", ".") or ".." in Path(norm_st_op).parts:
+            return False, [f"--execute-nc: proof input {st_op!r} is not a tracked "
+                           "regular file in head_sha; fail-closed (#750 C19)"]
         ls_rc, ls_out, _ = _run(
             [_Authority.git_bin(), "-C", top, "--literal-pathspecs", "ls-tree", head, "--", norm_st_op],
             timeout=10, env=_Authority.git_env())
