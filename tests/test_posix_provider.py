@@ -1953,9 +1953,28 @@ class TestPosixAdversarialRemediation750(PosixRealProcessBase):
         self.assertEqual(stat.S_IMODE(of_dir.stat().st_mode), 0o700)
         self.assertEqual(stat.S_IMODE(inbox.stat().st_mode), 0o600)
 
-        # Stopping the worker purges .open-fleet/inbox.jsonl
+        # Stopping the worker purges .open-fleet/inbox.jsonl without leaking file descriptors
+        import fcntl
+
+        def _open_fd_count() -> int:
+            cnt = 0
+            for fd_num in range(256):
+                try:
+                    fcntl.fcntl(fd_num, fcntl.F_GETFD)
+                    cnt += 1
+                except OSError:
+                    pass
+            return cnt
+
         self.prov.worker_fence(verb="stop", dispatch_id=ws["dispatchId"])
         self.assertFalse(inbox.exists())
+        fds_before = _open_fd_count()
+        for _ in range(5):
+            of_dir.mkdir(mode=0o700, exist_ok=True)
+            inbox.write_text('{"text":"x"}\n', encoding="utf-8")
+            self.prov._purge_private_inbox(str(wt))
+            self.assertFalse(inbox.exists())
+        self.assertEqual(_open_fd_count(), fds_before)
 
     def test_c28_and_c40_terminal_send_run_isolation_and_strict_read_cursor_validation(self) -> None:
         t_a = self.prov.task_create(spec="task a", run="run-a")["task"]["id"]

@@ -401,7 +401,7 @@ class MulticlaudeProvider(ExternalDispatchMixin, RuntimeProvider):
             st = os.fstat(sub_fd)
             if not stat.S_ISDIR(st.st_mode) or st.st_uid != uid:
                 return
-            with os.scandir(os.dup(sub_fd)) as it:
+            with os.scandir(sub_fd) as it:
                 entries = list(it)
             for ent in entries:
                 ent_st = ent.stat(follow_symlinks=False)

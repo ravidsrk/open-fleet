@@ -817,8 +817,29 @@ class TestExternalAdversarialRemediation750(ProviderTestBase):
         self.assertEqual(rel["preserved"]["sha"], head_sha)
         self.assertTrue(any("update-ref" in c for c in git_calls))
         self.assertTrue(any(m["command"] == "complete_agent" for m in msgs))
-        # C38: agent message files purged on release
+        # C38: agent message files purged on release without leaking file descriptors
         self.assertEqual(list(msg_dir.glob("*.json")), [])
+        import fcntl
+
+        def _open_fd_count() -> int:
+            cnt = 0
+            for fd_num in range(256):
+                try:
+                    fcntl.fcntl(fd_num, fcntl.F_GETFD)
+                    cnt += 1
+                except OSError:
+                    pass
+            return cnt
+
+        nested_agent = home / "messages" / "proj" / "mc-fd-leak"
+        (nested_agent / "sub1" / "sub2").mkdir(parents=True)
+        (nested_agent / "a.json").write_text("{}", encoding="utf-8")
+        (nested_agent / "sub1" / "b.json").write_text("{}", encoding="utf-8")
+        (nested_agent / "sub1" / "sub2" / "c.json").write_text("{}", encoding="utf-8")
+        fds_before = _open_fd_count()
+        prov._purge_agent_messages("proj", "mc-fd-leak")
+        self.assertFalse(nested_agent.exists())
+        self.assertEqual(_open_fd_count(), fds_before)
 
         # Symlinked ancestor `<home>/messages/<repo>` must never delete outside the message store:
         import shutil

@@ -3476,7 +3476,7 @@ if {repr(self.backend)} == "cmux":
                     return
                 with contextlib.suppress(FileNotFoundError):
                     os.unlink("inbox.jsonl", dir_fd=inbox_fd)
-                with os.scandir(os.dup(inbox_fd)) as it:
+                with os.scandir(inbox_fd) as it:
                     empty = next(it, None) is None
                 os.close(inbox_fd)
                 inbox_fd = -1
