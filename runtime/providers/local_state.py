@@ -401,7 +401,7 @@ class LocalStateStore:
     # --- Idempotent request tracking ---
     def _caller_request_scope(self) -> str:
         bound_run = self._worker_bound_run()
-        own = sorted(set(self._own_worker_identity()))
+        own = sorted(set(self._bound_worker_identities()))
         if bound_run or own:
             return f"worker:{bound_run or ''}:{','.join(own)}"
         return "coordinator"
@@ -1183,10 +1183,57 @@ class LocalStateStore:
             return bound
         return explicit_run if explicit_run is not None else default_run
 
+    def _bound_worker_identities(self, conn: sqlite3.Connection | None = None) -> list[str]:
+        dispatch = env_get("OPEN_FLEET_DISPATCH_ID", "ORCA_DISPATCH_ID", self.env, "")
+        if not dispatch:
+            return []
+        if conn is not None:
+            row = conn.execute(
+                "SELECT run_id, terminal_handle FROM dispatches WHERE dispatch_id = ? LIMIT 1",
+                (dispatch,),
+            ).fetchone()
+        else:
+            with self._connect() as c:
+                row = c.execute(
+                    "SELECT run_id, terminal_handle FROM dispatches WHERE dispatch_id = ? LIMIT 1",
+                    (dispatch,),
+                ).fetchone()
+        bound_run = str(row["run_id"] or "") if row is not None else ""
+        if not bound_run:
+            raise ProviderError(
+                "cross_run_access",
+                f"launched worker dispatch {dispatch!r} has no registered run binding",
+            )
+        th = str(row["terminal_handle"] or "") if row is not None else ""
+        out: list[str] = []
+        for h in (th, dispatch):
+            if h and h not in out:
+                out.append(h)
+        return out
+
+    def _resolve_bound_sender(
+        self,
+        sender: str | None,
+        *,
+        default_unlaunched: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> str:
+        allowed = self._bound_worker_identities(conn)
+        if allowed:
+            if not sender:
+                return allowed[0]
+            if sender not in allowed:
+                raise ProviderError(
+                    "sender_spoofed",
+                    f"launched worker cannot send as {sender!r} (bound to {allowed[0]!r})",
+                )
+            return sender
+        return sender or self._resolve_terminal(None) or default_unlaunched
+
     def _mailbox_scope(self, conn: sqlite3.Connection, run_id: str, terminal: str | None) -> list[str]:
         """Recipients a caller may read/ack. Workers get ONLY their own mail; the `coordinator`
         alias resolves for the run's fenced coordinator (or an anonymous operator shell) only."""
-        own = self._own_worker_identity()
+        own = self._bound_worker_identities(conn)
         if own:
             # A launched worker is pinned to its own mailbox whatever --terminal it passes
             # (`--terminal coordinator` used to hand it the coordinator inbox, #591 re-review).
@@ -1444,7 +1491,7 @@ class LocalStateStore:
     ) -> dict[str, Any]:
         run_id = self._resolve_caller_run(run, default_run="default") or "default"
         recipient = to or COORDINATOR_ALIAS
-        sender_id = sender or self._resolve_terminal(None) or "worker"
+        sender_id = self._resolve_bound_sender(sender, default_unlaunched="worker")
         clean_attrs = dict(attrs or {})
         body_from_attrs = clean_attrs.pop("body", None) if "body" in clean_attrs and payload is None and body is None else None
         if retry_request is None and "retry-request" in clean_attrs:
@@ -1492,10 +1539,12 @@ class LocalStateStore:
                     )
                     stored_attrs = dict(clean_attrs)
                     if is_term_mail:
-                        for dk in ("dispatchId", "dispatch_id", "dispatch-id"):
+                        for dk in ("dispatchId", "dispatch_id", "dispatch-id", "dispatchUnbound"):
                             stored_attrs.pop(dk, None)
                         if disp_row is not None:
                             stored_attrs["dispatchId"] = disp_row["dispatch_id"]
+                        else:
+                            stored_attrs["dispatchUnbound"] = True
                     msg_id, deliv_id = self._insert_message(
                         conn,
                         run_id=run_id,
@@ -1683,7 +1732,7 @@ class LocalStateStore:
         upstream_fn: Callable[[], dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         eff_run = self._resolve_caller_run(run, default_run=None)
-        replier = sender or self._resolve_terminal(None) or COORDINATOR_ALIAS
+        replier = self._resolve_bound_sender(sender, default_unlaunched=COORDINATOR_ALIAS)
         payload_sha = request_payload_sha256(
             {"msg_id": msg_id, "body": body, "run": eff_run, "sender": replier}
         )
@@ -1732,7 +1781,7 @@ class LocalStateStore:
                         )
                     attrs = json.loads(orig["attrs_json"] or "{}")
                     gate_id = gate["gate_id"] if gate else attrs.get("gateId")
-                    replier = sender or self._resolve_terminal(None) or COORDINATOR_ALIAS
+                    replier = self._resolve_bound_sender(sender, default_unlaunched=COORDINATOR_ALIAS, conn=conn)
                     gate_row = None
                     if gate_id:
                         gate_row = gate or conn.execute("SELECT * FROM gates WHERE gate_id = ?", (gate_id,)).fetchone()
@@ -1867,7 +1916,7 @@ class LocalStateStore:
             opts = json.loads(options)
         else:
             opts = [o.strip() for o in options.split(",") if o.strip()] if options else []
-        asker = sender or self._resolve_terminal(None) or "worker"
+        asker = self._resolve_bound_sender(sender, default_unlaunched="worker")
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute("SELECT * FROM gates WHERE gate_id = ?", (gate_id,)).fetchone()
@@ -2002,7 +2051,7 @@ class LocalStateStore:
         if not gate_id or resolution is None:
             raise ProviderError("invalid_argument", "gate-resolve needs --id and --resolution")
         eff_run = self._resolve_caller_run(run, default_run=None)
-        who = sender or self._resolve_terminal(None) or COORDINATOR_ALIAS
+        who = self._resolve_bound_sender(sender, default_unlaunched=COORDINATOR_ALIAS)
         payload_sha = request_payload_sha256(
             {"gate_id": gate_id, "resolution": resolution, "run": eff_run, "sender": who}
         )
@@ -2328,6 +2377,8 @@ class LocalStateStore:
                 attrs = {}
             if not isinstance(attrs, dict):
                 attrs = {}
+            if attrs.get("dispatchUnbound") is True:
+                continue
             msg_disp = next(
                 (
                     attrs[k]

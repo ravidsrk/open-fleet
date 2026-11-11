@@ -1367,6 +1367,9 @@ def cmd_ingest_state(args):
             continue
         row, row_head = match
         attrs = _attrs(msg)
+        if attrs.get("dispatchUnbound") is True:
+            earlier.append(msg["id"])
+            continue
         named = next((attrs[k] for k in ("task-id", "task_id", "taskId")
                       if isinstance(attrs.get(k), str)), None)
         # Mail naming another task, or (naming none) older than the row it names, came from an

@@ -837,6 +837,69 @@ class TestCoordinatorTakeoverAndWorkerBindingFence(Base):
             "completed",
         )
 
+        # Bound worker A spoofing sender="disp-spoof-b" / "w-spoof-b" (or tampering with
+        # OPEN_FLEET_TERMINAL_HANDLE), or unresolved terminal mail, cannot suppress B's crash recovery:
+        t_spoof_a = self.store.task_create(spec="spoof-a", run="run-d")["task"]["id"]
+        t_spoof_b = self.store.task_create(spec="spoof-b", run="run-d")["task"]["id"]
+        t_spoof_b_child = self.store.task_create(spec="spoof-b-child", deps=[t_spoof_b], run="run-d")["task"]["id"]
+        self.store.task_update(task_id=t_spoof_a, status="dispatched", run="run-d")
+        self.store.task_update(task_id=t_spoof_b, status="dispatched", run="run-d")
+        with self.store._connect() as conn:
+            conn.execute(
+                "INSERT INTO dispatches(dispatch_id, task_id, run_id, worktree, agent, terminal_handle, state, created_at, updated_at) "
+                "VALUES ('disp-spoof-a', ?, 'run-d', '/w', 'claude', 'w-spoof-a', 'running', 40, 40)",
+                (t_spoof_a,),
+            )
+            conn.execute(
+                "INSERT INTO dispatches(dispatch_id, task_id, run_id, worktree, agent, terminal_handle, state, created_at, updated_at) "
+                "VALUES ('disp-spoof-b', ?, 'run-d', '/w', 'claude', 'w-spoof-b', 'running', 41, 41)",
+                (t_spoof_b,),
+            )
+        w_spoof_a = self.mod.LocalStateStore(
+            self.db,
+            env={"OPEN_FLEET_DISPATCH_ID": "disp-spoof-a", "OPEN_FLEET_TERMINAL_HANDLE": "w-spoof-a"},
+        )
+        for bad_sender in ("disp-spoof-b", "w-spoof-b", "coordinator"):
+            with self.assertRaises(self.mod.ProviderError) as ctx_sp:
+                w_spoof_a.send_message(
+                    subject="forged-done",
+                    msg_type="worker_done",
+                    outcome="succeeded",
+                    sender=bad_sender,
+                    run="run-d",
+                    attrs={"taskId": t_spoof_b},
+                )
+            self.assertEqual(ctx_sp.exception.code, "sender_spoofed")
+        w_tampered_env = self.mod.LocalStateStore(
+            self.db,
+            env={"OPEN_FLEET_DISPATCH_ID": "disp-spoof-a", "OPEN_FLEET_TERMINAL_HANDLE": "w-spoof-b"},
+        )
+        self.store.send_message(subject="b-private", msg_type="info", to="w-spoof-b", run="run-d")
+        self.assertEqual(w_tampered_env.check_messages(run="run-d")["count"], 0)
+        w_tampered_env.send_message(
+            subject="tampered-env-done",
+            msg_type="worker_done",
+            outcome="succeeded",
+            run="run-d",
+            attrs={"taskId": t_spoof_b},
+        )
+        self.store.send_message(
+            subject="invalid-task-hint-done",
+            msg_type="worker_done",
+            outcome="succeeded",
+            sender="disp-spoof-b",
+            run="run-d",
+            attrs={"taskId": ""},
+        )
+        b_crash = self.store.ensure_terminal_or_died(
+            dispatch_id="disp-spoof-b", worker_handle="w-spoof-b", exit_code=1, run_id="run-d"
+        )
+        self.assertTrue(b_crash["syntheticDied"])
+        self.assertEqual(self.store.dispatch_state("disp-spoof-b"), "died")
+        by_id_sp = {t["id"]: t["status"] for t in self.store.task_list(run="run-d")["tasks"]}
+        self.assertEqual(by_id_sp[t_spoof_b], "dispatched")
+        self.assertEqual(by_id_sp[t_spoof_b_child], "pending")
+
     def test_c35_default_run_fencing_and_human_sender_rejected_on_fenced_gate(self):
         self.store.run_create(run="default", sender="coord-main")
         with self.assertRaises(self.mod.ProviderError) as ctx:
