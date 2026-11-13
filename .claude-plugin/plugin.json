@@ -1,7 +1,7 @@
 {
   "name": "open-fleet",
   "description": "Outcome-named autonomous fleets for coding agents across Orca, POSIX, and multi-runtime orchestrators: each mission is one outcome with its own state machine and an evidence-backed definition of done. Missions compose best-of-breed worker recipes (mattpocock, gstack, addyosmani) \u2014 one router per worker. No vendor-named fleets. MIT.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": {
     "name": "Ravindra Kumar",
     "email": "ravidsrk@gmail.com",
