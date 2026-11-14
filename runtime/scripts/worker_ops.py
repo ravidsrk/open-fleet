@@ -89,26 +89,30 @@ def parse_args(argv):
         description="Fail-closed worker lifecycle verbs.")
     subs = parser.add_subparsers(dest="command", required=True)
     dispatch = argparse.ArgumentParser(add_help=False)
-    dispatch.add_argument("--dispatch", required=True)
+    dispatch.add_argument("--dispatch", required=True, help="the dispatch id (worker-list ROWS, spawn receipt)")
     retry = argparse.ArgumentParser(add_help=False)
-    retry.add_argument("--retry-request", default=None)
+    retry.add_argument("--retry-request", default=None,
+                       help="idempotency key: resend the same value to retry one request safely")
 
     subs.add_parser("show", parents=[dispatch],
                     help="inspect one dispatch (verdict + wait + next action)")
     read = subs.add_parser("read", parents=[dispatch],
                            help="read bounded worker output")
-    read.add_argument("--source", default="auto")
-    read.add_argument("--cursor", default=None)
-    read.add_argument("--limit", default=None)
+    read.add_argument("--source", default="auto", help="auto | transcript | terminal; transcript "
+                      "CERTIFIES: a receipt from any other source is an evidence failure (exit 1)")
+    read.add_argument("--cursor", default=None, help="opaque page cursor from the previous read, passed back unchanged")
+    read.add_argument("--limit", default=None, help="max entries, 1-100 (default: the host's)")
     for verb in ("stop", "abandon", "release", "retain"):
         subs.add_parser(verb, parents=[dispatch, retry],
                         help=f"worker-{verb} one dispatch")
     wlist = subs.add_parser("list", help="enumerate worker terminal accounting")
-    wlist.add_argument("--run", default=None)
-    wlist.add_argument("--terminal-state", default=None)
-    wlist.add_argument("--include-remote", action="store_true")
-    wlist.add_argument("--cursor", default=None)
-    wlist.add_argument("--limit", default=None)
+    wlist.add_argument("--run", default=None, help="only this Run's workers")
+    wlist.add_argument("--terminal-state", default=None,
+                       help="filter: " + " | ".join(LIST_STATES))
+    wlist.add_argument("--include-remote", action="store_true",
+                       help="read remote workers too; without it they render unverifiable")
+    wlist.add_argument("--cursor", default=None, help="opaque page cursor from the previous list, passed back unchanged")
+    wlist.add_argument("--limit", default=None, help="rows per page, a positive integer")
     return parser.parse_args(argv)
 
 

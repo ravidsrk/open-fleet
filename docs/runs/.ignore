@@ -1,0 +1,10 @@
+# Search-tool ignore file (ripgrep, fd, ag and most agent search tools read it; git does not).
+# This directory holds about three quarters of the repo's tracked files: frozen script output,
+# transcripts and hashed inventories that a run report binds. They are evidence, not reference,
+# and they buried the live code in every search (#761). The run reports (*.md) and the run index
+# stay searchable; the artifacts are hidden. Tools that hash or bind artifacts (bind_check.py,
+# run_report.py, run_index.py) read paths directly and never consult this file.
+# To search the artifacts anyway: `rg --no-ignore-dot <pattern>`.
+*/*
+!*/*.md
+!index/*
