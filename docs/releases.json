@@ -1,9 +1,6 @@
 {
   "_comment": "Published versions map to immutable cut commits and annotated tags. Historical rows and tag targets stay unchanged. The optional preparing object contains only version and cut_date for the sole newest heading; it claims no published release. After authorized tagging, a later provenance commit moves it into releases with the existing cut SHA and clears preparing. See docs/ops.md for preparation, cut, tagging, provenance and recovery.",
-  "preparing": {
-    "version": "1.1.0",
-    "cut_date": "2026-11-11"
-  },
+  "preparing": null,
   "releases": [
     {
       "version": "0.1.0",
@@ -91,6 +88,12 @@
       "cut_date": "2026-10-25",
       "tag": "v1.0.0",
       "commit": "01f1876a2bc454dcfe47c79332a83aac5fd2079c"
+    },
+    {
+      "version": "1.1.0",
+      "cut_date": "2026-11-11",
+      "tag": "v1.1.0",
+      "commit": "38f51642bef39e1634a01eeee3211dfad27ee754"
     }
   ]
 }
