@@ -170,6 +170,29 @@ def shell_launch_line(launch: dict[str, Any]) -> str:
     return f"cd {shlex.quote(str(cwd))} && {line}" if cwd else line
 
 
+# Spend ceiling for headless claude workers (#759). The argv this module builds is `claude -p`,
+# where `--max-budget-usd` ends the session once its API cost passes the cap; the coordinator sets
+# it per dispatch by exporting this variable before spawn_worker.sh. It reaches a worker only
+# where a runtime EXECUTES that argv (posix, worktrunk): the `command` label stays without it,
+# since an interactive (non -p) session ignores the flag. spawn_worker.sh names every other lane.
+MAX_BUDGET_ENV = "OPEN_FLEET_MAX_BUDGET_USD"
+_BUDGET_RE = re.compile(r"(?:0|[1-9][0-9]{0,5})(?:\.[0-9]{1,4})?")
+
+
+def claude_budget_args(environ: dict[str, str] | None = None) -> list[str]:
+    """`["--max-budget-usd", "<usd>"]` from OPEN_FLEET_MAX_BUDGET_USD, or [] when it is unset or
+    empty. A value that is not a plain positive dollar amount is refused, never dropped: a typo
+    must not launch a worker the coordinator believes is capped."""
+    raw = (os.environ if environ is None else environ).get(MAX_BUDGET_ENV, "")
+    if not raw:
+        return []
+    if not _BUDGET_RE.fullmatch(raw) or float(raw) <= 0:
+        raise ProviderError("invalid_budget",
+                            f"{MAX_BUDGET_ENV}={raw!r} is not a positive dollar amount "
+                            "under 1000000 (digits, optional decimals, e.g. 5 or 2.50)")
+    return ["--max-budget-usd", raw]
+
+
 def _build_harness_command(
     agent: str,
     profile: str,
@@ -207,11 +230,13 @@ def _build_harness_command(
     }
 
     if agent == "claude":
+        budget = claude_budget_args()
         if profile == "ro":
             flag = "--permission-mode plan"
             argv = ["claude", "-p", "--permission-mode", "plan",
                     "--disallowedTools", CLAUDE_RO_DISALLOWED_TOOLS,
                     "--output-format", "stream-json", "--verbose"]
+            argv += budget
             if prompt_str:
                 argv.append(prompt_str)
             # `=`-joined and ending on the fixed-arity plan flag: --disallowedTools is variadic,
@@ -221,6 +246,7 @@ def _build_harness_command(
             flag = "--dangerously-skip-permissions"
             argv = ["claude", "-p", "--dangerously-skip-permissions",
                     "--output-format", "stream-json", "--verbose"]
+            argv += budget
             if prompt_str:
                 argv.append(prompt_str)
             cmd = "claude --dangerously-skip-permissions"

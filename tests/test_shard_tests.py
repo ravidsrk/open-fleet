@@ -20,7 +20,9 @@ import re
 import subprocess
 import sys
 import tempfile
+import signal
 import textwrap
+import time
 import types
 import unittest
 from pathlib import Path
@@ -644,6 +646,127 @@ class TheCommandLineInProcess(unittest.TestCase):
         rc, out, _, _, _ = self.main("--measure", "test_pins")
         self.assertEqual(rc, 0)
         self.assertIn("x1 to the CI lane", json.loads(out)["measured"])
+
+
+def _load_check():
+    spec = importlib.util.spec_from_file_location("_check", ROOT / "scripts" / "check.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class LocalCheckCommand(unittest.TestCase):
+    """scripts/check.py is the one local command AGENTS.md and CONTRIBUTING.md name (#760)."""
+
+    def setUp(self):
+        self.check = _load_check()
+
+    def test_the_plan_runs_validate_ruff_partition_and_every_shard(self):
+        steps = dict(self.check.plan(4, ruff="ruff"))
+        self.assertEqual(steps["validate"][-1], "scripts/validate.py")
+        self.assertEqual(steps["shard-partition"][-3:], ["--check", "--of", "4"])
+        for i in range(1, 5):
+            self.assertEqual(steps[f"suite {i}/4"][-4:], ["--shard", str(i), "--of", "4"])
+        self.assertEqual(len([n for n in steps if n.startswith("suite ")]), 4)
+
+    def test_ruff_lints_exactly_what_ci_lints(self):
+        wf = (ROOT / ".github" / "workflows" / "validate.yml").read_text(encoding="utf-8")
+        ci = re.search(r"run: ruff check (.+)$", wf, re.M)
+        self.assertIsNotNone(ci, "the CI ruff step moved; update check.py's RUFF_PATHS with it")
+        self.assertEqual(tuple(ci.group(1).split()), self.check.RUFF_PATHS)
+        for rel in self.check.RUFF_PATHS:
+            self.assertTrue((ROOT / rel).is_dir(), rel)
+
+    def test_the_documented_commands_name_it_and_lint_paths_that_exist(self):
+        contributing = (ROOT / ".github" / "CONTRIBUTING.md").read_text(encoding="utf-8")
+        agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("python3 scripts/check.py", contributing)
+        self.assertIn("python3 scripts/check.py", agents)
+        for line in re.findall(r"ruff check ([^\n`]+)", contributing):
+            for rel in line.split("#")[0].split():
+                with self.subTest(path=rel):
+                    self.assertTrue((ROOT / rel).exists(), f"CONTRIBUTING lints a missing path: {rel}")
+
+    def test_a_missing_tool_is_skipped_never_passed(self):
+        steps = dict(self.check.plan(1, suite=False, ruff=""))
+        self.assertIsNone(steps["ruff"])
+        out = io.StringIO()
+        results = self.check.run_steps([("ruff", None)], out=out)
+        self.assertEqual(results[0][1], "SKIPPED")
+        self.assertEqual(self.check.report(results, strict=False, out=out), 0)
+        self.assertIn("1 skipped", out.getvalue())
+        self.assertEqual(self.check.report(results, strict=True, out=io.StringIO()), 1)
+
+    def test_one_red_step_fails_the_run_and_every_step_still_runs(self):
+        ok = [sys.executable, "-c", "print('fine')"]
+        bad = [sys.executable, "-c", "import sys; print('the cause'); sys.exit(3)"]
+        out = io.StringIO()
+        results = self.check.run_steps([("a", ok), ("b", bad), ("c", ok)], out=out)
+        self.assertEqual([r[1] for r in results], ["PASS", "FAIL", "PASS"])
+        self.assertEqual(self.check.report(results, strict=False, out=out), 1)
+        self.assertIn("the cause", out.getvalue(), "a red step must show its own output")
+        self.assertIn("check: RED", out.getvalue())
+
+    def test_each_step_is_timed_when_it_finishes_not_when_its_turn_comes(self):
+        slow = [sys.executable, "-c", "import time; time.sleep(1.5)"]
+        fast = [sys.executable, "-c", "pass"]
+        out = io.StringIO()
+        results = dict((r[0], r) for r in self.check.run_steps([("slow", slow), ("fast", fast)],
+                                                                out=out))
+        self.assertLess(results["fast"][2], 1.0, "a quick step inherited the slow step's wait")
+        self.assertTrue(out.getvalue().index("fast") < out.getvalue().index("slow"),
+                        "steps are reported in completion order")
+
+    def test_an_interrupted_run_leaves_no_step_or_grandchild_running(self):
+        # A shard runs unittest as a child; killing only the shard orphaned the suite. Drive
+        # run_steps in its own process, SIGTERM it the way main's handler sees it, and the
+        # grandchild must be gone.
+        with tempfile.TemporaryDirectory() as tmp:
+            pidfile = Path(tmp) / "grandchild.pid"
+            spawner = ("import subprocess, sys, time; "
+                       "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)']); "
+                       f"open({str(pidfile)!r}, 'w').write(str(p.pid)); time.sleep(120)")
+            driver = textwrap.dedent(f"""
+                import importlib.util, signal, sys
+                spec = importlib.util.spec_from_file_location("c", {str(ROOT / "scripts" / "check.py")!r})
+                c = importlib.util.module_from_spec(spec); spec.loader.exec_module(c)
+                def stop(signum, _frame):
+                    raise SystemExit(128 + signum)
+                signal.signal(signal.SIGTERM, stop)
+                c.run_steps([("spawner", [sys.executable, "-c", {spawner!r}])])
+            """)
+            proc = subprocess.Popen([sys.executable, "-c", driver])
+            try:
+                deadline = time.monotonic() + 30
+                while not pidfile.exists() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertTrue(pidfile.exists(), "the grandchild never started")
+                time.sleep(0.2)
+                grandchild = int(pidfile.read_text())
+                proc.send_signal(signal.SIGTERM)
+                self.assertEqual(proc.wait(timeout=30), 128 + signal.SIGTERM)
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    try:
+                        os.kill(grandchild, 0)
+                    except ProcessLookupError:
+                        break
+                    time.sleep(0.05)
+                else:
+                    os.kill(grandchild, signal.SIGKILL)
+                    self.fail("the step's grandchild outlived the interrupted run")
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+
+    def test_main_routes_sigterm_through_the_cleanup(self):
+        src = (ROOT / "scripts" / "check.py").read_text(encoding="utf-8")
+        self.assertIn("signal.signal(signal.SIGTERM, _terminate)", src)
+        self.assertIn("start_new_session=True", src)
+
+    def test_jobs_below_one_is_refused(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            self.check.main(["--jobs", "0", "--plan"])
 
 
 if __name__ == "__main__":

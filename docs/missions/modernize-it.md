@@ -3,7 +3,7 @@
 [Documentation](../README.md) · [Mission selector](README.md#choose-by-task) · [Prompt recipes](../recipes.md)
 
 > **Autonomy:** L4 (Osmani L0-L5, parallel delegation) — parallel migration workers per dependency group under a compatibility graph; you own the one-way doors.
-> **Activation load:** ~34,300 tokens — this SKILL.md plus every playbook and runtime doc its Composes/rides clause makes mandatory, about 17% of a 200k-token context before the first dispatch ([why it is measured](../../ARCHITECTURE.md#instruction-budget))
+> **Activation load:** ~34,500 tokens — this SKILL.md plus every playbook and runtime doc its Composes/rides clause makes mandatory, about 17% of a 200k-token context before the first dispatch ([why it is measured](../../ARCHITECTURE.md#instruction-budget))
 > **Proof:** doctrine-only — it ran once, in the 2026-09-16 self-test campaign ([CURRENT](../runs/campaign-2026-09-16-modernize-it/)), recorded history rather than a promotion bid; the protocol is mechanism, not yet field-proven.
 
 > Point it at a repo with a green CI baseline. Come back to a dependency surface where every

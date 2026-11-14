@@ -157,14 +157,18 @@ touches; the release cut ([ops guide](../docs/ops.md#release-cut)) folds them in
 ## Before you open the PR
 
 ```bash
+python3 scripts/check.py                   # all of the below, the suite in parallel shards; must end "check: GREEN"
+python3 scripts/check.py --no-suite        # the fast loop: validate + ruff only
+# the steps it runs, one at a time:
 python3 scripts/validate.py                # must end: "three-layer separation holds; evals valid."
 python3 -m unittest discover -s tests -v   # all contract + validator fixture tests green
-# optional: ruff check scripts runtime/scripts tests bench demo
+ruff check scripts runtime/scripts tests bench evals/demo   # skipped by check.py when ruff is absent
 # (CI's version is hash-pinned in .github/ci-tools.lock; rules are in ruff.toml)
 ```
 
 The validator finishes in a few seconds; the suite takes about an hour serially because it builds
-real git repositories. It runs on Linux and macOS; tmux tests use a fake agent and never start your
+real git repositories, which is why `check.py` runs it as `scripts/shard-tests.py` shards (one per
+CPU, at most 8; `--jobs N` to change it). It runs on Linux and macOS; tmux tests use a fake agent and never start your
 installed agent CLI. Neither is optional. PRs that fail either
 will be asked to fix before review. ruff is CI-only (not required locally). If you add validator behavior, add the negative-path fixture that proves
 the new failure branch fires — the suite's standard is that every guard must be demonstrably

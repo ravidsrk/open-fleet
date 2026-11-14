@@ -142,8 +142,11 @@ states which pack a worker uses in the dispatched TASK.
 
 ## Boundaries
 
-- **Always:** read a mission's `SKILL.md` before invoking. Run `python3 scripts/validate.py` and
-  the `tests/` suite before committing.
+- **Always:** read a mission's `SKILL.md` before invoking. Run `python3 scripts/check.py` before
+  committing (validate + ruff + the full suite in parallel shards; `--no-suite` for the fast loop,
+  `python3 -m unittest tests.test_<name>` for one module).
+- **Always:** treat `docs/runs/` artifacts as evidence, not reference — search hides them
+  (`docs/runs/.ignore`); read the live code, and a run's `.md` report only for its findings.
 - **Always:** keep the three layers separate — new phase logic is a playbook, new dispatch
   mechanics are runtime, only a new *outcome* is a mission.
 - **Never:** name a mission for an upstream pack or an ingredient technique.

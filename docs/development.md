@@ -96,6 +96,7 @@ when one does not.
 | `python3 scripts/bundle.py --check` | Build in a temporary directory and check bundled references |
 | `python3 scripts/wip_curve.py check-prereg` | Check the [WIP-curve pre-registration](experiments/wip-curve-prereg.md) (#604): its digests, its seed commit, and that every oracle fails on the seed and passes on its reference edit |
 | `python3 scripts/release_check.py --fast --skip-github` | Verify the local [Release 1.0 checklist](release-1.0-checklist.md) gates. The skipped suite and GitHub checks stand as SKIPs, so a clean run exits 3, not 0; any FAIL exits 1 |
+| `python3 scripts/check.py` | One command for the PR checks: validate, ruff and the full suite in parallel shards (`--no-suite` for the fast loop) |
 | `python3 -m unittest discover -s tests -v` | Run the complete contract and fixture suite |
 | `git diff --check` | Catch whitespace errors in the patch |
 

@@ -32,7 +32,9 @@ Two states the old vocabulary lacked, and neither is a failure:
   `nextCommands`.
 - **`unverifiable`** — absence, not a verdict (`missing_status`, `stale_status`, `restored_unconfirmed`,
   `host_unavailable`, a remote worker with no connection). Absence **authorizes nothing**: never stop,
-  abandon, retry, or release on it. Keep waiting or inspect.
+  abandon, retry, or release on it. Keep waiting or inspect — but never past the dispatch's **timebox and a
+  partial-report STOP**, which every TASK states: past it, a frozen transcript plus one unanswered nudge is
+  positive evidence of a wedge, and worker-supervision.md's stuck-but-alive ladder applies (#759).
 
 Leave a wait only on POSITIVE proof the agent stopped: `exited` liveness, the worker's own observation of
 process exit, or a transcript whose final agent turn sent no `worker_done`.
