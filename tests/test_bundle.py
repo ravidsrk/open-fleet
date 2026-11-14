@@ -73,7 +73,13 @@ class BundleClosureTests(unittest.TestCase):
             for name in ("verify.py", "evidence-run.py", "preflight.py"):
                 entry = installed / "runtime/scripts" / name
                 self.assertTrue(entry.is_file(), str(entry))
-                self.assertEqual(entry.stat().st_mode & 0o111, 0o111,
+                # Retain = the source's execute bits, at least the owner's. The checkout's umask
+                # decides group/other (027 checks out 0750), so a fixed 0o111 failed on a
+                # restrictive host whatever the bundle did.
+                source_x = (ROOT / "runtime/scripts" / name).stat().st_mode & 0o111
+                self.assertTrue(entry.stat().st_mode & 0o100,
+                                f"{name} must retain its executable interface")
+                self.assertEqual(entry.stat().st_mode & 0o111, source_x,
                                  f"{name} must retain its executable interface")
                 result = self.run_command(project, str(entry), "--help")
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -674,7 +680,10 @@ class BundleClosureTests(unittest.TestCase):
                     for name in ("verify.py", "evidence-run.py", "preflight.py"):
                         entry = installed / "runtime/scripts" / name
                         self.assertTrue(entry.is_file(), str(entry))
-                        self.assertEqual(entry.stat().st_mode & 0o111, 0o111,
+                        source_x = (ROOT / "runtime/scripts" / name).stat().st_mode & 0o111
+                        self.assertTrue(entry.stat().st_mode & 0o100,
+                                        f"{name} must retain its executable interface")
+                        self.assertEqual(entry.stat().st_mode & 0o111, source_x,
                                          f"{name} must retain its executable interface")
                         result = self.run_command(tmp, str(entry), "--help")
                         self.assertEqual(result.returncode, 0, result.stderr)
