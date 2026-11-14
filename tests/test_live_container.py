@@ -1645,6 +1645,13 @@ class TheBrokerHoldsTheTokenAndTheCap(unittest.TestCase):
         # Recording every fault made each one a ledger write and an fsync: a client resetting its
         # connection mid-body in a loop grew the host's ledger without bound. Faults are counted,
         # and written per kind at most once a DROP_RECORD_S, like drops; the count rides every line.
+        # A 3 s record window, not the shipped 1 s: the bound below is per window, and a loaded
+        # runner whose flood spanned more 1 s windows wrote 53 and 56 correctly rate-limited lines
+        # against the fixed n/4 cap and failed main three runs running (#757). Fewer windows keep
+        # the same assertion honest on a slow host; the tally still lands inside the 5 s wait.
+        patcher = mock.patch.object(lb, "DROP_RECORD_S", 3.0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         server = self.served_broker()
         n, started = 200, time.monotonic()
         for _ in range(n):
@@ -1665,11 +1672,7 @@ class TheBrokerHoldsTheTokenAndTheCap(unittest.TestCase):
         kinds = {(e["event"], e.get("where"), e.get("error"), e.get("why")) for e in lines}
         # One line per kind per DROP_RECORD_S at most, however long a loaded host took over the flood.
         bound = len(kinds) * ((time.monotonic() - started) / lb.DROP_RECORD_S + 1)
-        self.assertLessEqual(len(lines), bound, f"{n} resets wrote {len(lines)} ledger lines")
-        # And never one line per fault (the regression writes ~n). This was min(bound, n / 4): a
-        # fixed 50 contradicted "however long", so a loaded runner whose flood spanned more windows
-        # wrote 53 and 56 rate-limited lines and failed main three runs running (#757).
-        self.assertLess(len(lines), n / 2, f"{n} resets wrote {len(lines)} ledger lines")
+        self.assertLessEqual(len(lines), min(bound, n / 4), f"{n} resets wrote {len(lines)} ledger lines")
         self.assertGreaterEqual(counted(events[-1]), n, f"the resets are not all counted on the ledger's last line: {events[-1]}")
 
     def test_refusals_cannot_flood_the_ledger_and_are_all_counted(self):

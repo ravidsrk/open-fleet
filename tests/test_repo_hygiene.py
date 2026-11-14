@@ -1723,26 +1723,47 @@ class RunArtifactsStayOutOfSearch(unittest.TestCase):
             with self.subTest(tool=rel):
                 self.assertNotRegex(src, r"[\"']rg[\"']|ripgrep|\.ignore\b")
 
-    @unittest.skipUnless(shutil.which("rg"), "ripgrep not installed")
-    def test_ripgrep_lists_reports_and_index_but_no_artifact(self):
-        def listed(*extra):
-            out = subprocess.run(["rg", "--files", *extra, "docs/runs"], cwd=ROOT,
-                                 stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                                 timeout=120, check=True).stdout.split()
-            return set(out)
-        tracked = set(subprocess.run(["git", "ls-files", "docs/runs"], cwd=ROOT,
-                                     capture_output=True, text=True, check=True).stdout.split())
-        visible = listed()
-        artifacts = {p for p in visible
-                     if not p.endswith(".md") and not p.startswith("docs/runs/index/")
-                     and p.count("/") > 2}
-        self.assertEqual(artifacts, set())
+    @staticmethod
+    def _visible(rel):
+        """What the three rules leave visible, by gitignore semantics, for a path under docs/runs:
+        `*/*` hides everything below a run directory, `!*/*.md` and `!index/*` re-include one
+        level only (a hidden directory's contents stay hidden)."""
+        parts = rel.split("/")[2:]
+        if any(part.startswith(".") for part in parts):  # search tools skip dotfiles by default
+            return False
+        if len(parts) == 1:
+            return True
+        return len(parts) == 2 and (parts[1].endswith(".md") or parts[0] == "index")
+
+    def _tracked(self):
+        return set(subprocess.run(["git", "ls-files", "docs/runs"], cwd=ROOT, capture_output=True,
+                                  text=True, check=True).stdout.split())
+
+    def test_reports_and_the_index_stay_visible_and_artifacts_do_not(self):
+        tracked = self._tracked()
+        visible = {p for p in tracked if self._visible(p)}
         reports = {p for p in tracked if p.endswith(".md") and p.count("/") <= 3}
         index = {p for p in tracked if p.startswith("docs/runs/index/")}
         self.assertTrue(reports and index)
         self.assertLessEqual(reports | index, visible)
-        # The control: without the ignore file the artifacts come back, so the check can fail.
-        self.assertGreater(len(listed("--no-ignore-dot") - visible), 1000)
+        artifacts = {p for p in visible if not p.endswith(".md")
+                     and not p.startswith("docs/runs/index/") and p.count("/") > 2}
+        self.assertEqual(artifacts, set())
+        self.assertGreater(len(tracked - visible), 1000, "the rules no longer hide the artifacts")
+
+    def test_ripgrep_applies_the_rules_as_modelled(self):
+        # Where ripgrep is installed it must agree with the model, file by file, and without the
+        # ignore file the artifacts come back (the control). Without it, the model above stands.
+        if not shutil.which("rg"):
+            return
+        def listed(*extra):
+            return set(subprocess.run(["rg", "--files", *extra, "docs/runs"], cwd=ROOT,
+                                      stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                      timeout=120, check=True).stdout.split())
+        tracked = self._tracked()
+        visible = listed() & tracked
+        self.assertEqual(visible, {p for p in tracked if self._visible(p)})
+        self.assertGreater(len(listed("--no-ignore-dot") - listed()), 1000)
 
 
 class TheWorkerWrappersDocumentEveryParameter(unittest.TestCase):

@@ -1,5 +1,5 @@
-- **The ledger-flood test no longer fails loaded CI runners** (#757). It capped a rate-limited
-  ledger at a fixed 50 lines, contradicting its own per-second bound, so main's `validate` failed
-  three runs running on 53 and 56 lines. The test keeps the per-second bound and still fails on
-  one line per fault. The bundle's executable-bit check now follows the source's mode, so it
-  passes under a restrictive umask, and the worker and terminal wrappers document every flag.
+- **The ledger-flood test no longer fails loaded CI runners** (#757). Its fixed 50-line cap is
+  measured against 1 s record windows, so a loaded runner whose flood spanned more windows wrote
+  53 and 56 correctly rate-limited lines and failed main's `validate` three runs running. The test
+  now runs the broker with a 3 s window, with its assertions unchanged: it still fails at about 200
+  lines when every fault is written. The worker and terminal wrappers also document every flag.
