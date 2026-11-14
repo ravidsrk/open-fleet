@@ -1751,10 +1751,38 @@ class RunArtifactsStayOutOfSearch(unittest.TestCase):
         self.assertEqual(artifacts, set())
         self.assertGreater(len(tracked - visible), 1000, "the rules no longer hide the artifacts")
 
+    def _gitignore_hidden(self, rel):
+        """Evaluate the FILE's own rules with gitignore semantics, independently of the model:
+        last matching rule wins, `!` re-includes, a trailing `/` matches directories only, and a
+        hidden directory hides everything below it."""
+        import fnmatch
+        parts = rel.split("/")[2:]
+        for depth in range(1, len(parts) + 1):
+            sub, is_dir, hidden = parts[:depth], depth < len(parts), False
+            for rule in self._rules():
+                negate, pattern = rule.startswith("!"), rule.lstrip("!")
+                if pattern.endswith("/") and not is_dir:
+                    continue
+                pieces = pattern.rstrip("/").split("/")
+                if len(pieces) == len(sub) and all(map(fnmatch.fnmatchcase, sub, pieces)):
+                    hidden = not negate
+            if hidden:
+                return True
+        return False
+
+    def test_the_files_rules_evaluate_to_the_model(self):
+        for path in self._tracked():
+            if any(part.startswith(".") for part in path.split("/")[2:]):
+                continue  # dotfiles: search tools skip them before any rule
+            with self.subTest(path=path):
+                self.assertEqual(not self._gitignore_hidden(path), self._visible(path))
+
     def test_ripgrep_applies_the_rules_as_modelled(self):
         # Where ripgrep is installed it must agree with the model, file by file, and without the
-        # ignore file the artifacts come back (the control). Without it, the model above stands.
+        # ignore file the artifacts come back (the control). Where it is not, the evaluator test
+        # above holds the same rules to the same model.
         if not shutil.which("rg"):
+            self.assertTrue(self._rules())
             return
         def listed(*extra):
             return set(subprocess.run(["rg", "--files", *extra, "docs/runs"], cwd=ROOT,

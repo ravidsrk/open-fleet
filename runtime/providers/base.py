@@ -170,11 +170,11 @@ def shell_launch_line(launch: dict[str, Any]) -> str:
     return f"cd {shlex.quote(str(cwd))} && {line}" if cwd else line
 
 
-# Spend ceiling for headless claude workers (#759). Every launch this module builds is
-# `claude -p`, where `--max-budget-usd` ends the session once its API cost passes the cap; the
-# coordinator sets the cap per dispatch by exporting this variable before spawn_worker.sh.
-# Unset means no cap (spawn_worker.sh refuses that when OPEN_FLEET_REQUIRE_BUDGET=1). Orca's own
-# interactive worker-start lane never comes through here: its bound is the dispatch timebox.
+# Spend ceiling for headless claude workers (#759). The argv this module builds is `claude -p`,
+# where `--max-budget-usd` ends the session once its API cost passes the cap; the coordinator sets
+# it per dispatch by exporting this variable before spawn_worker.sh. It reaches a worker only
+# where a runtime EXECUTES that argv (posix, worktrunk): the `command` label stays without it,
+# since an interactive (non -p) session ignores the flag. spawn_worker.sh names every other lane.
 MAX_BUDGET_ENV = "OPEN_FLEET_MAX_BUDGET_USD"
 _BUDGET_RE = re.compile(r"(?:0|[1-9][0-9]{0,5})(?:\.[0-9]{1,4})?")
 
@@ -183,7 +183,7 @@ def claude_budget_args(environ: dict[str, str] | None = None) -> list[str]:
     """`["--max-budget-usd", "<usd>"]` from OPEN_FLEET_MAX_BUDGET_USD, or [] when it is unset or
     empty. A value that is not a plain positive dollar amount is refused, never dropped: a typo
     must not launch a worker the coordinator believes is capped."""
-    raw = (os.environ if environ is None else environ).get(MAX_BUDGET_ENV, "").strip()
+    raw = (os.environ if environ is None else environ).get(MAX_BUDGET_ENV, "")
     if not raw:
         return []
     if not _BUDGET_RE.fullmatch(raw) or float(raw) <= 0:
@@ -241,8 +241,7 @@ def _build_harness_command(
                 argv.append(prompt_str)
             # `=`-joined and ending on the fixed-arity plan flag: --disallowedTools is variadic,
             # and a gt alias gets a prompt appended (emdash.py EMDASH_CLAUDE_RO_ARGS, #596).
-            cmd = " ".join(["claude", f"--disallowedTools={CLAUDE_RO_DISALLOWED_TOOLS}", *budget,
-                            "--permission-mode", "plan"])
+            cmd = f"claude --disallowedTools={CLAUDE_RO_DISALLOWED_TOOLS} --permission-mode plan"
         else:
             flag = "--dangerously-skip-permissions"
             argv = ["claude", "-p", "--dangerously-skip-permissions",
@@ -250,7 +249,7 @@ def _build_harness_command(
             argv += budget
             if prompt_str:
                 argv.append(prompt_str)
-            cmd = " ".join(["claude", "--dangerously-skip-permissions", *budget])
+            cmd = "claude --dangerously-skip-permissions"
         return {"agent": agent, "profile": profile, "argv": argv, "command": cmd, "env": env, "profile_flag": flag}
 
     if agent == "codex":

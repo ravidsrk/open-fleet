@@ -164,10 +164,12 @@
 #   ORCA_REQUIRE_DENY_HOOK    1 (hardened coordinator): an unset ORCA_DENY_HOOK_SETTINGS always
 #                             refuses, on every runtime, before any provider deferral or opt-out
 #   OPEN_FLEET_MAX_BUDGET_USD per-dispatch spend cap in dollars (e.g. 5 or 2.50) for a headless
-#                             claude worker: base.py appends `--max-budget-usd <usd>` on every
-#                             non-Orca runtime. Malformed → refused on every runtime. The Orca
-#                             launch lanes cannot carry it (NOTE); the dispatch timebox bounds those
-#   OPEN_FLEET_REQUIRE_BUDGET 1: a claude spawn with OPEN_FLEET_MAX_BUDGET_USD unset refuses (#759)
+#                             claude worker: `--max-budget-usd <usd>` on the posix and worktrunk
+#                             runtimes (they run base.py's argv), with no CLAUDE_CMD/WORKER_CMD
+#                             override. Any other runtime: a NOTE, and the dispatch timebox bounds
+#                             it. Malformed → refused on every runtime
+#   OPEN_FLEET_REQUIRE_BUDGET 1: a claude spawn the cap does not reach (unset, or a runtime that
+#                             cannot carry it) refuses (#759)
 #   ORCA_COORD_ALLOW_DANGER   must be 1 for PROFILE=danger (implies the above + ephemeral sandbox)
 #   ORCA_SANDBOX_RECIPE       PROFILE=danger only: the orca-per-workspace-env recipe id the lane
 #                             runs in. Required — the opt-in above is intent, this is evidence.
@@ -543,25 +545,36 @@ if [ "$ACTIVE_RUNTIME" = "openhands" ] && [ "$agent" != "openhands" ]; then
   echo "SPAWN=REFUSED task=${tname} the openhands runtime runs only its own OpenHands SDK agent: agent '${agent}' would start an OpenHands conversation, not ${agent} — pass the agent openhands" >&2
   exit 2
 fi
-# Spend ceiling (#759). base.py appends `--max-budget-usd <usd>` to every headless claude launch
-# it builds (every non-Orca runtime) when OPEN_FLEET_MAX_BUDGET_USD is set; the coordinator exports
-# it per dispatch. A malformed value refuses here on every runtime, so a typo never launches a
-# worker the coordinator believes is capped. OPEN_FLEET_REQUIRE_BUDGET=1 makes an unset cap a
-# refusal for a claude worker. Orca's own launch lanes cannot carry the flag (an interactive TUI
-# session has no spend cap), so there a set cap is a NOTE and the dispatch timebox is the bound.
+# Spend ceiling (#759). base.py appends `--max-budget-usd <usd>` to the `claude -p` argv it
+# builds when OPEN_FLEET_MAX_BUDGET_USD is set. Only the runtimes that EXECUTE that argv carry it:
+# posix and worktrunk, and only without a CLAUDE_CMD/WORKER_CMD override. Every other provider
+# starts claude through its own adapter (and Orca's lanes are interactive TUIs), so there a set
+# cap is a NOTE naming the runtime, never a silent claim. A malformed value refuses on every
+# runtime; OPEN_FLEET_REQUIRE_BUDGET=1 refuses a claude spawn the cap does not reach.
 _budget="${OPEN_FLEET_MAX_BUDGET_USD:-}"
+_budget_re='^(0|[1-9][0-9]{0,5})(\.[0-9]{1,4})?$'
 if [ -n "$_budget" ]; then
-  if ! printf '%s' "$_budget" | grep -Eqx '(0|[1-9][0-9]{0,5})(\.[0-9]{1,4})?' \
-      || [ -z "$(printf '%s' "$_budget" | tr -d '0.')" ]; then
-    echo "SPAWN=REFUSED task=${tname} OPEN_FLEET_MAX_BUDGET_USD='${_budget}' is not a positive dollar amount under 1000000 (digits, optional decimals, e.g. 5 or 2.50)" >&2
+  if ! [[ "$_budget" =~ $_budget_re ]] || [ -z "$(printf '%s' "$_budget" | tr -d '0.')" ]; then
+    echo "SPAWN=REFUSED task=${tname} OPEN_FLEET_MAX_BUDGET_USD is not a positive dollar amount under 1000000 (digits, optional decimals, e.g. 5 or 2.50)" >&2
     exit 2
   fi
-  if [ "$agent" = "claude" ] && [ "$ACTIVE_RUNTIME" = "orca" ]; then
-    echo "SPAWN=NOTE task=${tname} OPEN_FLEET_MAX_BUDGET_USD is not carried on the Orca launch lanes; the dispatch timebox bounds this worker" >&2
+fi
+if [ "$agent" = "claude" ]; then
+  _cap_reaches=0
+  case "$ACTIVE_RUNTIME" in
+    posix|worktrunk) [ -z "${CLAUDE_CMD:-}${WORKER_CMD:-}" ] && _cap_reaches=1 ;;
+  esac
+  if [ "${OPEN_FLEET_REQUIRE_BUDGET:-0}" = "1" ] && { [ -z "$_budget" ] || [ "$_cap_reaches" = "0" ]; }; then
+    if [ -z "$_budget" ]; then
+      echo "SPAWN=REFUSED task=${tname} no spend cap: OPEN_FLEET_REQUIRE_BUDGET=1 and OPEN_FLEET_MAX_BUDGET_USD is unset — export a per-dispatch dollar cap" >&2
+    else
+      echo "SPAWN=REFUSED task=${tname} no spend cap reaches this worker: OPEN_FLEET_REQUIRE_BUDGET=1, but the ${ACTIVE_RUNTIME} launch (or a CLAUDE_CMD/WORKER_CMD override) does not carry --max-budget-usd — use the posix or worktrunk runtime, or unset the requirement and bound it by the dispatch timebox" >&2
+    fi
+    exit 2
   fi
-elif [ "$agent" = "claude" ] && [ "${OPEN_FLEET_REQUIRE_BUDGET:-0}" = "1" ]; then
-  echo "SPAWN=REFUSED task=${tname} no spend cap: OPEN_FLEET_REQUIRE_BUDGET=1 and OPEN_FLEET_MAX_BUDGET_USD is unset — export a per-dispatch dollar cap" >&2
-  exit 2
+  if [ -n "$_budget" ] && [ "$_cap_reaches" = "0" ]; then
+    echo "SPAWN=NOTE task=${tname} OPEN_FLEET_MAX_BUDGET_USD is not carried on the ${ACTIVE_RUNTIME} launch (or an override); the dispatch timebox bounds this worker" >&2
+  fi
 fi
 # The parent profile a child must not exceed is the MOST restrictive of every source that
 # names one: the --parent-profile flag, the inherited OPEN_FLEET_PARENT_PROFILE /

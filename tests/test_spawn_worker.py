@@ -3839,9 +3839,10 @@ class TestOrcaRoNativeClaudeFallback(unittest.TestCase):
 
 
 class TestTheSpendCapReachesTheLaunch(unittest.TestCase):
-    """#759: OPEN_FLEET_MAX_BUDGET_USD becomes `--max-budget-usd` on every headless claude launch
-    base.py builds; a malformed cap refuses on every runtime; OPEN_FLEET_REQUIRE_BUDGET=1 refuses
-    a claude spawn without one; Orca's own lanes cannot carry it and say so."""
+    """#759: OPEN_FLEET_MAX_BUDGET_USD becomes `--max-budget-usd` in the `claude -p` argv base.py
+    builds, which only the posix and worktrunk runtimes execute. Every other lane says the cap is
+    not carried; a malformed cap refuses on every runtime; OPEN_FLEET_REQUIRE_BUDGET=1 refuses a
+    claude spawn the cap does not reach."""
 
     RW = {"ORCA_COORD_ALLOW_AUTONOMOUS_WRITE": "1"}
 
@@ -3851,11 +3852,10 @@ class TestTheSpendCapReachesTheLaunch(unittest.TestCase):
                     mock.patch.dict(os.environ, {"OPEN_FLEET_MAX_BUDGET_USD": "2.50"}):
                 launch = provider_base.build_harness_command("claude", profile, "/tmp/w", "the task")
                 self.assertEqual(launch["argv"][-3:], ["--max-budget-usd", "2.50", "the task"])
-                self.assertIn("--max-budget-usd 2.50", launch["command"])
-        with mock.patch.dict(os.environ, {"OPEN_FLEET_MAX_BUDGET_USD": "2"}):
-            ro = provider_base.build_harness_command("claude", "ro", "/tmp/w", None)
-        # A gt alias appends the prompt to the label, so it must still end on the plan flag.
-        self.assertTrue(ro["command"].endswith("--permission-mode plan"), ro["command"])
+                self.assertIn("-p", launch["argv"])
+                # The label is an interactive command (gastown's alias, superset's record), where
+                # the flag does nothing: it must not claim a cap.
+                self.assertNotIn("--max-budget-usd", launch["command"])
 
     def test_base_py_without_a_cap_launches_exactly_as_before(self):
         env = {k: v for k, v in os.environ.items() if k != "OPEN_FLEET_MAX_BUDGET_USD"}
@@ -3865,12 +3865,12 @@ class TestTheSpendCapReachesTheLaunch(unittest.TestCase):
         self.assertEqual(launch["command"], "claude --dangerously-skip-permissions")
 
     def test_base_py_refuses_a_cap_it_cannot_honour(self):
-        for bad in ("0", "0.00", "-1", "5e3", "1,5", "abc", "1000000", "05"):
+        for bad in ("0", "0.00", "-1", "5e3", "1,5", "abc", "1000000", "05", " 7 ", "5\nfoo"):
             with self.subTest(value=bad):
                 with self.assertRaises(provider_base.ProviderError) as ctx:
                     provider_base.claude_budget_args({"OPEN_FLEET_MAX_BUDGET_USD": bad})
                 self.assertEqual(ctx.exception.code, "invalid_budget")
-        self.assertEqual(provider_base.claude_budget_args({"OPEN_FLEET_MAX_BUDGET_USD": " 7 "}),
+        self.assertEqual(provider_base.claude_budget_args({"OPEN_FLEET_MAX_BUDGET_USD": "7"}),
                          ["--max-budget-usd", "7"])
         self.assertEqual(provider_base.claude_budget_args({}), [])
 
@@ -3884,17 +3884,19 @@ class TestTheSpendCapReachesTheLaunch(unittest.TestCase):
         self.assertIn("--max-budget-usd 3", launch)
 
     def test_a_malformed_cap_refuses_on_every_runtime(self):
-        for bad in ("0", "5e3", "ten"):
+        for bad in ("0", "5e3", "ten", "5\nfoo", " 7"):
             with self.subTest(runtime="posix", value=bad):
                 rc, _launch, err = run_launch("claude", "rw",
                                               {**self.RW, "OPEN_FLEET_MAX_BUDGET_USD": bad})
                 self.assertEqual(rc, 2, err)
                 self.assertIn("SPAWN=REFUSED", err)
                 self.assertIn("not a positive dollar amount", err)
-        rc, _out, err = run_spawn(["task_test", "path:/tmp/wt", "t", "claude"],
-                                  env_extra={"OPEN_FLEET_MAX_BUDGET_USD": "0"})
-        self.assertEqual(rc, 2, err)
-        self.assertIn("not a positive dollar amount", err)
+        for bad in ("0", "5\nfoo"):
+            with self.subTest(runtime="orca", value=bad):
+                rc, _out, err = run_spawn(["task_test", "path:/tmp/wt", "t", "claude"],
+                                          env_extra={"OPEN_FLEET_MAX_BUDGET_USD": bad})
+                self.assertEqual(rc, 2, err)
+                self.assertIn("not a positive dollar amount", err)
 
     def test_require_refuses_an_uncapped_claude_spawn_and_only_that(self):
         rc, _launch, err = run_launch("claude", "rw", {**self.RW, "OPEN_FLEET_REQUIRE_BUDGET": "1"})
@@ -3919,8 +3921,42 @@ class TestTheSpendCapReachesTheLaunch(unittest.TestCase):
                                env=env, capture_output=True, text=True)
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn("SPAWN=NOTE", p.stderr)
-        self.assertIn("not carried on the Orca launch lanes", p.stderr)
+        self.assertIn("not carried on the orca launch", p.stderr)
         self.assertIn("LAUNCH=claude --permission-mode plan", p.stdout)
+
+    def test_a_runtime_that_cannot_carry_the_cap_says_so_and_require_refuses_it(self):
+        # emdash starts claude through its own adapter, so the argv base.py builds never runs
+        # there: the review's case, where REQUIRE passed because a cap was SET, not carried.
+        for runtime in ("emdash", "superset", "gastown"):
+            with self.subTest(runtime=runtime):
+                rc, _launch, err = run_launch("claude", "rw", {
+                    **self.RW, "OPEN_FLEET_RUNTIME": runtime, "OPEN_FLEET_REQUIRE_BUDGET": "1",
+                    "OPEN_FLEET_MAX_BUDGET_USD": "5"})
+                self.assertEqual(rc, 2, err)
+                self.assertIn("no spend cap reaches this worker", err)
+                _rc, _launch, err = run_launch("claude", "rw", {
+                    **self.RW, "OPEN_FLEET_RUNTIME": runtime, "OPEN_FLEET_MAX_BUDGET_USD": "5"})
+                self.assertIn(f"not carried on the {runtime} launch", err)
+
+    def test_an_override_command_does_not_carry_the_cap(self):
+        rc, _launch, err = run_launch("claude", "rw", {
+            **self.RW, "WORKER_CMD": "claude", "OPEN_FLEET_REQUIRE_BUDGET": "1",
+            "OPEN_FLEET_MAX_BUDGET_USD": "5"})
+        self.assertEqual(rc, 2, err)
+        self.assertIn("no spend cap reaches this worker", err)
+
+    def test_worktrunk_carries_the_cap_like_posix(self):
+        # The gate runs on worktrunk (an unset cap refuses there) ...
+        rc, _launch, err = run_launch("claude", "rw", {
+            **self.RW, "OPEN_FLEET_RUNTIME": "worktrunk", "OPEN_FLEET_REQUIRE_BUDGET": "1"})
+        self.assertEqual(rc, 2, err)
+        self.assertIn("OPEN_FLEET_MAX_BUDGET_USD is unset", err)
+        # ... and a set cap passes it, because worktrunk runs base.py's argv.
+        rc, _launch, err = run_launch("claude", "rw", {
+            **self.RW, "OPEN_FLEET_RUNTIME": "worktrunk", "OPEN_FLEET_REQUIRE_BUDGET": "1",
+            "OPEN_FLEET_MAX_BUDGET_USD": "5"})
+        self.assertNotIn("no spend cap", err)
+        self.assertNotIn("not carried", err)
 
 
 if __name__ == "__main__":

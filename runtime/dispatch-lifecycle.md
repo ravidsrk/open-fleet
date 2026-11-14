@@ -50,8 +50,8 @@ The runtime enforces this. Every mission's preamble says:
   (`cli/specs/orchestration.ts:49`).
 - A worker runs `check --terminal <its own handle>` at checkpoints and once before `worker_done`. A `consumer_fenced` from that check means **stop**: it no
   longer owns its Dispatch and must not send `worker_done` (`orchestration/worker-contract:40-51`).
-- **A budget: a timebox and a partial-report STOP** — past it with no `worker_done`, report green / remaining / exact SHAs and stop. Off Orca, cap
-  claude spend per dispatch (`OPEN_FLEET_MAX_BUDGET_USD`). Past its STOP with no report a worker is STUCK: run worker-supervision.md's ladder (#759).
+- **A budget: a timebox and a partial-report STOP** — past it with no `worker_done`, report green / remaining / exact SHAs and stop. On posix or worktrunk,
+  cap claude spend per dispatch (`OPEN_FLEET_MAX_BUDGET_USD`). Past its STOP with no report a worker is STUCK: run worker-supervision.md's ladder (#759).
 
 ## Worktree lineage: a subtree per unit
 

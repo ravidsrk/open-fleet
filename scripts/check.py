@@ -27,8 +27,10 @@ if (__name__ == "__main__" and not getattr(sys.flags, "safe_path", False) and sy
     del sys.path[0]
 
 import argparse
+import contextlib
 import os
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -66,18 +68,21 @@ def run_steps(steps, cwd=ROOT, out=sys.stdout):
     status one of PASS / FAIL / SKIPPED, in the order given."""
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
     started = {}
+    done = {}
     with tempfile.TemporaryDirectory(prefix="open-fleet-check-") as logs:
-        for idx, (name, argv) in enumerate(steps):
-            if argv is None:
-                continue
-            log = open(Path(logs) / f"{idx}.log", "w+", encoding="utf-8", errors="replace")
-            proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
-                                    stdout=log, stderr=subprocess.STDOUT)
-            started[idx] = (proc, log, time.monotonic())
-        # Poll, so each step is timed and reported when IT finishes, not when its turn comes.
-        done = {}
-        pending = dict(started)
         try:
+            for idx, (name, argv) in enumerate(steps):
+                if argv is None:
+                    continue
+                log = open(Path(logs) / f"{idx}.log", "w+", encoding="utf-8", errors="replace")
+                # Each step leads its own process group: a shard runs unittest as a CHILD, so
+                # killing the shard alone would orphan the suite (and its git fixtures).
+                proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                                        stdout=log, stderr=subprocess.STDOUT,
+                                        start_new_session=True)
+                started[idx] = (proc, log, time.monotonic())
+            # Poll, so each step is timed and reported when IT finishes, not when its turn comes.
+            pending = dict(started)
             while pending:
                 for idx, (proc, log, t0) in list(pending.items()):
                     rc = proc.poll()
@@ -94,8 +99,14 @@ def run_steps(steps, cwd=ROOT, out=sys.stdout):
                 if pending:
                     time.sleep(0.2)
         finally:
-            for proc, log, _ in pending.values():  # interrupted: leave no shard running
-                proc.kill()
+            # Interrupted (Ctrl-C, SIGTERM via main's handler, an error mid-start): kill every
+            # unfinished step's whole group, so no shard or suite outlives this command.
+            for idx, (proc, log, _) in started.items():
+                if idx in done:
+                    continue
+                if proc.poll() is None:
+                    with contextlib.suppress(ProcessLookupError, PermissionError):
+                        os.killpg(proc.pid, signal.SIGKILL)
                 proc.wait()
                 log.close()
         results = []
@@ -139,6 +150,11 @@ def main(argv=None):
             print(f"{name}: {' '.join(cmd) if cmd else 'SKIPPED (not installed)'}")
         return 0
     t0 = time.monotonic()
+
+    def _terminate(signum, _frame):  # SIGTERM runs run_steps' cleanup, like Ctrl-C does
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, _terminate)
     results = run_steps(steps)
     rc = report(results, args.strict)
     print(f"check: {time.monotonic() - t0:.0f}s wall", flush=True)
