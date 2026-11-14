@@ -3,7 +3,7 @@
 [Documentation](../README.md) · [Mission selector](README.md#choose-by-task) · [Prompt recipes](../recipes.md)
 
 > **Autonomy:** L4 (Osmani L0-L5, parallel delegation) — parallel diagnose/fix workers, one flake each, ratcheted to a streak; you own the one-way doors.
-> **Activation load:** ~29,400 tokens — this SKILL.md plus every playbook and runtime doc its Composes/rides clause makes mandatory, about 15% of a 200k-token context before the first dispatch ([why it is measured](../../ARCHITECTURE.md#instruction-budget))
+> **Activation load:** ~29,600 tokens — this SKILL.md plus every playbook and runtime doc its Composes/rides clause makes mandatory, about 15% of a 200k-token context before the first dispatch ([why it is measured](../../ARCHITECTURE.md#instruction-budget))
 > **Proof:** doctrine-only — it ran once, in the 2026-09-16 self-test campaign ([FIXED-LOCAL](../runs/campaign-2026-09-16-deflake-it/), CI leg owed), recorded history rather than a promotion bid; the protocol is mechanism, not yet field-proven.
 
 > Give it a suite nobody trusts. Come back to one that has passed a declared consecutive-green

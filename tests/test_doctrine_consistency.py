@@ -409,5 +409,43 @@ class GuidesMatchTheLoadSchedule(unittest.TestCase):
         self.assertIn("dormant by default", text)
 
 
+class EveryMissionLoadsTheDispatchBudget(unittest.TestCase):
+    """#759: the per-dispatch timebox + partial-report STOP lived only in worker-supervision.md,
+    which 1 of 22 missions loaded, so in the other 21 a worker alive but wedged inside one hung
+    call was an open-ended wait (liveness-resume.md: absence authorizes nothing). The rule now
+    sits in docs every mission loads at activation: dispatch-lifecycle.md (the worker contract)
+    and liveness-resume.md (for the missions that ride it instead)."""
+
+    RULE = "timebox and a partial-report stop"
+
+    @staticmethod
+    def flat(text):
+        return " ".join(text.split()).lower()
+
+    def test_the_rule_is_stated_where_the_missions_load_it(self):
+        for rel in ("runtime/dispatch-lifecycle.md", "runtime/liveness-resume.md",
+                    "runtime/worker-supervision.md"):
+            with self.subTest(doc=rel):
+                self.assertIn(self.RULE, self.flat((ROOT / rel).read_text(encoding="utf-8")))
+
+    def test_the_rule_points_at_the_stuck_but_alive_ladder(self):
+        for rel in ("runtime/dispatch-lifecycle.md", "runtime/liveness-resume.md"):
+            with self.subTest(doc=rel):
+                self.assertIn("worker-supervision.md", (ROOT / rel).read_text(encoding="utf-8"))
+
+    def test_every_mission_activates_with_the_rule_in_context(self):
+        missions = sorted(d for d in (ROOT / "skills").iterdir()
+                          if d.is_dir() and not d.name.startswith((".", "_")))
+        self.assertEqual(len(missions), 22)
+        for skill_dir in missions:
+            _tokens, parts = validate.transitive_load(skill_dir)
+            carriers = [rel for rel in parts
+                        if self.RULE in self.flat((ROOT / rel).read_text(encoding="utf-8"))]
+            with self.subTest(mission=skill_dir.name):
+                self.assertTrue(carriers, "no doc this mission loads at activation states the "
+                                          "per-dispatch timebox; ride dispatch-lifecycle or "
+                                          "liveness-resume")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

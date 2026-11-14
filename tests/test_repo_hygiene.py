@@ -1692,5 +1692,95 @@ class TheTrailerCheckRunsOnEveryPullRequest(unittest.TestCase):
         self.assertIn("    if: always()", jobs["gates"], "a red checks job would skip gates")
 
 
+class RunArtifactsStayOutOfSearch(unittest.TestCase):
+    """docs/runs/ holds about three quarters of the tracked files, and before #761 a search for
+    `verify.py` landed 358 of its 608 hits in frozen run artifacts. docs/runs/.ignore hides the
+    artifacts from ripgrep-style search tools (and the agents that use them) while every run
+    report and index row stays searchable. git never reads `.ignore`, so nothing that binds or
+    hashes an artifact can be affected by it."""
+
+    IGNORE = ROOT / "docs" / "runs" / ".ignore"
+
+    def _rules(self):
+        return [ln.strip() for ln in self.IGNORE.read_text(encoding="utf-8").splitlines()
+                if ln.strip() and not ln.lstrip().startswith("#")]
+
+    def test_the_rules_hide_artifacts_and_keep_reports_and_the_index(self):
+        # Order matters: the negations must come after the rule they carve out of.
+        self.assertEqual(self._rules(), ["*/*", "!*/*.md", "!index/*"])
+
+    def test_git_still_tracks_every_run_artifact(self):
+        for rel in ("docs/runs/.ignore", "docs/runs/2026-10-25-wip-curve-604-live/report.json",
+                    "docs/runs/index/2026-07-13-clean-sweep-self-run.json"):
+            r = subprocess.run(["git", "check-ignore", "-q", rel], cwd=ROOT)
+            with self.subTest(path=rel):
+                self.assertEqual(r.returncode, 1, "a .gitignore rule now hides it from git")
+
+    def test_no_binding_tool_reads_the_search_ignore_file(self):
+        for rel in ("scripts/bind_check.py", "runtime/scripts/run_report.py",
+                    "scripts/run_index.py"):
+            src = (ROOT / rel).read_text(encoding="utf-8")
+            with self.subTest(tool=rel):
+                self.assertNotRegex(src, r"[\"']rg[\"']|ripgrep|\.ignore\b")
+
+    @staticmethod
+    def _visible(rel):
+        """What the three rules leave visible, by gitignore semantics, for a path under docs/runs:
+        `*/*` hides everything below a run directory, `!*/*.md` and `!index/*` re-include one
+        level only (a hidden directory's contents stay hidden)."""
+        parts = rel.split("/")[2:]
+        if any(part.startswith(".") for part in parts):  # search tools skip dotfiles by default
+            return False
+        if len(parts) == 1:
+            return True
+        return len(parts) == 2 and (parts[1].endswith(".md") or parts[0] == "index")
+
+    def _tracked(self):
+        return set(subprocess.run(["git", "ls-files", "docs/runs"], cwd=ROOT, capture_output=True,
+                                  text=True, check=True).stdout.split())
+
+    def test_reports_and_the_index_stay_visible_and_artifacts_do_not(self):
+        tracked = self._tracked()
+        visible = {p for p in tracked if self._visible(p)}
+        reports = {p for p in tracked if p.endswith(".md") and p.count("/") <= 3}
+        index = {p for p in tracked if p.startswith("docs/runs/index/")}
+        self.assertTrue(reports and index)
+        self.assertLessEqual(reports | index, visible)
+        artifacts = {p for p in visible if not p.endswith(".md")
+                     and not p.startswith("docs/runs/index/") and p.count("/") > 2}
+        self.assertEqual(artifacts, set())
+        self.assertGreater(len(tracked - visible), 1000, "the rules no longer hide the artifacts")
+
+    def test_ripgrep_applies_the_rules_as_modelled(self):
+        # Where ripgrep is installed it must agree with the model, file by file, and without the
+        # ignore file the artifacts come back (the control). Without it, the model above stands.
+        if not shutil.which("rg"):
+            return
+        def listed(*extra):
+            return set(subprocess.run(["rg", "--files", *extra, "docs/runs"], cwd=ROOT,
+                                      stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                      timeout=120, check=True).stdout.split())
+        tracked = self._tracked()
+        visible = listed() & tracked
+        self.assertEqual(visible, {p for p in tracked if self._visible(p)})
+        self.assertGreater(len(listed("--no-ignore-dot") - listed()), 1000)
+
+
+class TheWorkerWrappersDocumentEveryParameter(unittest.TestCase):
+    """The coordinator learns these tools from `--help`. A bare `--source SOURCE` told it nothing
+    about what `transcript` certifies or what a cursor is (agent audit, check T2)."""
+
+    def test_every_argument_carries_help(self):
+        for rel in ("runtime/scripts/worker_ops.py", "runtime/scripts/terminal_ops.py"):
+            tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
+            calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                     and isinstance(n.func, ast.Attribute) and n.func.attr == "add_argument"]
+            self.assertTrue(calls, rel)
+            for call in calls:
+                flag = call.args[0].value if call.args and isinstance(call.args[0], ast.Constant) else "?"
+                with self.subTest(tool=rel, flag=flag):
+                    self.assertIn("help", [kw.arg for kw in call.keywords])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3,7 +3,7 @@
 [Documentation](../README.md) · [Mission selector](README.md#choose-by-task) · [Prompt recipes](../recipes.md)
 
 > **Autonomy:** L4 (Osmani L0-L5, parallel delegation) — parallel scan and deepen waves behind a pinned characterization net; bounding the target surface and any API-break are your gates.
-> **Activation load:** ~31,600 tokens — this SKILL.md plus every playbook and runtime doc its Composes/rides clause makes mandatory, about 16% of a 200k-token context before the first dispatch ([why it is measured](../../ARCHITECTURE.md#instruction-budget))
+> **Activation load:** ~31,700 tokens — this SKILL.md plus every playbook and runtime doc its Composes/rides clause makes mandatory, about 16% of a 200k-token context before the first dispatch ([why it is measured](../../ARCHITECTURE.md#instruction-budget))
 > **Proof:** doctrine-only — its 2026-09-16 self-test campaign run ([PARKED at CONFIRM-SURFACE](../runs/campaign-2026-09-16-reshape-it/)) and the [unpark](../runs/2026-09-16-reshape-it-unpark/) that followed claim no tier; the protocol is mechanism, not yet field-proven.
 
 > Point it at the codebase where every change touches twelve imports. Come back to hot modules
