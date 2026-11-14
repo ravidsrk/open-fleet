@@ -1,0 +1,89 @@
+{
+  "skill_name": "deflake-it",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Kill the flaky tests in CI.",
+      "expected_output": "Should route to deflake-it. Should detect flakes by repeat-run + CI retry history, diagnose by raising the failure rate, fix the root cause, ratchet red-by-revert, and prove a consecutive-green streak local AND CI.",
+      "assertions": [
+        "Routes to deflake-it",
+        "Detects via repeat-run + CI retry history",
+        "Diagnoses by raising failure rate, not theorizing",
+        "Uses red-by-revert ratchet",
+        "Requires local AND CI green streak"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 2,
+      "prompt": "Just wrap the flaky tests in a retry(3) helper.",
+      "expected_output": "Should reject retry-wrappers as a fix. Should explain that retry(n) hides flakes and poisons the signal. The fix must address the root cause.",
+      "assertions": [
+        "Rejects retry(n) / --rerun-failures as the fix",
+        "Explains that retry hides flakes",
+        "Requires root-cause fix"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 3,
+      "prompt": "Why does this one test fail once a week in production?",
+      "expected_output": "Should NOT route to deflake-it. A single hard intermittent bug without a suite-rate contract is root-cause. deflake-it needs a statistical streak contract across a suite.",
+      "assertions": [
+        "Does not route to deflake-it",
+        "Routes to root-cause",
+        "Cites missing suite-rate contract"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 4,
+      "prompt": "tests/test_cache.py::test_expiry fails about one run in twenty. Just wrap it in a retry(3) helper so CI goes green.",
+      "expected_output": "Should refuse retry(3) as the fix: a retry wrapper hides the flake and poisons the signal, and the mission grep-checks for it. Should build a loop that raises the failure rate, name the class (real time: a 40 ms sleep against a 50 ms TTL), and route a root-cause fix with a red-by-revert ratchet. The flaky test is neither deleted nor skipped, and no retry or rerun wrapper or rerun config appears anywhere.",
+      "assertions": [
+        "Rejects retry(3) as the fix and explains that a retry hides the flake",
+        "Raises the failure rate with a loop before naming the cause",
+        "Names the real-time / too-tight-timing class as the root cause"
+      ],
+      "files": [
+        {
+          "path": "src/cache.py",
+          "content": "import time\n\n_store = {}\n\n\ndef put(key, value, ttl):\n    _store[key] = (value, time.time() + ttl)\n\n\ndef get(key):\n    value, expires = _store.get(key, (None, 0))\n    return value if time.time() < expires else None\n"
+        },
+        {
+          "path": "tests/test_cache.py",
+          "content": "import time\nimport unittest\n\nfrom src import cache\n\n\nclass Expiry(unittest.TestCase):\n    def test_expiry(self):\n        cache.put(\"k\", \"v\", ttl=0.05)\n        time.sleep(0.04)\n        self.assertEqual(cache.get(\"k\"), \"v\")\n"
+        },
+        {
+          "path": "pytest.ini",
+          "content": "[pytest]\naddopts = -q\n"
+        }
+      ],
+      "workspace_state": [
+        {
+          "glob": "**/*.py",
+          "not_matches": "(?i)\\bretry\\s*\\(|@\\s*retry\\b|@\\s*flaky\\b|\\breruns\\s*=",
+          "why": "retry-wrappers as fixes are banned and grep-checked: in a test, in the code under test or in a root conftest.py it is the same wrapper (a venv's vendored packages are not the case's tree)"
+        },
+        {
+          "path": "pytest.ini",
+          "not_matches": "(?i)rerun",
+          "why": "--reruns in the runner config is the same wrapper one level up"
+        },
+        {
+          "path": "tests/test_cache.py",
+          "matches": "def test_expiry\\b",
+          "why": "deleting the flaky test is not a fix; only a human-approved quarantine removes it"
+        },
+        {
+          "path": "tests/test_cache.py",
+          "not_matches": "(?i)\\bskip",
+          "why": "skipping the flaky test hides it the same way a retry does"
+        }
+      ]
+    }
+  ]
+}

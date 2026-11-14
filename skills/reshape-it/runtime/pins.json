@@ -1,0 +1,57 @@
+{
+  "_about": "Upstream sources the missions execute against, pinned by commit and witness date (issue #271). tests/test_pins.py requires an entry for every pack a SKILL.md compatibility: field names. witness: 'source' means the pin was read from a full-history clone of the upstream at that commit, not from a release note; 'live' means the mechanism claims were re-witnessed against a real binary in a pin-it run — normally the INSTALLED one; when the pin advances ahead of the app on PATH, `witness_binary` names the exact artifact witnessed and `onpath_at_witness` what PATH then ran, and spawn_worker.sh's drift note says 'update the app', never 're-run a completed pin' (the commit then records what that build reports, which may sit on a pre-release line rather than at the named tag — see docs/runs/2026-09-13-pin-it-266/). Ownership: pin-it re-witnesses the `orca` entry against the installed binary; the pack pins (gstack, addyosmani, mattpocock) are re-witnessed by the upstream-adoption audit cadence (docs/research/2026-09-10-upstream-audit/), not by pin-it, whose SKILL scopes to runtime mechanics (#377). Pack pins should be re-witnessed whenever an audit runs or an adopted skill changes upstream (#378). The human-readable pin record — upstream URL, diff summary, re-pin cadence, owner, next trigger — is runtime/orca-pin.md. A 'source' re-pin that audits only the release delta carries the last live replay it stands on as `live_receipts` {version, witnessed, run}; release gate 5 accepts that only when the run record exists under docs/runs/ and the live date is fresh (2026-10-23 review, P2-41). `orca.next_review` (YYYY-MM-DD) is the dated quarterly re-pin trigger orca-pin.md states as 'Next trigger': `upstream_probe.py review-date` exits 3 on or after it and the weekly upstream-drift workflow files the issue, so no standing issue carries the cadence (#508).",
+  "orca": {
+    "repo": "stablyai/orca",
+    "commit": "47f77cf7018ebc0d046b82c6dde31cf704909162",
+    "version": "v1.4.239",
+    "witnessed": "2026-10-26",
+    "witness": "source",
+    "next_review": "2027-01-26",
+    "live_receipts": {
+      "version": "v1.4.239",
+      "witnessed": "2026-10-26",
+      "run": "docs/runs/2026-10-26-pin-it-239.md"
+    },
+    "aliases": [
+      "orca",
+      "stablyai/orca"
+    ],
+    "witness_binary": "tag v1.4.239 source delta vs v1.4.238 + live receipts from the installed Orca.app + CLI 1.4.239 macOS arm64 (help, agent-context and guide capture; the #680 ro/claude worker witness)",
+    "onpath_at_witness": "1.4.239"
+  },
+  "gstack": {
+    "repo": "garrytan/gstack",
+    "commit": "d258bcffb0cb7bda5f133f3e957f932d816d282f",
+    "version": "v1.91.121.0",
+    "witnessed": "2026-10-17",
+    "witness": "source",
+    "aliases": [
+      "gstack",
+      "garrytan/gstack"
+    ]
+  },
+  "addyosmani": {
+    "repo": "addyosmani/agent-skills",
+    "commit": "aeac41d4d005999432bb7312f7ff06383a91d59d",
+    "version": "0.6.13",
+    "witnessed": "2026-10-17",
+    "witness": "source",
+    "aliases": [
+      "addyosmani",
+      "addy",
+      "addyosmani/agent-skills"
+    ]
+  },
+  "mattpocock": {
+    "repo": "mattpocock/skills",
+    "commit": "49dd158d1076134a641b33efb035946536778336",
+    "version": "v1.3.1+35",
+    "witnessed": "2026-10-17",
+    "witness": "source",
+    "aliases": [
+      "mattpocock",
+      "matt",
+      "mattpocock/skills"
+    ]
+  }
+}

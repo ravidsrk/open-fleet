@@ -1,0 +1,77 @@
+{
+  "skill_name": "prove-it",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Close the test gap on the money, auth, and data paths.",
+      "expected_output": "Should route to prove-it. Should map the critical surface (coverage \u00d7 call-graph), write characterization tests asserting real behavior, prove each with a behavior-changing, harness-preserving mutation that fails the targeted assertion while the harness still runs, and loop until COVERED.",
+      "assertions": [
+        "Routes to prove-it",
+        "Maps critical surface, not all code",
+        "Writes characterization tests for real behavior",
+        "Uses a behavior-changing, harness-preserving mutation as proof, recorded as the manifest's negative_control",
+        "Mutation fails the targeted assertion while harness runs"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 2,
+      "prompt": "Get us to 100% code coverage.",
+      "expected_output": "Should NOT accept coverage percent as the goal. Should state that the mission is mutation-audited coverage of the confirmed critical surface, not a percentage. Chasing 100% with tautological asserts is an anti-pattern.",
+      "assertions": [
+        "Does not accept 100% coverage as the goal",
+        "States pass criterion is mutation-audit set",
+        "Mentions tautological-assert anti-pattern",
+        "Scopes to confirmed critical surface"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 3,
+      "prompt": "The flaky tests keep failing.",
+      "expected_output": "Should NOT route to prove-it. Flake eradication to a statistical streak contract is deflake-it. prove-it creates tests for existing untested paths, not intermittent failures.",
+      "assertions": [
+        "Does not route to prove-it",
+        "Routes to deflake-it",
+        "Distinguishes test-gap coverage from flake eradication"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 4,
+      "prompt": "Get src/refund.py to 100% test coverage.",
+      "expected_output": "Should not accept the percentage as the goal: the pass criterion is a mutation-audited test on each confirmed critical path, not 100% with tautological asserts. Characterizing refund() surfaces a bug (the docstring says a refund is never negative; the code returns amount - fee), which goes to the surfaced-bug loop, fixed with a test or parked, and is never asserted as correct behaviour.",
+      "assertions": [
+        "Rejects 100% coverage as the goal in favour of mutation-audited tests on the critical path",
+        "Treats the negative refund as a surfaced bug rather than pinning it as expected behaviour",
+        "Proves each test with a behavior-changing mutation that fails its assertion"
+      ],
+      "files": [
+        {
+          "path": "src/refund.py",
+          "content": "def refund(amount: int, fee: int) -> int:\n    \"\"\"Refund in cents: the amount minus the processing fee, never negative.\"\"\"\n    return amount - fee\n"
+        }
+      ],
+      "workspace_state": [
+        {
+          "glob": "**/*.py",
+          "not_matches": "assert\\w*\\([^\\n]*,\\s*-\\s*\\d|\\bassert\\s[^\\n]*==\\s*-\\s*\\d",
+          "why": "asserting a negative refund pins the surfaced bug as correct behaviour"
+        },
+        {
+          "glob": "**/*.py",
+          "not_matches": "\\bassert(True)?\\(\\s*True\\s*\\)|\\bassert\\s+True\\b",
+          "why": "a tautological assert buys coverage percent and proves nothing"
+        },
+        {
+          "path": "src/refund.py",
+          "matches": "\"\"\"Refund in cents: the amount minus the processing fee, never negative\\.\"\"\"",
+          "why": "the documented contract is the expected value; rewriting it to fit the code hides the bug"
+        }
+      ]
+    }
+  ]
+}

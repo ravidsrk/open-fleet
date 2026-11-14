@@ -1,0 +1,95 @@
+{
+  "skill_name": "modernize-it",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Update all dependencies and get off old majors.",
+      "expected_output": "Should route to modernize-it. Should inventory outdated deps + advisories, triage by reachability, order by compatibility graph, upgrade one dep or coherent group per PR with CI green, and re-inventory until CURRENT or CURRENT-WITH-PINNED.",
+      "assertions": [
+        "Routes to modernize-it",
+        "Mentions inventory + reachability triage",
+        "Mentions compatibility graph ordering",
+        "Upgrades one dep or coherent group per PR",
+        "Requires CI green at every merge"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 2,
+      "prompt": "Migrate the ORM from Sequelize to Prisma.",
+      "expected_output": "Should route to modernize-it for the dependency/framework surface. If the migration forces a stateful DB schema/data change across deploys, modernize-it should hand that off to migrate-it with a phase brief, not run it inside the currency loop; migrate-it places the upgrade between expand and contract.",
+      "assertions": [
+        "Routes to modernize-it for framework currency",
+        "Reads changelogs, not just version deltas",
+        "Hands off stateful cross-deploy DB migration to migrate-it",
+        "Does not run cross-deploy migration inside currency loop"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 3,
+      "prompt": "Fix every CVE found by npm audit.",
+      "expected_output": "Should route to modernize-it for dependency advisories. harden-it is for exploit proof / adversarial security loop, not routine advisory patching. modernize-it must verify reachability and never use audit fix --force.",
+      "assertions": [
+        "Routes to modernize-it",
+        "Does not route to harden-it for routine advisories",
+        "Verifies advisory reachability",
+        "Never recommends audit fix --force"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 4,
+      "prompt": "ADVISORY.md flags requests. Fix every advisory and get our dependencies current.",
+      "expected_output": "Should triage the requests advisory as reachable (app/client.py calls it) and upgrade requests to a fixed release as a security-critical unit, reading its changelog. Django 5.2 is the LTS line SUPPORT.md commits to, and a still-supported older major is CURRENT, so it is not mass-bumped to 6.x alongside; any major is its own PR with its changelog read, and nothing is done audit-fix---force style.",
+      "assertions": [
+        "Checks the advisory's reachability before ordering the work",
+        "Records the project's support policy (SUPPORT.md) as the 'current supported' authority",
+        "Does not mass-bump every dependency to its latest major"
+      ],
+      "files": [
+        {
+          "path": "requirements.txt",
+          "content": "django==5.2.6\nrequests==2.31.0\n"
+        },
+        {
+          "path": "SUPPORT.md",
+          "content": "# Support policy\n\nDjango tracks the current LTS line (5.2) only; we move when the next LTS ships.\n"
+        },
+        {
+          "path": "ADVISORY.md",
+          "content": "# Advisory report\n\n- ADV-1 (requests < 2.32.4): crafted URLs can leak .netrc credentials to a third party. Fixed in 2.32.4.\n"
+        },
+        {
+          "path": "app/client.py",
+          "content": "import requests\n\n\ndef fetch(url):\n    return requests.get(url, timeout=10).json()\n"
+        }
+      ],
+      "workspace_state": [
+        {
+          "path": "requirements.txt",
+          "matches": "(?im)^django\\s*(?:(?:==|~=)\\s*5\\.2\\b|>=\\s*5\\.2(?:\\.\\d+)*[ \\t]*,[ \\t]*(?:<=?[ \\t]*5(?:\\.\\d+)*|<[ \\t]*6(?:\\.0+)*)(?![\\d.]))",
+          "why": "5.2 is the still-supported LTS the project's policy names: CURRENT, not a candidate for a mass bump to 6.x. == and ~= on 5.2 keep 6.x out; a >= floor passes only beside an upper bound below 6, since a bare floor resolves to 6.x"
+        },
+        {
+          "path": "requirements.txt",
+          "matches": "(?im)^\\s*requests(?:\\[[^\\]]*\\])?\\s*(?:==|>=|~=)\\s*(?:2\\.32\\.(?:[4-9]|[1-9]\\d+)|2\\.(?:3[3-9]|[4-9]\\d|[1-9]\\d{2,})(?:\\.\\d+)?|(?:[3-9]|[1-9]\\d+)(?:\\.\\d+){0,2})(?=[ \\t]*(?:[,;#]|$))",
+          "why": "ADV-1 is reachable (app/client.py calls requests) and fixed in 2.32.4: \"fix every advisory\" means the pin moves to a fixed release, not only that nothing else regresses"
+        },
+        {
+          "path": "requirements.txt",
+          "not_matches": "(?im)^\\s*requests(?:\\[[^\\]]*\\])?\\s*==\\s*2\\.31\\.0(?!\\d)",
+          "why": "the vulnerable requests==2.31.0 pin must not survive beside the fix"
+        },
+        {
+          "path": "SUPPORT.md",
+          "unchanged": true,
+          "why": "the project's support policy is the 'current supported' authority; it is recorded, never rewritten to license a bump"
+        }
+      ]
+    }
+  ]
+}

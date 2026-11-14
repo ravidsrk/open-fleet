@@ -1,0 +1,77 @@
+{
+  "skill_name": "map-it",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I don't know the shape yet \u2014 chart this epic into a plan.",
+      "expected_output": "Should route to map-it. Should name the destination, chart decision-tickets, clear the research/decision frontier with HITL at each decision, freeze the plan/spec, prepare (but not dispatch) a DAG, and hand off to ship-it.",
+      "assertions": [
+        "Routes to map-it",
+        "Names destination first",
+        "Charts decision-tickets, not deliverables",
+        "Uses HITL for decisions",
+        "Prepares DAG without dispatching",
+        "Hands off frozen map to ship-it"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 2,
+      "prompt": "Plan this feature so we can build it next quarter.",
+      "expected_output": "Routes to map-it ONLY because authorization to build is not yet given ('so we can build it next quarter'); below that freeze bar, ship-it's own grill/freeze handles planning (#383).",
+      "assertions": [
+        "Routes to map-it",
+        "Produces frozen plan / spec",
+        "Does not write production code",
+        "Distinguishes planning from building"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 3,
+      "prompt": "Build this feature now.",
+      "expected_output": "Should NOT route to map-it. Ready-to-build intent routes directly to ship-it. map-it is only for uncertainty that exceeds the threshold where implementation can be authorized.",
+      "assertions": [
+        "Does not route to map-it",
+        "Routes to ship-it",
+        "Cites ready-to-build vs foggy-goal threshold"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 4,
+      "prompt": "We want usage-based billing, maybe. I don't know the shape yet, so chart it. GOAL.md has what we know.",
+      "expected_output": "Should name the destination, chart only sharp decision tickets (what counts as usage, the pricing model, invoice cadence) and leave the rest 'not yet specified', put every decision to the human, and freeze a plan with a prepared but undispatched DAG for ship-it. It produces decisions, not deliverables: no usage-billing code lands in src/ and src/invoices.py is untouched.",
+      "assertions": [
+        "Names the destination before charting",
+        "Charts decision tickets and leaves not-yet-sharp questions as 'not yet specified'",
+        "Leaves every decision ticket to the human instead of answering it"
+      ],
+      "files": [
+        {
+          "path": "GOAL.md",
+          "content": "# Goal (fuzzy)\n\nSales wants usage-based billing. Nobody has decided what counts as usage,\nhow it is priced, or whether invoices stay monthly.\n"
+        },
+        {
+          "path": "src/invoices.py",
+          "content": "def monthly_invoice(customer, plan):\n    return {\"customer\": customer, \"amount\": plan.price}\n"
+        }
+      ],
+      "workspace_state": [
+        {
+          "path": "src/invoices.py",
+          "unchanged": true,
+          "why": "map-it produces decisions, not deliverables; building starts in ship-it after the freeze"
+        },
+        {
+          "glob": "src/**/*",
+          "not_matches": "(?i)usage|meter",
+          "why": "no usage-billing code lands in the production tree while its decisions are open"
+        }
+      ]
+    }
+  ]
+}

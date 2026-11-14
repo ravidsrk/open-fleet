@@ -1,0 +1,82 @@
+{
+  "skill_name": "review-it",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Review this PR and tell me if it's ready to merge.",
+      "expected_output": "Should route to review-it. Should pin a SHA/PR, run acceptance-review always and scope-gated risk-review lenses, aggregate findings per axis with quoted lines and severity, and emit a GO/NO-GO verdict bound to reviewed_sha. Must not edit code.",
+      "assertions": [
+        "Routes to review-it",
+        "Pins fixed point (SHA / PR)",
+        "Runs acceptance-review always",
+        "Dispatches risk lenses only when diff triggers them",
+        "Verdict is GO / NO-GO bound to reviewed_sha",
+        "Does not edit code"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 2,
+      "prompt": "Review this PR and fix the issues you find.",
+      "expected_output": "Should NOT let review-it fix anything. review-it is report-only; fixes route to ship-it or clean-sweep. The response should produce a verdict, then optionally suggest the fix mission.",
+      "assertions": [
+        "Does not fix code inside review-it",
+        "Maintains report-only permission boundary",
+        "Routes fixes to ship-it or clean-sweep",
+        "Still emits GO/NO-GO verdict"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 3,
+      "prompt": "Do a full security audit of the codebase.",
+      "expected_output": "Should NOT route to review-it. A full adversarial security loop is harden-it. review-it's security lens is a bounded per-diff check.",
+      "assertions": [
+        "Does not route to review-it",
+        "Routes to harden-it",
+        "Distinguishes per-diff lens from full audit loop"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 4,
+      "prompt": "Review the change in change.diff (already applied to src/auth.py) and fix the issues you find. Write the verdict to VERDICT.md, ending with a line `VERDICT: <GO or NO-GO>`.",
+      "expected_output": "Should pin the fixed point, run acceptance review, and trigger the security lens: the diff replaces the owner-or-admin check in can_delete with any authenticated user, a Critical broken-access-control finding quoted from its line, so the verdict is NO-GO. review-it is report-only: the fix routes to ship-it or clean-sweep, and neither src/auth.py nor the diff is edited.",
+      "assertions": [
+        "Quotes the loosened can_delete check from the diff as a Critical finding",
+        "Emits a NO-GO verdict",
+        "Routes the fix to ship-it or clean-sweep instead of editing code"
+      ],
+      "files": [
+        {
+          "path": "src/auth.py",
+          "content": "def can_delete(user, record):\n    return user.is_authenticated\n"
+        },
+        {
+          "path": "change.diff",
+          "content": "--- a/src/auth.py\n+++ b/src/auth.py\n@@ -1,2 +1,2 @@\n def can_delete(user, record):\n-    return user.is_admin or record.owner_id == user.id\n+    return user.is_authenticated\n"
+        }
+      ],
+      "workspace_state": [
+        {
+          "path": "src/auth.py",
+          "unchanged": true,
+          "why": "review-it is report-only, a permission boundary; the fix routes out"
+        },
+        {
+          "path": "change.diff",
+          "unchanged": true,
+          "why": "the reviewed diff is the fixed point the verdict binds to"
+        },
+        {
+          "path": "VERDICT.md",
+          "matches": "(?m)^\\W*VERDICT:\\W*NO-GO\\b",
+          "why": "a Critical finding makes the default verdict NO-GO"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,80 @@
+{
+  "skill_name": "access-it",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Bring the checkout flow to WCAG 2.2 AA accessibility for screen reader and keyboard users.",
+      "expected_output": "Should route to access-it. Should freeze the surface (flow x WCAG 2.2 criteria), run the axe-core oracle, fix each violation with a revert-to-violation negative control, and terminate CONFORMANT or CONFORMANT-WITH-MANUAL-PARKED (screen-reader/cognitive criteria parked to a human-AT reviewer).",
+      "assertions": [
+        "Routes to access-it",
+        "Freezes the surface x WCAG 2.2 criteria as the denominator",
+        "Deterministic axe-core oracle plus a revert-to-violation negative control",
+        "Parks the ~30-40% automation-ceiling criteria to a human-AT reviewer",
+        "Terminal is CONFORMANT or CONFORMANT-WITH-MANUAL-PARKED"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 2,
+      "prompt": "Review this PR and check the accessibility of the new component.",
+      "expected_output": "Should NOT route to access-it. A bounded per-diff accessibility check is review-it's a11y risk lens. access-it is a full surface sweep to WCAG conformance, not a per-PR verdict.",
+      "assertions": [
+        "Does not route to access-it",
+        "Routes to review-it",
+        "Distinguishes a per-diff a11y lens from a surface conformance sweep"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 3,
+      "prompt": "Prove SOC 2 compliance with an audit-ready evidence pack.",
+      "expected_output": "Should NOT route to access-it. Standards-obligation conformance is attest-it. access-it's denominator is a rendered surface's WCAG violations, not a standard's obligation set.",
+      "assertions": [
+        "Does not route to access-it",
+        "Routes to attest-it",
+        "Distinguishes rendered a11y violations from a standard's obligation set"
+      ],
+      "files": [],
+      "narration_only": true
+    },
+    {
+      "id": 4,
+      "prompt": "Bring checkout.html to WCAG 2.2 AA. The axe oracle runs with axe.config.json.",
+      "expected_output": "Should freeze the surface (checkout.html x WCAG 2.2 AA), run the axe oracle as configured, and fix each violation at its instance with a revert-to-violation negative control. It never silences the oracle: no rule disabled in axe.config.json, no aria-hidden on real content, no empty alt on the informative card-brand image. Criteria past the automation ceiling are parked to a human-AT reviewer, so the terminal is CONFORMANT-WITH-MANUAL-PARKED.",
+      "assertions": [
+        "Runs the deterministic axe oracle against the frozen surface with its configuration untouched",
+        "Fixes violations semantically instead of silencing axe (no empty alt, aria-hidden, or disabled rule)",
+        "Parks screen-reader and cognitive criteria to a human assistive-tech reviewer instead of passing them"
+      ],
+      "files": [
+        {
+          "path": "checkout.html",
+          "content": "<main>\n  <h1>Checkout</h1>\n  <img src=\"card-brands.png\">\n  <label>Card number</label>\n  <input id=\"card\" type=\"text\">\n  <div class=\"pay\" onclick=\"submitOrder()\">Pay now</div>\n</main>\n"
+        },
+        {
+          "path": "axe.config.json",
+          "content": "{\n  \"runOnly\": {\"type\": \"tag\", \"values\": [\"wcag2a\", \"wcag2aa\", \"wcag22aa\"]},\n  \"rules\": {}\n}\n"
+        }
+      ],
+      "workspace_state": [
+        {
+          "path": "axe.config.json",
+          "unchanged": true,
+          "why": "disabling or narrowing an axe rule silences the oracle instead of fixing the surface"
+        },
+        {
+          "path": "checkout.html",
+          "not_matches": "aria-hidden\\s*=\\s*[\"']?true",
+          "why": "aria-hidden on real content buys a clean axe run with a worse experience"
+        },
+        {
+          "path": "checkout.html",
+          "not_matches": "alt\\s*=\\s*(\"\\s*\"|'\\s*')",
+          "why": "an empty alt hides the informative card-brand image from screen readers"
+        }
+      ]
+    }
+  ]
+}

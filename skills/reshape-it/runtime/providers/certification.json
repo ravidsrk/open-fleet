@@ -1,0 +1,846 @@
+{
+  "_about": "Versioned certification record for every advertised Runtime Provider Interface route (#596). Provider cells are capabilities.json's supported_profiles x supported_harnesses per provider; harness cells are base.py's launch table x {ro, rw}. Each route group names its tier, evidence paths, explicit limitations and, for a refusal, the typed refusal. An upstream version or commit that was never recorded stays null (rendered `unknown`) and is never guessed. A provider bound to a pin (`upstream.pin`) goes STALE — every one of its cells reads `stale`, never its recorded tier — as soon as the pin's commit, version or live_receipts.version differs from `certified_against`; recheck the cells, bump record_version, re-record. runtime/scripts/certification.py validates and renders this file; docs/certification.md explains it and carries the first-run guide.",
+  "schema_version": "open-fleet-certification/v1",
+  "record_version": 6,
+  "recorded": "2026-10-26",
+  "tiers": {
+    "live-witnessed": "A real upstream build and a real harness ran this route end to end; the evidence is a docs/runs/ report whose RUN: header binds (verifier=GREEN, cited as a mission's proof_evidence) and whose own inventoried artifacts name this exact route, quoted in witnessed.route. Exact upstream and harness versions are recorded.",
+    "fixture-tested": "The fleet's own code for this route runs in CI against an in-repo fixture — a scripted upstream transport or the first_run.py inert worker. Proves the fleet's side of the route; proves nothing about the upstream build or the harness.",
+    "source-only": "The route's launch or flags were written from reading upstream source or docs; no test drives this exact route.",
+    "unsupported": "The fleet refuses this route before any launch, with the typed refusal named in `refusal`.",
+    "unavailable": "Advertised, but no evidence of any kind exists in this repository: the route's state is unknown."
+  },
+  "providers": {
+    "orca": {
+      "upstream": {
+        "repo": "stablyai/orca",
+        "version": "v1.4.239",
+        "commit": "47f77cf7018ebc0d046b82c6dde31cf704909162",
+        "pin": "runtime/pins.json#orca"
+      },
+      "certified_against": {
+        "commit": "47f77cf7018ebc0d046b82c6dde31cf704909162",
+        "version": "v1.4.239",
+        "live_receipts_version": "v1.4.239"
+      },
+      "routes": [
+        {
+          "profiles": ["ro"],
+          "harnesses": ["claude"],
+          "tier": "live-witnessed",
+          "witnessed": {
+            "upstream_version": "Orca 1.4.239",
+            "harness_version": "Claude Code 2.1.304",
+            "host": "macOS 27.0.1 arm64 (the dev Mac)",
+            "date": "2026-10-26",
+            "route": [
+              {
+                "path": "docs/runs/2026-10-26-review-it-orca-ro-680/manifest.json",
+                "lines": [
+                  "\"toolchain\": \"Orca 1.4.239 (Orca.app and orca CLI) on macOS 27.0.1 arm64; Claude Code 2.1.304 native install (claude-opus-5-5) workers (PROFILE=ro) via spawn_worker.sh at f4e5bd8b9f, Orca run_e60133b57a1c\","
+                ]
+              }
+            ]
+          },
+          "evidence": [
+            "docs/runs/2026-10-26-review-it-orca-ro-680.md",
+            "tests/test_spawn_worker.py::test_ro_never_takes_worker_start",
+            "tests/test_spawn_worker.py::TestOrcaRoNativeClaudeFallback"
+          ],
+          "limitations": [
+            "Witnessed on macOS only, at Orca 1.4.239 with a native Claude Code 2.1.304 install, one run on one model (claude-opus-5-5); the earlier 2026-10-13 Linux witness ran the previous row at Orca 1.4.224.",
+            "ro rides spawn_worker.sh's custom-argv lane, never worker-start. On Orca 1.4.229 to 1.4.240 dispatch --inject cannot see a native Claude Code install (its process is named for its version, and an idle Claude sets no title), so the witness ran the lane's no-inject fallback: a dispatch without --inject, the preamble by terminal send, turn_started from the send receipt. The inject path was not exercised at this build.",
+            "The plan was approved in the pane, not by the coordinator, and the logs do not name the approver; with plan mode off, Write and Edit stayed out of the toolset (docs/runs/2026-10-26-review-it-orca-ro-680.md)."
+          ]
+        },
+        {
+          "profiles": ["rw"],
+          "harnesses": ["claude"],
+          "tier": "live-witnessed",
+          "witnessed": {
+            "upstream_version": "orca-ide 1.4.224",
+            "harness_version": "Claude Code 2.1.296",
+            "host": "Ubuntu 24.04.5 LTS arm64 (OrbStack VM)",
+            "date": "2026-10-13",
+            "route": [
+              {
+                "path": "docs/runs/2026-10-13-ship-it-mdtoc/stage-build.py",
+                "lines": [
+                  "env = dict(os.environ, SP=\"/home/ravindra/ship527-scratch\", PROFILE=\"rw\",",
+                  "ORCA_COORD_ALLOW_AUTONOMOUS_WRITE=\"1\", ORCA_COORD_ALLOW_CMD_OVERRIDE=\"1\",",
+                  "WORKER_CMD=\"claude --dangerously-skip-permissions\","
+                ]
+              },
+              {
+                "path": "docs/runs/2026-10-13-ship-it-mdtoc/ledger.md",
+                "lines": [
+                  "Substrate: Linux witness VM (Ubuntu 24.04.5 arm64, orca-ide 1.4.224 serve,",
+                  "Claude Code 2.1.296 workers). Lane: offline (no gh in VM) — local merges to"
+                ]
+              }
+            ]
+          },
+          "evidence": [
+            "docs/runs/2026-10-13-ship-it-mdtoc.md",
+            "tests/test_spawn_worker.py::test_a_launch_that_lacks_the_profiles_flag_is_refused"
+          ],
+          "limitations": [
+            "Witnessed only on the override lane (WORKER_CMD='claude --dangerously-skip-permissions' with ORCA_COORD_ALLOW_CMD_OVERRIDE=1): the supervised worker-start lane read LAUNCHED_UNUSABLE on the witness host because its agentDefaultArgs lacked the bypass flag.",
+            "Witnessed on Linux only, at Orca 1.4.224. The v1.4.239 pin's live receipts are 1.4.239's own and include no rw run; this route was re-checked by source delta (the worker-start launch receipt and the wrapper's exit 5 are unchanged).",
+            "From v1.4.239 a host's stored permission choice (own, ask, accept-edits, auto or full-access) sets the launch flag; anything but full-access launches claude without the rw flag, and the wrapper refuses that start as LAUNCHED_UNUSABLE (exit 5), pinned by tests/test_spawn_worker.py. No live start under a stored choice was witnessed."
+          ]
+        },
+        {
+          "profiles": ["danger"],
+          "harnesses": ["claude", "codex", "jcode", "goose", "hermes", "crush", "gemini", "cursor", "antigravity", "grok", "droid"],
+          "tier": "unsupported",
+          "refusal": "has no supported authoritative placement binding",
+          "evidence": [
+            "tests/test_spawn_worker.py::test_danger_refuses_unbound_placement_after_clear_doctor_in_both_lanes",
+            "tests/test_certification.py::TestOrcaRouteCellsMatchTheWrapper"
+          ],
+          "limitations": [
+            "spawn_worker.sh refuses PROFILE=danger on Orca even after a clear `vm recipe doctor`: no lane binds the validated disposable sandbox before launch (sandbox-policy.md)."
+          ]
+        },
+        {
+          "profiles": ["ro"],
+          "harnesses": ["cursor", "antigravity", "grok", "droid"],
+          "tier": "unsupported",
+          "refusal": "has no verified PROFILE=ro launch flag",
+          "evidence": [
+            "tests/test_spawn_worker.py::test_cursor_ro_has_no_verified_flag",
+            "tests/test_spawn_worker.py::test_antigravity_ro_has_no_verified_flag",
+            "tests/test_spawn_worker.py::test_grok_ro_no_verified_flag_refused",
+            "tests/test_certification.py::TestOrcaRouteCellsMatchTheWrapper"
+          ],
+          "limitations": [
+            "Orca's agent map has no read-only mode for these harnesses; a WORKER_CMD override launches them on the operator's own assertion, outside this certification."
+          ]
+        },
+        {
+          "profiles": ["rw"],
+          "harnesses": ["cursor", "antigravity"],
+          "tier": "fixture-tested",
+          "evidence": [
+            "tests/test_spawn_worker.py::test_cursor_is_on_the_roster_for_write_tiers",
+            "tests/test_spawn_worker.py::test_antigravity_is_on_the_roster_for_write_tiers",
+            "tests/test_certification.py::TestOrcaRouteCellsMatchTheWrapper"
+          ],
+          "limitations": [
+            "Driven only against a stub `orca` that returns a scripted worker-start receipt; never run against a real Orca build or a real cursor/agy binary.",
+            "The launch arguments come from the host's agentDefaultArgs; the wrapper only checks that launch.effective carries the profile's flag."
+          ]
+        },
+        {
+          "profiles": ["ro"],
+          "harnesses": ["codex", "gemini", "goose"],
+          "tier": "source-only",
+          "evidence": [
+            "runtime/scripts/spawn_worker.sh",
+            "runtime/sandbox-policy.md",
+            "tests/test_certification.py::TestOrcaRouteCellsMatchTheWrapper"
+          ],
+          "limitations": [
+            "The ro launch is spawn_worker.sh's own Orca row on the custom-argv lane. The certification test only checks that the wrapper accepts the cell; no test runs it against Orca or the real harness."
+          ]
+        },
+        {
+          "profiles": ["ro"],
+          "harnesses": ["jcode", "hermes"],
+          "tier": "source-only",
+          "evidence": [
+            "runtime/scripts/spawn_worker.sh",
+            "tests/test_spawn_worker.py::TestOrcaRoRowsCarryBasePyRestrictions",
+            "tests/test_certification.py::TestOrcaRouteCellsMatchTheWrapper"
+          ],
+          "limitations": [
+            "The Orca rows are TUI lines carrying base.py's ro restriction: jcode's --tools allowlist and --disabled-tools set (replace included), hermes' HERMES_WRITE_SAFE_ROOT=/dev/null with --toolsets file,web,session_search. A test holds the flags to base.py's; nothing runs them against Orca or a real binary.",
+            "No deny hook is installed on the Orca ro lane: the restriction is the launch flags alone."
+          ]
+        },
+        {
+          "profiles": ["ro"],
+          "harnesses": ["crush"],
+          "tier": "unsupported",
+          "refusal": "has no verified PROFILE=ro launch flag",
+          "evidence": [
+            "tests/test_spawn_worker.py::TestOrcaRoRowsCarryBasePyRestrictions",
+            "tests/test_certification.py::TestOrcaRouteCellsMatchTheWrapper"
+          ],
+          "limitations": [
+            "No flag makes crush read-only: base.py's ro is a <data-dir>/crush.json disabled_tools that only the posix provider's install_worktree_hooks writes, and `crush run` auto-approves every tool. The Orca custom-argv lane installs nothing, so it refuses; a WORKER_CMD override launches crush on the operator's own assertion."
+          ]
+        },
+        {
+          "profiles": ["rw"],
+          "harnesses": ["codex", "gemini", "grok", "droid", "jcode", "goose", "hermes", "crush"],
+          "tier": "source-only",
+          "evidence": [
+            "runtime/scripts/spawn_worker.sh",
+            "tests/test_certification.py::TestOrcaRouteCellsMatchTheWrapper"
+          ],
+          "limitations": [
+            "worker-start launches these with the host's agentDefaultArgs; the wrapper checks only that launch.effective carries the flag in its profile_flag map, which was read from Orca's source. No test drives these harnesses on the Orca route."
+          ]
+        }
+      ]
+    },
+    "posix": {
+      "upstream": {
+        "repo": "open-fleet (this repository)",
+        "version": "in-repo",
+        "commit": null
+      },
+      "routes": [
+        {
+          "profiles": ["ro", "rw"],
+          "harnesses": ["codex", "opencode", "omp", "pi", "jcode", "goose", "hermes", "crush", "gemini"],
+          "tier": "fixture-tested",
+          "evidence": [
+            "runtime/scripts/first_run.py",
+            "tests/test_certification.py::TestFirstRunFixture",
+            "tests/test_posix_provider.py::TestSetsidWorkerLifecycle",
+            "tests/test_posix_provider.py::TestRoWorkerSignalsCompletion",
+            "tests/test_spawn_worker.py::TestNonOrcaLaunchTableIsBasePy"
+          ],
+          "limitations": [
+            "The provider is this repository's code, so each CI run certifies the commit it runs at; the first_run.py fixture drives create, dispatch, delivery, result, independent verify and retain/release through the public wrappers for every cell here.",
+            "The worker is an inert stand-in answering to each harness name: no real harness binary runs, and the launch flags themselves are source-read (see the harness cells).",
+            "CI runs the setsid backend only; tmux is exercised by tests/test_posix_provider.py on hosts that have it, and cmux by no test.",
+            "A ro worker has no tool to send mail. Where an exit monitor runs, its assignment names the line OPEN_FLEET_WORKER_DONE <dispatch-id> <succeeded|failed>, and when that line ends the harness's final answer (runtime/providers/transcript.py, the first-run report's reader) the monitor relays it as the worker's worker_done; the stand-in prints it in each harness's own output shape. A clean exit without the line is still worker_died (exit=0). Either way the coordinator takes the report from the transcript.",
+            "No live first run of these harnesses: only claude ran live on this route (the group above). Their binaries were not run here."
+          ]
+        },
+        {
+          "profiles": ["ro", "rw"],
+          "harnesses": ["claude"],
+          "tier": "live-witnessed",
+          "witnessed": {
+            "upstream_version": "b96d47e3354564e1593d34182a817ae04e54545d",
+            "harness_version": "2.1.304 (Claude Code)",
+            "host": "macOS 27.0.1 arm64 (dev Mac, isolation wrapper) and Ubuntu 24.04.5 aarch64 (fresh ubuntu:24.04 container on the same Mac's OrbStack)",
+            "date": "2026-10-24",
+            "route": [
+              {"path": "docs/runs/2026-10-24-review-it-first-run/mac-ro/receipt.json", "lines": ["\"witness\": \"posix/setsid PROFILE=ro harness=claude version=2.1.304 (Claude Code) worker=live tier=live-unreviewed catalog=b96d47e3354564e1593d34182a817ae04e54545d dirty=False verdict=GO\","]},
+              {"path": "docs/runs/2026-10-24-review-it-first-run/mac-rw/receipt.json", "lines": ["\"witness\": \"posix/setsid PROFILE=rw harness=claude version=2.1.304 (Claude Code) worker=live tier=live-unreviewed catalog=b96d47e3354564e1593d34182a817ae04e54545d dirty=False verdict=GO\","]},
+              {"path": "docs/runs/2026-10-24-review-it-first-run/clean-host/receipt-ro.json", "lines": ["\"witness\": \"posix/setsid PROFILE=ro harness=claude version=2.1.304 (Claude Code) worker=live tier=live-unreviewed catalog=b96d47e3354564e1593d34182a817ae04e54545d dirty=False verdict=GO\","]},
+              {"path": "docs/runs/2026-10-24-review-it-first-run/clean-host/receipt-rw.json", "lines": ["\"witness\": \"posix/setsid PROFILE=rw harness=claude version=2.1.304 (Claude Code) worker=live tier=live-unreviewed catalog=b96d47e3354564e1593d34182a817ae04e54545d dirty=False verdict=GO\","]}
+            ]
+          },
+          "evidence": [
+            "docs/runs/2026-10-24-review-it-first-run.md",
+            "runtime/scripts/first_run.py",
+            "tests/test_certification.py::TestFirstRunFixture"
+          ],
+          "limitations": [
+            "Witnessed on two hosts of one machine: the dev Mac, through an isolation wrapper (pinned 2.1.304 binary; empty HOME and CLAUDE_CONFIG_DIR; --setting-sources project,local, --strict-mcp-config, --disable-slash-commands; allow-listed environment; CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0, since the scrub forces default permission mode and breaks rw bypass), and a fresh ubuntu:24.04 container on that Mac's OrbStack. Not separate hardware.",
+            "One model (claude-opus-5-5) and one run per profile per host, at catalog b96d47e335; setsid backend only. A later change to base.py's claude line or the posix provider is not re-witnessed automatically: harness cells have no pin.",
+            "The ro run settled through the relayed completion line, and its transcript lists no Write or Edit tool; the rw worker wrote its report through a Bash heredoc (the rw bypass), committed it, sent worker_done and printed the same report as its final answer."
+          ]
+        },
+        {
+          "profiles": ["danger"],
+          "harnesses": ["claude", "codex", "opencode", "omp", "pi", "jcode", "goose", "crush", "gemini"],
+          "tier": "fixture-tested",
+          "evidence": [
+            "tests/test_posix_provider.py::TestSandboxGitRoundTrip",
+            "tests/test_posix_provider.py::TestPosixDoctorFailsClosed",
+            "tests/test_spawn_worker.py::TestNonOrcaDanger"
+          ],
+          "limitations": [
+            "Docker is a scripted fake in these tests; no real container run is recorded.",
+            "A launch also needs `vm recipe doctor` clear with prelaunch placement proven (sandbox_doctor.py --require-placement)."
+          ]
+        },
+        {
+          "profiles": ["danger"],
+          "harnesses": ["hermes"],
+          "tier": "unsupported",
+          "refusal": "unsupported_profile",
+          "evidence": [
+            "tests/test_certification.py::TestAdapterRefusalsMatchTheRecord"
+          ],
+          "limitations": [
+            "Hermes reads its hook config from HERMES_HOME, which a danger sandbox cannot see, so posix refuses rather than launch it unguarded."
+          ]
+        }
+      ]
+    },
+    "overstory": {
+      "upstream": {"repo": "jayminwest/overstory", "version": null, "commit": null},
+      "routes": [
+        {
+          "profiles": ["ro"],
+          "harnesses": ["codex", "opencode", "goose", "gemini", "cursor"],
+          "tier": "unsupported",
+          "refusal": "unsupported_profile",
+          "evidence": [
+            "tests/test_orchestrator_providers_tier1.py::TestOverstoryProvider",
+            "tests/test_certification.py::TestAdapterRefusalsMatchTheRecord"
+          ],
+          "limitations": ["Overstory enforces read-only guards only for its claude, pi and sapling runtimes."]
+        },
+        {
+          "profiles": ["ro"],
+          "harnesses": ["claude", "pi"],
+          "tier": "fixture-tested",
+          "evidence": [
+            "tests/test_orchestrator_providers_tier1.py::TestOverstoryProvider",
+            "tests/test_certification.py::TestAdapterRefusalsMatchTheRecord"
+          ],
+          "limitations": [
+            "Scripted `ov` transport; the upstream revision the adapter was read from was never recorded (unknown).",
+            "ro is Overstory's own guard (scout capability), not the fleet deny hook."
+          ]
+        },
+        {
+          "profiles": ["rw"],
+          "harnesses": ["claude", "codex", "opencode", "pi", "goose", "gemini", "cursor"],
+          "tier": "fixture-tested",
+          "evidence": [
+            "tests/test_orchestrator_providers_tier1.py::TestOverstoryProvider",
+            "tests/test_capability_harnesses.py::TestWorkerStartRefusesUnlistedHarnesses",
+            "tests/test_certification.py::TestAdapterRefusalsMatchTheRecord"
+          ],
+          "limitations": [
+            "Scripted `ov` transport; upstream version unknown.",
+            "The lifecycle fixtures run the adapter's default harness; the other harnesses are driven only to the first upstream call."
+          ]
+        }
+      ]
+    },
+    "t3code": {
+      "upstream": {"repo": "pingdotgg/t3code", "version": null, "commit": null},
+      "routes": [
+        {
+          "profiles": ["ro", "rw"],
+          "harnesses": ["claude", "codex"],
+          "tier": "fixture-tested",
+          "evidence": [
+            "tests/test_orchestrator_providers_tier1.py::TestT3CodeProvider",
+            "tests/test_certification.py::TestAdapterRefusalsMatchTheRecord"
+          ],
+          "limitations": [
+            "Scripted MCP tool transport; upstream version unknown.",
+            "The adapter sends no agent: the T3 project's default model picks codex or claudeAgent, so the harness is not selectable per dispatch."
+          ]
+        }
+      ]
+    },
+    "ao": {
+      "upstream": {"repo": "ComposioHQ/agent-orchestrator", "version": null, "commit": null},
+      "routes": [
+        {
+          "profiles": ["rw"],
+          "harnesses": ["claude", "codex", "opencode", "omp", "pi", "goose", "crush", "gemini", "cursor", "grok", "droid"],
+          "tier": "fixture-tested",
+          "evidence": [
+            "tests/test_orchestrator_providers_tier2.py::TestAO",
+            "tests/test_capability_harnesses.py::TestWorkerStartRefusesUnlistedHarnesses",
+            "tests/test_certification.py::TestAdapterRefusalsMatchTheRecord"
+          ],
+          "limitations": [
+            "Scripted HTTP transport; upstream version unknown.",
+            "AO starts the agent with approvalMode bypass-permissions and creates its own worktree, so the deny hook is installed after the session exists, not before the agent's first action."
+          ]
+        }
+      ]
+    },
+    "superset": {
+      "upstream": {"repo": "superset-sh/superset", "version": null, "commit": null},
+      "routes": [
+        {
+          "profiles": ["ro", "rw"],
+          "harnesses": ["claude", "codex", "opencode", "omp", "pi", "hermes", "gemini"],
+          "tier": "fixture-tested",
+          "evidence": [
+            "tests/test_superset_provider.py::TestSupersetProvider",
+            "tests/test_certification.py::TestAdapterRefusalsMatchTheRecord"
+          ],
+          "limitations": [
+            "Scripted `superset` CLI transport; upstream version unknown.",
+            "ro runs base.py's ro line in a plain terminal because Superset's agent presets inject bypass flags unconditionally; the danger (cloud workspace) path is not advertised."
+          ]
+        }
+      ]
+    },
+    "gastown": {
+      "upstream": {"repo": "gastownhall/gastown", "version": null, "commit": null},
+      "routes": [
+        {
+          "profiles": ["ro"],
+          "harnesses": ["opencode", "omp", "pi", "cursor"],
+          "tier": "unsupported",
+          "refusal": "unsupported_profile",
+          "evidence": [
+            "tests/test_gastown_worktrunk_providers.py::TestGastownProvider",
+            "tests/test_certification.py::TestAdapterRefusalsMatchTheRecord"
+          ],
+          "limitations": [
+            "Refused at the gt agent-alias step, after `bd create` and before `gt sling`: their ro line needs an env prefix, a path or a shell operator that a whitespace-split gt alias cannot carry."
+          ]
+        },
+        {
+          "profiles": ["ro"],
+          "harnesses": ["claude", "codex", "gemini"],
+          "tier": "fixture-tested",
+          "evidence": [
+            "tests/test_gastown_worktrunk_providers.py::TestGastownProvider",
+            "tests/test_claude_ro_launches.py::EveryClaudeRoLaunchCarriesTheSet",
+            "tests/test_certification.py::TestAdapterRefusalsMatchTheRecord"
+          ],
+          "limitations": [
+            "Scripted gt/bd transport; upstream version unknown.",
+            "The ro alias is base.py's ro `command` label, which carries every restriction flag: for claude --disallowedTools=Edit,Write,MultiEdit,NotebookEdit ahead of plan mode."
+          ]
+        },
+        {
+          "profiles": ["rw"],
+          "harnesses": ["claude", "codex", "opencode", "omp", "pi", "gemini", "cursor"],
+          "tier": "fixture-tested",
+          "evidence": [
+            "tests/test_gastown_worktrunk_providers.py::TestGastownProvider",
+            "tests/test_certification.py::TestAdapterRefusalsMatchTheRecord"
+          ],
+          "limitations": [
+            "Scripted gt/bd transport; upstream version unknown.",
+            "rw passes the harness name to `gt sling --agent` verbatim; gastown's own preset decides the launch flags."
+          ]
+        }
+      ]
+    },
+    "worktrunk": {
+      "upstream": {"repo": "max-sixty/worktrunk", "version": null, "commit": null},
+      "routes": [
+        {
+          "profiles": ["ro", "rw"],
+          "harnesses": ["claude", "codex", "opencode", "omp", "pi", "jcode", "goose", "hermes", "crush", "gemini"],
+          "tier": "fixture-tested",
+          "evidence": [
+            "tests/test_gastown_worktrunk_providers.py::TestWorktrunkProvider",
+            "tests/test_certification.py::TestAdapterRefusalsMatchTheRecord"
+          ],
+          "limitations": [
+            "Scripted `wt` transport; upstream version unknown.",
+            "The agent runs base.py's launch line detached in tmux; the harness flags are source-read (see the harness cells)."
+          ]
+        }
+      ]
+    },
+    "jcode-swarm": {
+      "upstream": {"repo": "1jehuang/jcode", "version": null, "commit": null},
+      "routes": [
+        {
+          "profiles": ["rw"],
+          "harnesses": ["jcode"],
+          "tier": "fixture-tested",
+          "evidence": [
+            "tests/test_orchestrator_providers_tier2.py::TestJCode",
+            "tests/test_certification.py::TestAdapterRefusalsMatchTheRecord"
+          ],
+          "limitations": [
+            "Scripted daemon-socket transport; upstream version unknown.",
+            "jcode does not create worktrees: the dispatch needs an existing --worktree."
+          ]
+        }
+      ]
+    },
+    "emdash": {
+      "upstream": {"repo": "generalaction/emdash", "version": null, "commit": null},
+      "routes": [
+        {
+          "profiles": ["ro"],
+          "harnesses": ["codex", "opencode", "pi", "goose", "hermes", "cursor", "antigravity", "grok", "droid"],
+          "tier": "unsupported",
+          "refusal": "unsupported_profile",
+          "evidence": [
+            "tests/test_orchestrator_providers_tier2.py::TestEmdash",
+            "tests/test_certification.py::TestAdapterRefusalsMatchTheRecord"
+          ],
+          "limitations": ["Only claude has verified read-only extraArgs on emdash."]
+        },
+        {
+          "profiles": ["ro"],
+          "harnesses": ["claude"],
+          "tier": "fixture-tested",
+          "evidence": [
+            "tests/test_orchestrator_providers_tier2.py::TestEmdash",
+            "tests/test_certification.py::TestAdapterRefusalsMatchTheRecord"
+          ],
+          "limitations": ["Scripted workspace-server socket (wire protocol 12.0.0 as read from source); upstream version unknown."]
+        },
+        {
+          "profiles": ["rw"],
+          "harnesses": ["claude", "codex", "opencode", "pi", "goose", "hermes", "cursor", "antigravity", "grok", "droid"],
+          "tier": "fixture-tested",
+          "evidence": [
+            "tests/test_orchestrator_providers_tier2.py::TestEmdash",
+            "tests/test_certification.py::TestAdapterRefusalsMatchTheRecord"
+          ],
+          "limitations": [
+            "Scripted workspace-server socket; upstream version unknown.",
+            "The harness name is sent verbatim as emdash's providerId; emdash decides the launch."
+          ]
+        }
+      ]
+    },
+    "vibe-kanban": {
+      "upstream": {"repo": "BloopAI/vibe-kanban", "version": null, "commit": null},
+      "routes": [
+        {
+          "profiles": ["ro"],
+          "harnesses": ["codex", "opencode", "gemini", "cursor", "droid"],
+          "tier": "unsupported",
+          "refusal": "unsupported_profile",
+          "evidence": [
+            "tests/test_orchestrator_providers_tier2.py::TestVibeKanban",
+            "tests/test_certification.py::TestAdapterRefusalsMatchTheRecord"
+          ],
+          "limitations": ["Only the claude executor has the ORCA_RO read-only variant."]
+        },
+        {
+          "profiles": ["ro"],
+          "harnesses": ["claude"],
+          "tier": "fixture-tested",
+          "evidence": [
+            "tests/test_orchestrator_providers_tier2.py::TestVibeKanban",
+            "tests/test_certification.py::TestAdapterRefusalsMatchTheRecord"
+          ],
+          "limitations": ["Scripted REST transport; upstream version unknown."]
+        },
+        {
+          "profiles": ["rw"],
+          "harnesses": ["claude", "codex", "opencode", "gemini", "cursor", "droid"],
+          "tier": "fixture-tested",
+          "evidence": [
+            "tests/test_orchestrator_providers_tier2.py::TestVibeKanban",
+            "tests/test_certification.py::TestAdapterRefusalsMatchTheRecord"
+          ],
+          "limitations": [
+            "Scripted REST transport; upstream version unknown.",
+            "Upstream auto-commits after the agent exits; the adapter's guard rejects such a HEAD by default rather than strip it."
+          ]
+        }
+      ]
+    },
+    "paperclip": {
+      "upstream": {"repo": "paperclipai/paperclip", "version": null, "commit": null},
+      "routes": [
+        {
+          "profiles": ["ro"],
+          "harnesses": ["codex"],
+          "tier": "unsupported",
+          "refusal": "unsupported_profile",
+          "evidence": [
+            "tests/test_orchestrator_providers_tier2.py::TestPaperclip",
+            "tests/test_certification.py::TestAdapterRefusalsMatchTheRecord"
+          ],
+          "limitations": ["Only claude_local has a verified read-only adapterConfig."]
+        },
+        {
+          "profiles": ["ro"],
+          "harnesses": ["claude"],
+          "tier": "fixture-tested",
+          "evidence": [
+            "tests/test_orchestrator_providers_tier2.py::TestPaperclip",
+            "tests/test_certification.py::TestAdapterRefusalsMatchTheRecord"
+          ],
+          "limitations": ["Scripted REST transport; upstream version unknown. ro needs an existing --worktree so the hooks precede the agent."]
+        },
+        {
+          "profiles": ["rw"],
+          "harnesses": ["claude", "codex"],
+          "tier": "fixture-tested",
+          "evidence": [
+            "tests/test_orchestrator_providers_tier2.py::TestPaperclip",
+            "tests/test_certification.py::TestAdapterRefusalsMatchTheRecord"
+          ],
+          "limitations": ["Scripted REST transport; upstream version unknown. The danger (bwrap) path is not advertised."]
+        }
+      ]
+    },
+    "multiclaude": {
+      "upstream": {"repo": "dlorenc/multiclaude", "version": null, "commit": null},
+      "routes": [
+        {
+          "profiles": ["ro", "rw"],
+          "harnesses": ["claude"],
+          "tier": "fixture-tested",
+          "evidence": [
+            "tests/test_orchestrator_providers_tier2.py::TestMulticlaude",
+            "tests/test_certification.py::TestAdapterRefusalsMatchTheRecord"
+          ],
+          "limitations": [
+            "Scripted daemon-socket transport; upstream version unknown.",
+            "Release requires `orchestration worker-verify` against an evidence manifest; a worker's own --sha is never proof."
+          ]
+        }
+      ]
+    },
+    "openhands": {
+      "upstream": {"repo": "OpenHands/software-agent-sdk", "version": null, "commit": null},
+      "routes": [
+        {
+          "profiles": ["ro", "rw"],
+          "harnesses": ["openhands"],
+          "tier": "fixture-tested",
+          "evidence": [
+            "tests/test_openhands_provider.py::TestOpenHandsProvider",
+            "tests/test_certification.py::TestAdapterRefusalsMatchTheRecord",
+            "tests/test_capability_launch_agreement.py::OpenHandsLaunchesThroughTheWrapper"
+          ],
+          "limitations": [
+            "Scripted HttpScript transport and a separately executed hook: no released agent-server was shown to consume the hook config and block (only exit 2 blocks in its executor).",
+            "spawn_worker.sh launches the agent `openhands` on this runtime only, through worker-start, and refuses every CLI harness name here before any upstream call; the end-to-end test drives it against a loopback stand-in agent-server, never a real one.",
+            "Upstream version unknown; the danger (docker runtime) path is not advertised."
+          ]
+        }
+      ]
+    }
+  },
+  "harnesses": {
+    "claude": {
+      "upstream": {"product": "Claude Code", "binary": "claude", "version": "2.1.304", "commit": null},
+      "routes": [
+        {
+          "profiles": ["ro", "rw"],
+          "tier": "live-witnessed",
+          "witnessed": {
+            "upstream_version": "b96d47e3354564e1593d34182a817ae04e54545d",
+            "harness_version": "2.1.304 (Claude Code)",
+            "host": "macOS 27.0.1 arm64 (dev Mac, isolation wrapper) and Ubuntu 24.04.5 aarch64 (fresh ubuntu:24.04 container on the same Mac's OrbStack)",
+            "date": "2026-10-24",
+            "route": [
+              {"path": "docs/runs/2026-10-24-review-it-first-run/mac-ro/receipt.json", "lines": ["\"witness\": \"posix/setsid PROFILE=ro harness=claude version=2.1.304 (Claude Code) worker=live tier=live-unreviewed catalog=b96d47e3354564e1593d34182a817ae04e54545d dirty=False verdict=GO\","]},
+              {"path": "docs/runs/2026-10-24-review-it-first-run/mac-rw/receipt.json", "lines": ["\"witness\": \"posix/setsid PROFILE=rw harness=claude version=2.1.304 (Claude Code) worker=live tier=live-unreviewed catalog=b96d47e3354564e1593d34182a817ae04e54545d dirty=False verdict=GO\","]},
+              {"path": "docs/runs/2026-10-24-review-it-first-run/clean-host/receipt-ro.json", "lines": ["\"witness\": \"posix/setsid PROFILE=ro harness=claude version=2.1.304 (Claude Code) worker=live tier=live-unreviewed catalog=b96d47e3354564e1593d34182a817ae04e54545d dirty=False verdict=GO\","]},
+              {"path": "docs/runs/2026-10-24-review-it-first-run/clean-host/receipt-rw.json", "lines": ["\"witness\": \"posix/setsid PROFILE=rw harness=claude version=2.1.304 (Claude Code) worker=live tier=live-unreviewed catalog=b96d47e3354564e1593d34182a817ae04e54545d dirty=False verdict=GO\","]}
+            ]
+          },
+          "evidence": [
+            "docs/runs/2026-10-24-review-it-first-run.md",
+            "runtime/providers/base.py",
+            "tests/test_certification.py::TestHarnessCellsMatchTheLaunchTable",
+            "tests/test_claude_ro_launches.py::EveryClaudeRoLaunchCarriesTheSet"
+          ],
+          "limitations": [
+            "base.py's claude line ran live through the posix route only (the bound 2026-10-24 first runs), at Claude Code 2.1.304 with claude-opus-5-5. Another version is not certified: harness cells have no pin, so an upgrade does not void this cell by itself.",
+            "Claude Code 2.1.304 warns that the deny rule MultiEdit matches no known tool; the other three disallowed tools apply. Claude Code 2.1.296 ran live on the Orca route's own rows, which certify no harness cell."
+          ]
+        }
+      ]
+    },
+    "codex": {
+      "upstream": {"product": "OpenAI Codex CLI", "binary": "codex", "version": null, "commit": null},
+      "routes": [
+        {
+          "profiles": ["ro", "rw"],
+          "tier": "fixture-tested",
+          "evidence": [
+            "runtime/providers/base.py",
+            "tests/test_certification.py::TestHarnessCellsMatchTheLaunchTable",
+            "tests/test_certification.py::TestFirstRunFixture"
+          ],
+          "limitations": ["Flags source-read; only the inert stand-in has run this line. No codex version recorded."]
+        }
+      ]
+    },
+    "opencode": {
+      "upstream": {"product": "OpenCode", "binary": "opencode", "version": null, "commit": null},
+      "routes": [
+        {
+          "profiles": ["ro", "rw"],
+          "tier": "fixture-tested",
+          "evidence": [
+            "runtime/providers/base.py",
+            "tests/test_certification.py::TestHarnessCellsMatchTheLaunchTable",
+            "tests/test_certification.py::TestFirstRunFixture"
+          ],
+          "limitations": ["Permissions travel in OPENCODE_CONFIG_CONTENT; flags source-read; only the inert stand-in has run this line."]
+        }
+      ]
+    },
+    "omp": {
+      "upstream": {"product": "Oh My Pi", "binary": "omp", "version": null, "commit": null},
+      "routes": [
+        {
+          "profiles": ["ro", "rw"],
+          "tier": "fixture-tested",
+          "evidence": [
+            "runtime/providers/base.py",
+            "tests/test_certification.py::TestHarnessCellsMatchTheLaunchTable",
+            "tests/test_certification.py::TestFirstRunFixture"
+          ],
+          "limitations": ["rw relies on the omp_pi_deny_bridge.ts extension; flags source-read; only the inert stand-in has run this line."]
+        }
+      ]
+    },
+    "pi": {
+      "upstream": {"product": "Pi (pi-mono)", "binary": "pi", "version": null, "commit": null},
+      "routes": [
+        {
+          "profiles": ["ro", "rw"],
+          "tier": "fixture-tested",
+          "evidence": [
+            "runtime/providers/base.py",
+            "tests/test_certification.py::TestHarnessCellsMatchTheLaunchTable",
+            "tests/test_certification.py::TestFirstRunFixture"
+          ],
+          "limitations": ["pi has no --cwd flag: the launch must run in the worktree; flags source-read; only the inert stand-in has run this line."]
+        }
+      ]
+    },
+    "jcode": {
+      "upstream": {"product": "jcode", "binary": "jcode", "version": null, "commit": null},
+      "routes": [
+        {
+          "profiles": ["ro", "rw"],
+          "tier": "fixture-tested",
+          "evidence": [
+            "runtime/providers/base.py",
+            "tests/test_certification.py::TestHarnessCellsMatchTheLaunchTable",
+            "tests/test_certification.py::TestFirstRunFixture"
+          ],
+          "limitations": ["ro needs the explicit --disabled-tools list (jcode's minimal profile keeps write tools); flags source-read; only the inert stand-in has run this line."]
+        }
+      ]
+    },
+    "goose": {
+      "upstream": {"product": "Goose", "binary": "goose", "version": null, "commit": null},
+      "routes": [
+        {
+          "profiles": ["ro", "rw"],
+          "tier": "fixture-tested",
+          "evidence": [
+            "runtime/providers/base.py",
+            "tests/test_certification.py::TestHarnessCellsMatchTheLaunchTable",
+            "tests/test_certification.py::TestFirstRunFixture"
+          ],
+          "limitations": ["Flags source-read; only the inert stand-in has run this line. No goose version recorded."]
+        }
+      ]
+    },
+    "hermes": {
+      "upstream": {"product": "Hermes Agent", "binary": "hermes", "version": null, "commit": null},
+      "routes": [
+        {
+          "profiles": ["ro", "rw"],
+          "tier": "fixture-tested",
+          "evidence": [
+            "runtime/providers/base.py",
+            "tests/test_certification.py::TestHarnessCellsMatchTheLaunchTable",
+            "tests/test_certification.py::TestFirstRunFixture"
+          ],
+          "limitations": ["The hook config lives in a per-dispatch HERMES_HOME (posix) and fails closed; ro relies on HERMES_WRITE_SAFE_ROOT=/dev/null; only the inert stand-in has run this line."]
+        }
+      ]
+    },
+    "crush": {
+      "upstream": {"product": "Crush", "binary": "crush", "version": null, "commit": null},
+      "routes": [
+        {
+          "profiles": ["ro", "rw"],
+          "tier": "fixture-tested",
+          "evidence": [
+            "runtime/providers/base.py",
+            "tests/test_certification.py::TestHarnessCellsMatchTheLaunchTable",
+            "tests/test_certification.py::TestFirstRunFixture"
+          ],
+          "limitations": ["`crush run` auto-approves every session, so ro rests on the data-dir's disabled_tools config; only the inert stand-in has run this line."]
+        }
+      ]
+    },
+    "gemini": {
+      "upstream": {"product": "Gemini CLI", "binary": "gemini", "version": null, "commit": null},
+      "routes": [
+        {
+          "profiles": ["ro", "rw"],
+          "tier": "fixture-tested",
+          "evidence": [
+            "runtime/providers/base.py",
+            "tests/test_certification.py::TestHarnessCellsMatchTheLaunchTable",
+            "tests/test_certification.py::TestFirstRunFixture"
+          ],
+          "limitations": ["No deny-hook config is installed for Gemini: the rw boundary rests on the worktree and sandbox. Only the inert stand-in has run this line."]
+        }
+      ]
+    },
+    "cursor": {
+      "upstream": {"product": "Cursor CLI", "binary": "cursor", "version": null, "commit": null},
+      "routes": [
+        {
+          "profiles": ["ro"],
+          "tier": "unsupported",
+          "refusal": "unsupported_profile",
+          "evidence": ["tests/test_certification.py::TestHarnessCellsMatchTheLaunchTable"],
+          "limitations": ["No verified read-only launch flag."]
+        },
+        {
+          "profiles": ["rw"],
+          "tier": "unsupported",
+          "refusal": "unsupported_prompt",
+          "evidence": ["tests/test_certification.py::TestHarnessCellsMatchTheLaunchTable"],
+          "limitations": ["No verified headless prompt flag: base.py refuses a launch with a task rather than start the agent without it. Orca's own worker-start delivers the task instead (orca cells)."]
+        }
+      ]
+    },
+    "antigravity": {
+      "upstream": {"product": "Antigravity", "binary": "agy", "version": null, "commit": null},
+      "routes": [
+        {
+          "profiles": ["ro"],
+          "tier": "unsupported",
+          "refusal": "unsupported_profile",
+          "evidence": ["tests/test_certification.py::TestHarnessCellsMatchTheLaunchTable"],
+          "limitations": ["No verified read-only launch flag."]
+        },
+        {
+          "profiles": ["rw"],
+          "tier": "unsupported",
+          "refusal": "unsupported_prompt",
+          "evidence": ["tests/test_certification.py::TestHarnessCellsMatchTheLaunchTable"],
+          "limitations": ["No verified headless prompt flag; only Orca's worker-start delivers its task."]
+        }
+      ]
+    },
+    "grok": {
+      "upstream": {"product": "Grok CLI", "binary": "grok", "version": null, "commit": null},
+      "routes": [
+        {
+          "profiles": ["ro"],
+          "tier": "unsupported",
+          "refusal": "unsupported_profile",
+          "evidence": ["tests/test_certification.py::TestHarnessCellsMatchTheLaunchTable"],
+          "limitations": ["No verified read-only launch flag."]
+        },
+        {
+          "profiles": ["rw"],
+          "tier": "unsupported",
+          "refusal": "unsupported_prompt",
+          "evidence": ["tests/test_certification.py::TestHarnessCellsMatchTheLaunchTable"],
+          "limitations": ["No verified headless prompt flag; only Orca's worker-start delivers its task."]
+        }
+      ]
+    },
+    "droid": {
+      "upstream": {"product": "Droid", "binary": "droid", "version": null, "commit": null},
+      "routes": [
+        {
+          "profiles": ["ro"],
+          "tier": "unsupported",
+          "refusal": "unsupported_profile",
+          "evidence": ["tests/test_certification.py::TestHarnessCellsMatchTheLaunchTable"],
+          "limitations": ["No verified read-only launch flag."]
+        },
+        {
+          "profiles": ["rw"],
+          "tier": "unsupported",
+          "refusal": "unsupported_prompt",
+          "evidence": ["tests/test_certification.py::TestHarnessCellsMatchTheLaunchTable"],
+          "limitations": ["No verified headless prompt flag; only Orca's worker-start delivers its task."]
+        }
+      ]
+    }
+  }
+}
