@@ -3838,5 +3838,90 @@ class TestOrcaRoNativeClaudeFallback(unittest.TestCase):
             self.assertEqual(len(sends), 1, "silence is never answered with a resend")
 
 
+class TestTheSpendCapReachesTheLaunch(unittest.TestCase):
+    """#759: OPEN_FLEET_MAX_BUDGET_USD becomes `--max-budget-usd` on every headless claude launch
+    base.py builds; a malformed cap refuses on every runtime; OPEN_FLEET_REQUIRE_BUDGET=1 refuses
+    a claude spawn without one; Orca's own lanes cannot carry it and say so."""
+
+    RW = {"ORCA_COORD_ALLOW_AUTONOMOUS_WRITE": "1"}
+
+    def test_base_py_puts_the_cap_before_the_prompt_for_both_profiles(self):
+        for profile in ("ro", "rw"):
+            with self.subTest(profile=profile), \
+                    mock.patch.dict(os.environ, {"OPEN_FLEET_MAX_BUDGET_USD": "2.50"}):
+                launch = provider_base.build_harness_command("claude", profile, "/tmp/w", "the task")
+                self.assertEqual(launch["argv"][-3:], ["--max-budget-usd", "2.50", "the task"])
+                self.assertIn("--max-budget-usd 2.50", launch["command"])
+        with mock.patch.dict(os.environ, {"OPEN_FLEET_MAX_BUDGET_USD": "2"}):
+            ro = provider_base.build_harness_command("claude", "ro", "/tmp/w", None)
+        # A gt alias appends the prompt to the label, so it must still end on the plan flag.
+        self.assertTrue(ro["command"].endswith("--permission-mode plan"), ro["command"])
+
+    def test_base_py_without_a_cap_launches_exactly_as_before(self):
+        env = {k: v for k, v in os.environ.items() if k != "OPEN_FLEET_MAX_BUDGET_USD"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            launch = provider_base.build_harness_command("claude", "rw", "/tmp/w", "t")
+        self.assertNotIn("--max-budget-usd", launch["argv"])
+        self.assertEqual(launch["command"], "claude --dangerously-skip-permissions")
+
+    def test_base_py_refuses_a_cap_it_cannot_honour(self):
+        for bad in ("0", "0.00", "-1", "5e3", "1,5", "abc", "1000000", "05"):
+            with self.subTest(value=bad):
+                with self.assertRaises(provider_base.ProviderError) as ctx:
+                    provider_base.claude_budget_args({"OPEN_FLEET_MAX_BUDGET_USD": bad})
+                self.assertEqual(ctx.exception.code, "invalid_budget")
+        self.assertEqual(provider_base.claude_budget_args({"OPEN_FLEET_MAX_BUDGET_USD": " 7 "}),
+                         ["--max-budget-usd", "7"])
+        self.assertEqual(provider_base.claude_budget_args({}), [])
+
+    def test_a_set_cap_reaches_the_non_orca_claude_launch(self):
+        rc, launch, err = run_launch("claude", "rw", {**self.RW, "OPEN_FLEET_MAX_BUDGET_USD": "3"})
+        self.assertEqual(rc, 0, err)
+        with mock.patch.dict(os.environ, {"OPEN_FLEET_MAX_BUDGET_USD": "3"}):
+            want = provider_base.build_harness_command("claude", "rw", "/tmp/of-wt", None,
+                                                       effort="high")["shell"]
+        self.assertEqual(launch, want)
+        self.assertIn("--max-budget-usd 3", launch)
+
+    def test_a_malformed_cap_refuses_on_every_runtime(self):
+        for bad in ("0", "5e3", "ten"):
+            with self.subTest(runtime="posix", value=bad):
+                rc, _launch, err = run_launch("claude", "rw",
+                                              {**self.RW, "OPEN_FLEET_MAX_BUDGET_USD": bad})
+                self.assertEqual(rc, 2, err)
+                self.assertIn("SPAWN=REFUSED", err)
+                self.assertIn("not a positive dollar amount", err)
+        rc, _out, err = run_spawn(["task_test", "path:/tmp/wt", "t", "claude"],
+                                  env_extra={"OPEN_FLEET_MAX_BUDGET_USD": "0"})
+        self.assertEqual(rc, 2, err)
+        self.assertIn("not a positive dollar amount", err)
+
+    def test_require_refuses_an_uncapped_claude_spawn_and_only_that(self):
+        rc, _launch, err = run_launch("claude", "rw", {**self.RW, "OPEN_FLEET_REQUIRE_BUDGET": "1"})
+        self.assertEqual(rc, 2, err)
+        self.assertIn("SPAWN=REFUSED", err)
+        self.assertIn("no spend cap", err)
+        rc, launch, err = run_launch("claude", "rw", {**self.RW, "OPEN_FLEET_REQUIRE_BUDGET": "1",
+                                                      "OPEN_FLEET_MAX_BUDGET_USD": "4"})
+        self.assertEqual(rc, 0, err)
+        self.assertIn("--max-budget-usd 4", launch)
+        # codex has no spend flag: the requirement is claude's, and codex keeps its launch.
+        rc, launch, err = run_launch("codex", "rw", {**self.RW, "OPEN_FLEET_REQUIRE_BUDGET": "1"})
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("--max-budget-usd", launch or "")
+
+    def test_the_orca_lane_says_the_cap_is_not_carried(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {**UNVERIFIED_OK, "PATH": "/usr/bin:/bin", "SP": tmp, "HOME": tmp,
+                   "SPAWN_ROOT_WAIT_SECS": "0", "ORCA_CLI_COMMAND": "orca", "SW_PRINT_LAUNCH": "1",
+                   "PROFILE": "ro", "OPEN_FLEET_MAX_BUDGET_USD": "3"}
+            p = subprocess.run(["bash", str(SPAWN), "t1", "current", "t", "claude", "high"],
+                               env=env, capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("SPAWN=NOTE", p.stderr)
+        self.assertIn("not carried on the Orca launch lanes", p.stderr)
+        self.assertIn("LAUNCH=claude --permission-mode plan", p.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
