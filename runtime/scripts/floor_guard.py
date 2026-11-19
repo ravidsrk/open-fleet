@@ -208,29 +208,43 @@ GUARD_SURFACE_FILES = (
     # A path allowlist here waives every finding in the paths it names (2026-10-27 security
     # audit, W6-03): a waiver mechanism, so it moves only with a recorded human grant.
     ".gitleaks.toml",
+    # The pinned human grant verification key (#769/#772): replacing or deleting it changes who
+    # can sign waivers and one-way doors, so it moves only with a pre-landed human grant.
+    ".orca/human-grant-pubkey",
     "evals/routing.json",
     "bench/vf-bench/VERSION",
     "bench/vf-bench/CANARY",
 )
 GUARD_SURFACE_DIRS = ("bench/vf-bench/traps/",)
+_RUFF_SHADOW_BASENAMES = frozenset({"ruff.toml", ".ruff.toml"})
+_PYPROJECT_GUARD = re.compile(r"^\s*(?:\[[^\]]*)?tool\.(ruff|coverage)\b")
+_INI_TOOL_GUARD = re.compile(r"^\s*\[[^\]]*(?:tool[.:])?(ruff|coverage)\b", re.IGNORECASE)
+_COVERAGERC_SECTION = re.compile(r"^\s*\[")
 GUARD_SURFACE_KEYS = (
     # (path, assignment regex): the ruff rule selection AND everything that carves it back
-    # (ignore, extend-*, exclude, per-file-ignores and their entries, a rule code on its own
-    # line in a multi-line list — 2026-10-26 review: `ignore = ["F821"]` beside the guarded
-    # select lowered the bar in silence), the coverage fail_under AND its scope (source, include,
-    # omit, exclude_lines and the indented continuation lines those INI values are written on),
+    # (ignore, extend-*, exclude, include, per-file-ignores and their entries, a rule code on its
+    # own line in a multi-line list — 2026-10-26 review: `ignore = ["F821"]` beside the guarded
+    # select lowered the bar in silence; #769: include/extend/inline per-file-ignores/lint.*),
+    # the coverage fail_under AND its scope (source, include, omit, exclude_lines, `:` delimiters,
+    # INI section headers and the indented continuation lines those INI values are written on),
     # the routing floor, and the vf-bench pins (VERSION + CANARY + traps digest as enforced in
     # gate.py — a corpus bump moves them in the same PR, explicitly).
-    ("ruff.toml", re.compile(r"^\s*(extend-)?(select|ignore|exclude|fixable|unfixable)\s*=")),
+    ("ruff.toml", re.compile(
+        r"^\s*(?:lint\.)?(?:extend|force-exclude|"
+        r"(?:extend-)?(?:select|ignore|exclude|include|fixable|unfixable|per-file-ignores))\s*="
+    )),
     ("ruff.toml", re.compile(r"^\s*\[[^\]]*per-file-ignores")),
     # A table entry and a rule code on its own line, in either TOML quote style, and a bare key
     # assigned a list of rule codes (#707 review: `'runtime/scripts/*' = ['F401']` matched none).
     ("ruff.toml", re.compile(r"^\s*(\"[^\"]+\"|'[^']+')\s*=")),
     ("ruff.toml", re.compile(r"^\s*(\"[A-Z]+[0-9]*\"|'[A-Z]+[0-9]*')\s*,?\s*$")),
     ("ruff.toml", re.compile(r"^\s*[A-Za-z0-9_.*/-]+\s*=\s*\[\s*[\"'][A-Z]+[0-9]*[\"']")),
-    (".coveragerc", re.compile(r"^\s*(fail_under|source|include|omit|exclude_lines|exclude_also|"
-                               r"skip_covered|skip_empty|ignore_errors|partial_branches|plugins)\s*=")),
+    (".coveragerc", re.compile(r"^\s*(fail_under|source|include|omit|exclude_lines|exclude_also|branch|"
+                               r"skip_covered|skip_empty|ignore_errors|partial_branches|plugins)\s*[=:]")),
     (".coveragerc", re.compile(r"^\s+[^\s#;]")),
+    # Guard any .coveragerc section header other than bare `[run]` here (scan() also guards
+    # added/removed `[run]` headers in diffs so inserting `[run]` above fail_under cannot evade).
+    (".coveragerc", re.compile(r"^\s*\[(?!run\]\s*$)")),
     ("tests/test_evals.py", re.compile(r"\bROUTING_MIN_SCORE\s*=")),
     ("bench/vf-bench/gate.py", re.compile(r"\bEXPECTED_VERSION\s*=")),
     ("bench/vf-bench/gate.py", re.compile(r"\bEXPECTED_CANARY_GUID\s*=")),
@@ -519,6 +533,21 @@ _FLOOR_WORDS = re.compile(r">=|<=|≥|≤|\bfloor\b|\bthreshold\b|\beffective\b|
                           r"\bno (?:lower|less|fewer)\b", re.IGNORECASE)
 _COMPARATOR_NUMERIC = re.compile(r"(?:>=|<=|≥|≤|>|<)\s*=?\s*\d")
 _COMPARATOR = re.compile(r">=|<=|≥|≤|>|<")
+_GE_COMP = re.compile(r">=|≥|(?<![-<>=≤≥])>(?!=)")
+_LE_COMP = re.compile(r"<=|≤|(?<![<>=≤≥])<(?![=-])")
+_COMPARATOR_NUMBER = re.compile(r"(?:>=|<=|≥|≤|>|<)\s*=?\s*(\d+(?:\.\d+)?)")
+
+
+def _comparator_flipped(bcell, acell):
+    """True when an upper-bound comparator (`>=`/`>`/`≥`) flipped to a lower-bound one."""
+    b_ge, a_ge = len(_GE_COMP.findall(bcell)), len(_GE_COMP.findall(acell))
+    b_le, a_le = len(_LE_COMP.findall(bcell)), len(_LE_COMP.findall(acell))
+    return b_ge > 0 and a_ge < b_ge and a_le > b_le
+
+
+def _comparator_numbers(text):
+    folded = unicodedata.normalize("NFKC", text)
+    return [float(n) for n in _COMPARATOR_NUMBER.findall(_NOT_A_THRESHOLD.sub(" ", folded))]
 
 
 def numbers(text):
@@ -549,8 +578,9 @@ def cells(text):
 def guard_surface_hit(path, text):
     """Name the frozen-surface item a diff line touches, or None.
 
-    Whole files and trap-dir members trip on any line; keyed files only on the
-    key's assignment. The name is what gets reported; the matched text never is.
+    Whole files, trap-dir members and shadowing ruff config files trip on any line; keyed files
+    and pyproject.toml/setup.cfg/tox.ini ruff/coverage sections trip only on guarded lines. The
+    name is what gets reported; the matched text never is.
     """
     if not path:
         return None
@@ -559,6 +589,13 @@ def guard_surface_hit(path, text):
     for surface_dir in GUARD_SURFACE_DIRS:
         if path.startswith(surface_dir):
             return surface_dir.rstrip("/")
+    base = Path(path).name
+    if base in _RUFF_SHADOW_BASENAMES and path != "ruff.toml":
+        return path
+    if base == "pyproject.toml" and _PYPROJECT_GUARD.search(text):
+        return path
+    if base in ("setup.cfg", "tox.ini") and _INI_TOOL_GUARD.search(text):
+        return path
     for surface_file, assignment in GUARD_SURFACE_KEYS:
         if path == surface_file and assignment.search(text):
             return surface_file
@@ -603,11 +640,25 @@ def lowering(before_text, after_text):
     one cell, where a number that no longer appears anywhere is the one that was dropped."""
     b_cells, a_cells = cells(before_text), cells(after_text)
     if len(b_cells) == 1 and len(a_cells) == 1:
-        b_units, a_units = numbers_with_units(b_cells[0]), numbers_with_units(a_cells[0])
+        bcell, acell = b_cells[0], a_cells[0]
+        b_units, a_units = numbers_with_units(bcell), numbers_with_units(acell)
         before, after = [v for v, _ in b_units], [v for v, _ in a_units]
+        if _comparator_flipped(bcell, acell):
+            return "comparator direction flipped"
+        if before and _COMPARATOR.search(bcell) and not _COMPARATOR_NUMERIC.search(acell):
+            return "criterion no longer compares against a number"
         gone = [(v, u) for v, u in b_units if v not in after]
         fresh = [(v, u) for v, u in a_units if v not in before]
         if not gone:
+            if fresh:
+                a_comp = [v for v in _comparator_numbers(acell) if v not in before]
+                for old, unit in b_units:
+                    for new in a_comp:
+                        if new < old:
+                            return f"{old:g} -> {new:g}"
+                    same_unit = [new for new, u in fresh if u == unit and new < old]
+                    if same_unit and (unit or _FLOOR_WORDS.search(acell) or _COMPARATOR.search(acell)):
+                        return f"{old:g} -> {min(same_unit):g}"
             return None
         if not fresh:
             return f"{gone[0][0]:g} -> (no number)"
@@ -626,21 +677,40 @@ def lowering(before_text, after_text):
             lower = [new for new in candidates if new < old]
             if lower:
                 return f"{old:g} -> {max(lower):g}"
+        a_comp = [v for v in _comparator_numbers(acell) if v not in before]
+        for old, unit in b_units:
+            for new in a_comp:
+                if new < old:
+                    return f"{old:g} -> {new:g}"
+            same_unit = [new for new, u in fresh if u == unit and new < old]
+            if same_unit and (unit or _FLOOR_WORDS.search(acell) or _COMPARATOR.search(acell)):
+                return f"{old:g} -> {min(same_unit):g}"
         return None
     for i, bcell in enumerate(b_cells):
         acell = a_cells[i] if i < len(a_cells) else ""
+        if _comparator_flipped(bcell, acell):
+            return "comparator direction flipped"
         before, after = numbers(bcell), numbers(acell)
         for j, value in enumerate(before):
             if j >= len(after):
                 return f"{value:g} -> (no number)"
             if after[j] < value:
                 return f"{value:g} -> {after[j]:g}"
-        if before and _COMPARATOR.search(bcell) and _COMPARATOR.search(acell) and not _COMPARATOR_NUMERIC.search(acell):
+        if before and _COMPARATOR.search(bcell) and not _COMPARATOR_NUMERIC.search(acell):
             return "criterion no longer compares against a number"
-        if len(after) > len(before) and _FLOOR_WORDS.search(acell):
+        if len(after) > len(before) and (_FLOOR_WORDS.search(acell) or _COMPARATOR.search(acell)):
             return f"a floor-shaped number was added: {after[len(before)]:g}"
+        if len(after) > len(before) and before:
+            b_units, a_units = numbers_with_units(bcell), numbers_with_units(acell)
+            fresh = [(v, u) for v, u in a_units if v not in before]
+            for old, unit in b_units:
+                if not unit:
+                    continue
+                same = [new for new, u in fresh if u == unit and new < old]
+                if same:
+                    return f"{old:g} -> {min(same):g}"
     for acell in a_cells[len(b_cells):]:
-        if numbers(acell) and _FLOOR_WORDS.search(acell):
+        if numbers(acell) and (_FLOOR_WORDS.search(acell) or _COMPARATOR.search(acell)):
             return f"a floor-shaped number was added: {numbers(acell)[0]:g}"
     return None
 
@@ -670,6 +740,8 @@ def scan(added, removed, constraints_name, repo):
         if is_constraints(path, constraints_name) and EXCEPTIONS_HEADING.match(text):
             in_exceptions[path] = True
         surface = guard_surface_hit(path, text)
+        if surface is None and path == ".coveragerc" and _COVERAGERC_SECTION.match(text):
+            surface = ".coveragerc"
         if surface:
             flag("guard-surface", path, line, surface)
         if media(path):
@@ -704,6 +776,8 @@ def scan(added, removed, constraints_name, repo):
     in_deleted_files = {}
     for path, line, text in removed:
         surface = guard_surface_hit(path, text)
+        if surface is None and path == ".coveragerc" and _COVERAGERC_SECTION.match(text):
+            surface = ".coveragerc"
         if surface:
             flag("guard-surface", path, line, surface)
         if media(path) or not TEST_PATH.search(path or ""):

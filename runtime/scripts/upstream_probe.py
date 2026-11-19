@@ -230,9 +230,11 @@ def fetch_tags(url, timeout, token=None, max_pages=MAX_PAGES):
             raise ProbeError(f"refusing rel=next to another origin: {url}")
     else:
         # The cap ended the walk with a next page still unread: the list is partial, and a drift
-        # read off it could miss the newest tag. Said once, on stderr (2026-10-26 review).
-        print(f"upstream_probe: tag listing stopped at the {max_pages}-page cap with pages unread; "
-              "the drift assessment may miss newer tags (raise MAX_PAGES)", file=sys.stderr)
+        # read off it could miss the newest tag. Fail closed with ProbeError (exit 2) (#788).
+        raise ProbeError(
+            f"tag listing stopped at the {max_pages}-page cap with pages unread; "
+            "refusing to assess drift from a partial tag list (raise MAX_PAGES)"
+        )
     return names
 
 

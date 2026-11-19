@@ -462,5 +462,45 @@ class ShippedTree(unittest.TestCase):
                 self.assertIn(f"--mission {skill_dir.name}", text, skill_dir.name)
 
 
+class SecurityHardening783(unittest.TestCase):
+    """Regression tests for #783 hardening in quarantine_check.py."""
+
+    def test_mission_view_rejects_invalid_mission_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for bad in ("../evil", "BadName", "", "a/b", ".hidden"):
+                with self.subTest(mission=bad):
+                    with self.assertRaises(qc.QuarantineError):
+                        qc.mission_view(root, bad)
+
+    def test_mission_view_requires_frontmatter_name_match_and_records_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # Single-mission bundle layout: root/SKILL.md with mismatched frontmatter name
+            (root / "SKILL.md").write_text("---\nname: bar\n---\n# body\n", encoding="utf-8")
+            with self.assertRaises(qc.QuarantineError):
+                qc.mission_view(root, "foo")
+            # Matching name succeeds and records fm["name"] in view["missions"]
+            (root / "SKILL.md").write_text("---\nname: foo\n---\n# body\n", encoding="utf-8")
+            view = qc.mission_view(root, "foo")
+            self.assertEqual(view["missions"], {"foo"})
+            # Malformed frontmatter fails closed
+            (root / "SKILL.md").write_text("---\nname: foo\nunclosed\n", encoding="utf-8")
+            with self.assertRaises(qc.QuarantineError):
+                qc.mission_view(root, "foo")
+            # Catalog layout mismatch fails closed
+            (root / "SKILL.md").unlink()
+            (root / "skills" / "foo").mkdir(parents=True)
+            (root / "skills" / "foo" / "SKILL.md").write_text(
+                "---\nname: other\n---\n# body\n", encoding="utf-8")
+            with self.assertRaises(qc.QuarantineError):
+                qc.mission_view(root, "foo")
+
+    def test_ref_matches_is_case_insensitive_for_hex_commits(self):
+        self.assertTrue(qc._ref_matches("ABCD1234", "abcd1234" + "0" * 32))
+        self.assertTrue(qc._ref_matches("abcd1234", "ABCD1234" + "0" * 32))
+        self.assertFalse(qc._ref_matches("ABCD1235", "abcd1234" + "0" * 32))
+
+
 if __name__ == "__main__":
     unittest.main()

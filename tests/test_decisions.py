@@ -1577,5 +1577,200 @@ class TestNestedRepoNeverSubstitutesGrantAnchorC20(TestPinRefIsTheTrustAnchor):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
 
+class TestSecurityHardening772(TestPinRefIsTheTrustAnchor):
+    """Regression tests for #772 hardening in decisions.py."""
+
+    def test_class_monotonicity_blocks_non_one_way_override_across_standing_append_and_check(self):
+        log = Path(self.tmp) / "docs" / "DECISIONS.md"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        ow_line = self.signed("deploy-prod", "denied", "2026-09-01T00:00:00Z")
+        log.write_text("# DECISIONS\n\n" + ow_line + "\n", encoding="utf-8")
+
+        # cmd_append must refuse a mechanical or taste follow-up for the same id
+        r = subprocess.run(
+            [sys.executable, str(DECISIONS), "--file", str(log),
+             "--pin-ref", "refs/remotes/origin/main",
+             "append", "--id", "deploy-prod", "--class", "mechanical",
+             "--answer", "approved", "--why", "overriding", "--task", "t-2"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("monotonicity", r.stderr)
+
+        # Direct edit appending a non-one-way line fails `check` and is ignored by standing()/active()
+        downgrade = (
+            "2026-09-02T00:00:00Z · deploy-prod · mechanical · superseded · "
+            "trying to retire a non-waiver one-way decision · t-2"
+        )
+        log.write_text("# DECISIONS\n\n" + ow_line + "\n" + downgrade + "\n", encoding="utf-8")
+        r = subprocess.run(
+            [sys.executable, str(DECISIONS), "--file", str(log),
+             "--pin-ref", "refs/remotes/origin/main", "check"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("monotonicity", r.stdout + r.stderr)
+
+        pub = self.ed.publickey(self.seed_bytes)
+        records = decisions.read_lines(log)
+        kept = decisions.standing(records, pub)
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0]["class"], "one-way")
+        active_by_id = {rec["id"]: rec for rec in decisions.active(kept)}
+        self.assertEqual(active_by_id["deploy-prod"]["answer"], "denied")
+
+        # Strict-tightening floor-waiver:* allow -> superseded still passes check and retires
+        fw_id = "floor-waiver:example"
+        fw_payload = decisions.grant_payload(
+            fw_id, "allow", "approved waiver", "t-3",
+            ts="2026-09-03T00:00:00Z", klass="one-way", source="human:lia",
+        )
+        fw_sig = self.ed.signature(fw_payload, self.seed_bytes, pub).hex()
+        fw_grant = (
+            f"2026-09-03T00:00:00Z · {fw_id} · one-way · allow · "
+            f"approved waiver [source=human:lia sig={fw_sig}] · t-3"
+        )
+        fw_retire = (
+            f"2026-09-04T00:00:00Z · {fw_id} · mechanical · superseded · "
+            "floor holds again · t-4"
+        )
+        log.write_text("# DECISIONS\n\n" + fw_grant + "\n" + fw_retire + "\n", encoding="utf-8")
+        r = subprocess.run(
+            [sys.executable, str(DECISIONS), "--file", str(log),
+             "--pin-ref", "refs/remotes/origin/main", "check"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        fw_recs = decisions.read_lines(log)
+        fw_standing = decisions.standing(fw_recs, pub)
+        self.assertEqual(len(fw_standing), 2)
+        self.assertEqual(fw_standing[-1]["answer"], "superseded")
+        self.assertNotIn(fw_id, {rec["id"] for rec in decisions.active(fw_standing)})
+
+    def test_standing_rejects_future_skewed_and_malformed_records(self):
+        good = decisions.parse_line(
+            "2026-09-01T00:00:00Z · ok-1 · mechanical · yes · clean · t-1")
+        future = decisions.parse_line(
+            "2099-01-01T00:00:00Z · ok-1 · mechanical · no · future-dated override · t-2")
+        bad_ts = {
+            "ts": "not-a-date", "id": "ok-2", "class": "mechanical",
+            "answer": "yes", "why": "malformed ts", "task": "t-3", "line": 3,
+        }
+        bad_cf = decisions.parse_line(
+            "2026-09-02T00:00:00Z · ok-1 · mechanical · no · hidden\u200bchar · t-4")
+        kept = decisions.standing([good, future, bad_ts, bad_cf])
+        self.assertEqual(kept, [good])
+
+    def test_fold_normalizes_nfkc_strips_cf_mn_and_validate_rejects_cf(self):
+        doors = decisions.load_doors()
+        # Fullwidth + zero-width joiner + combining accent should still fold and hit doors
+        self.assertIn("deploy", decisions.door_hits("ｄｅ\u0301ｐｌｏｙ to ｐｒｏｄｕｃｔｉｏｎ", doors))
+        self.assertIn("deletion", decisions.door_hits("del\u200bete production database", doors))
+        # validate() explicitly rejects Cf / bidi characters in any ledger field
+        rec = decisions.parse_line(
+            "2026-09-01T00:00:00Z · gate-cf · mechanical · ok · looks\u202eharmless · t-1")
+        errs = decisions.validate(rec, doors)
+        self.assertTrue(any("invisible" in e or "control" in e for e in errs), errs)
+
+    def test_completed_verb_forms_synonyms_and_bounded_window_matchers(self):
+        doors = decisions.load_doors()
+        cases = (
+            ("git push --force origin main", "merge-to-default"),
+            ("rm -fr /", "deletion"),
+            ("delete production database", "deletion"),
+            ("deploy service to prod", "deploy"),
+            ("rotate production api key", "secret-rotation"),
+            ("merge branch to main", "merge-to-default"),
+            ("destroy the production table", "deletion"),
+            ("purchase a new enterprise license", "spend"),
+            ("widen the project scope", "scope-change"),
+            ("unfreeze the release spec", "freeze"),
+        )
+        for text, expected_door in cases:
+            with self.subTest(text=text):
+                self.assertIn(expected_door, decisions.door_hits(text, doors))
+        # Routine merged-branch cleanup must remain free of false positives
+        self.assertEqual(decisions.door_hits("git branch -d feature/old", doors), [])
+
+    def test_grant_payload_v3_binds_human_source_against_spoofing(self):
+        seed_path = Path(self.tmp) / "human.seed"
+        seed_path.write_text(self.seed_bytes.hex() + "\n", encoding="utf-8")
+        sign = subprocess.run(
+            [sys.executable, str(DECISIONS), "sign-grant",
+             "--key", str(seed_path), "--id", "deploy-v3", "--answer", "approved",
+             "--why", "deploy to production", "--task", "t-1",
+             "--ts", "2026-09-05T00:00:00Z", "--source", "human:lia"],
+            capture_output=True, text=True, check=True,
+        )
+        sig = sign.stdout.strip()
+        log = Path(self.tmp) / "docs" / "DECISIONS.md"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        # Valid with human:lia
+        log.write_text(
+            "# DECISIONS\n\n"
+            f"2026-09-05T00:00:00Z · deploy-v3 · one-way · approved · "
+            f"deploy to production [source=human:lia sig={sig}] · t-1\n",
+            encoding="utf-8",
+        )
+        ok = subprocess.run(
+            [sys.executable, str(DECISIONS), "--file", str(log),
+             "--pin-ref", "refs/remotes/origin/main", "check"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
+        # Spoofing human:mallory with the same v3 signature MUST fail
+        log.write_text(
+            "# DECISIONS\n\n"
+            f"2026-09-05T00:00:00Z · deploy-v3 · one-way · approved · "
+            f"deploy to production [source=human:mallory sig={sig}] · t-1\n",
+            encoding="utf-8",
+        )
+        spoofed = subprocess.run(
+            [sys.executable, str(DECISIONS), "--file", str(log),
+             "--pin-ref", "refs/remotes/origin/main", "check"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(spoofed.returncode, 1, spoofed.stdout + spoofed.stderr)
+
+    def test_check_base_validates_added_backdated_records_even_with_since(self):
+        log = Path(self.tmp) / "docs" / "DECISIONS.md"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        old_invalid = (
+            "2025-01-01T00:00:00Z · hist-1 · one-way · approved · "
+            "historical unsigned entry before key pin · t-0"
+        )
+        log.write_text("# DECISIONS\n\n" + old_invalid + "\n", encoding="utf-8")
+        self.git("add", "docs/DECISIONS.md")
+        self.git("commit", "-q", "-m", "historical ledger")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+
+        # Add a NEW backdated unsigned one-way line dated before --since
+        backdated = (
+            "2025-02-01T00:00:00Z · sneak-1 · one-way · approved · "
+            "backdated unsigned grant · t-9"
+        )
+        log.write_text("# DECISIONS\n\n" + old_invalid + "\n" + backdated + "\n", encoding="utf-8")
+
+        # Without --base, --since skips both 2025 lines
+        without_base = subprocess.run(
+            [sys.executable, str(DECISIONS), "--file", str(log),
+             "--pin-ref", "refs/remotes/origin/main", "check", "--since", "2026-09-24"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(without_base.returncode, 0, without_base.stdout + without_base.stderr)
+
+        # With --base, the untouched historical 2025-01-01 line stays skipped, while the
+        # newly added 2025-02-01 line is validated and rejected!
+        with_base = subprocess.run(
+            [sys.executable, str(DECISIONS), "--file", str(log),
+             "--pin-ref", "refs/remotes/origin/main",
+             "check", "--since", "2026-09-24", "--base", "refs/remotes/origin/main"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(with_base.returncode, 1, with_base.stdout + with_base.stderr)
+        self.assertIn(":4:", with_base.stdout + with_base.stderr)
+        self.assertNotIn(":3:", with_base.stdout + with_base.stderr)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -671,7 +671,7 @@ class AtomicSaves(unittest.TestCase):
                     gb.save_batch(path, data)
             try:
                 self.assertEqual(path.read_bytes(), before)
-                staged = Path(str(path) + ".tmp")
+                (staged,) = Path(tmp).glob(f"{path.name}.*.tmp")
                 self.assertTrue(staged.is_file(), "the new bytes stage first")
                 self.assertIn("G2", staged.read_text(encoding="utf-8"))
             finally:
@@ -1155,6 +1155,86 @@ class TheOwedSetIsReadWhereTheKeyIsRead(unittest.TestCase):
                      batch=sub_batch)
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         self.assertIn("nested repository", r.stderr)
+
+
+class SecurityHardening788(unittest.TestCase):
+    """Regression tests for #788 hardening in gate-batch.py."""
+
+    def test_human_source_enforces_human_name_and_reserved_names(self):
+        for bad in ("human:agent", "human:bot", "human:coordinator", "human:fleet",
+                    "human:orca", "human:worker", "human:system", "human:ai",
+                    "human:123", "human:-foo", "human:lia smith", "human:a/b", "human:"):
+            with self.subTest(source=bad), tempfile.TemporaryDirectory() as tmp:
+                _, data = fresh_batch(tmp)
+                add_owed(data, "G1")
+                with self.assertRaises(gb.GateError):
+                    gb.transition(data, "G1", "answered", "yes",
+                                  answered="2026-09-15", source=bad)
+                gate = dict(data["gates"][0])
+                gate.update(status="answered", answer="yes",
+                            answered="2026-09-15", source=bad)
+                with self.assertRaises(gb.GateError):
+                    gb.validate_gate(gate)
+        with tempfile.TemporaryDirectory() as tmp:
+            _, data = fresh_batch(tmp)
+            add_owed(data, "G1")
+            gate = gb.transition(data, "G1", "answered", "yes",
+                                 answered="2026-09-15", source="human:alice.smith")
+            self.assertEqual(gate["source"], "human:alice.smith")
+            add_owed(data, "G2")
+            legacy = gb.transition(data, "G2", "overtaken", "merged already",
+                                   answered="2026-09-15", source=None)
+            self.assertIsNone(legacy.get("source"))
+            gb.validate_gate(legacy)
+
+    def test_atomic_write_fsyncs_unique_temp_file_before_replace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "gate-batch.json"
+            events = []
+            real_fsync = gb.os.fsync
+            real_replace = gb.os.replace
+
+            def spy_fsync(fd):
+                events.append("fsync")
+                return real_fsync(fd)
+
+            def spy_replace(src, dst):
+                events.append(("replace", Path(src).name, Path(dst).name))
+                return real_replace(src, dst)
+
+            with mock.patch.object(gb.os, "fsync", side_effect=spy_fsync), \
+                 mock.patch.object(gb.os, "replace", side_effect=spy_replace):
+                gb._atomic_write_text(target, "{}\n")
+            self.assertEqual(events[0], "fsync")
+            self.assertEqual(events[1][0], "replace")
+            self.assertNotEqual(events[1][1], "gate-batch.json.tmp")
+            self.assertTrue(events[1][1].startswith("gate-batch.json."))
+            self.assertTrue(events[1][1].endswith(".tmp"))
+
+    def test_concurrent_cli_adds_are_serialized_by_flock(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            batch = Path(tmp) / "gate-batch.json"
+            init = subprocess.run(
+                [sys.executable, str(gb.__file__), "--file", str(batch),
+                 "init", "--title", "Concurrency test"],
+                capture_output=True, text=True, check=True,
+            )
+            self.assertEqual(init.returncode, 0)
+            procs = [
+                subprocess.Popen(
+                    [sys.executable, str(gb.__file__), "--file", str(batch),
+                     "add", "--title", f"Gate {i}", "--question", f"Question {i}?"],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
+                for i in range(4)
+            ]
+            for p in procs:
+                out, err = p.communicate(timeout=30)
+                self.assertEqual(p.returncode, 0, out + err)
+            loaded = gb.load_batch(batch)
+            self.assertEqual(len(loaded["gates"]), 4)
+            self.assertEqual({g["id"] for g in loaded["gates"]}, {"G1", "G2", "G3", "G4"})
 
 
 if __name__ == "__main__":
