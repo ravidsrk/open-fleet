@@ -396,10 +396,25 @@ class TagsApiOverHttp(unittest.TestCase):
 
     def test_stops_after_five_pages(self):
         r = self.probe("/endless?page=1")
-        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.returncode, 2, r.stderr)
         self.assertEqual(len(_TagsHandler.requests), 5, "the page cap is five")
-        self.assertEqual(json.loads(r.stdout), {"pin": PIN, "latest": "v1.4.220",
-                                                "drift": "patch", "patches_behind": 5})
+        self.assertEqual(r.stdout, "")
+        self.assertIn("page cap", r.stderr)
+
+    def test_five_complete_pages_without_trailing_next_succeeds(self):
+        _TagsHandler.routes = {
+            f"/five?page={i}": (
+                200,
+                ({"Link": f'<BASE/five?page={i + 1}>; rel="next"'} if i < 5 else {}),
+                json.dumps([{"name": f"v1.4.{215 + i}"}]),
+            )
+            for i in range(1, 6)
+        }
+        r = self.probe("/five?page=1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(len(_TagsHandler.requests), 5)
+        self.assertEqual(json.loads(r.stdout),
+                         {"pin": PIN, "latest": "v1.4.220", "drift": "patch", "patches_behind": 5})
 
     def test_sends_bearer_only_when_github_token_is_set(self):
         _TagsHandler.routes = {"/tags": (200, {}, json.dumps([{"name": PIN}]))}

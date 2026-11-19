@@ -91,6 +91,7 @@ _spec = importlib.util.spec_from_file_location("_validate", ROOT / "scripts" / "
 validate = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(validate)
 _grammar = validate._grammar
+_quarantine = validate._quarantine
 # The hardened git (one resolution, no replace objects, no global/system config) for the
 # provenance read that decides what a rebuild may delete.
 _spec = importlib.util.spec_from_file_location("_bundle_gitexec", ROOT / "runtime" / "scripts" / "gitexec.py")
@@ -147,7 +148,7 @@ REQUIRED_RUNTIME = tuple(f"runtime/scripts/{name}" for name in (
     # spawn_worker.sh runs it beside itself: the identity a scrubbed environment cannot erase (W4-04).
     "spawn_identity.py", "spawn_worker.sh", "verify-gate.sh", "verify.py",
     "wtree.sh",
-)) + ("runtime/one-way-doors.json", "runtime/pins.json")
+)) + ("runtime/one-way-doors.json", "runtime/pins.json", "runtime/quarantine.json")
 # build-change's mandatory reporting input is outside the protocol directories.
 SUPPORT_DOCS = ("docs/runs/TEMPLATE.md",)
 # The bundle doubles as the installable lean plugin, so its manifests are build inputs too.
@@ -1108,6 +1109,29 @@ def build(out_dir, keep_record=True):
     out = Path(out_dir)
     missions = [d for d in sorted(SKILLS_DIR.iterdir())
                 if d.is_dir() and not d.name.startswith((".", "_")) and (d / "SKILL.md").is_file()]
+    q_entries, q_errors, q_present = _quarantine.load_quarantine(ROOT)
+    if not q_present:
+        return 0, ["missing required source: runtime/quarantine.json"]
+    if q_errors:
+        return 0, [f"quarantine: {e}" for e in q_errors]
+    if q_entries:
+        q_missions, q_composes = set(), {}
+        for skill_dir in missions:
+            try:
+                mv = _quarantine.mission_view(ROOT, skill_dir.name)
+            except _quarantine.QuarantineError as err:
+                return 0, [f"quarantine: {err}"]
+            q_missions |= mv["missions"]
+            q_composes[skill_dir.name] = mv["composes"][skill_dir.name]
+        pins, pins_error = _quarantine.pins_view(ROOT)
+        q_violations = _quarantine.violations(q_entries, {
+            "missions": q_missions,
+            "composes": q_composes,
+            "pins": pins,
+            "pins_error": pins_error,
+        })
+        if q_violations:
+            return 0, [f"QUARANTINED {v}" for v in q_violations]
     files = {destination for _source, destination in plugin_files()}
     planned = sorted(files | {f"skills/{d.name}" for d in missions})
     unkept = None

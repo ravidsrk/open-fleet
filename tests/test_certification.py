@@ -1700,5 +1700,103 @@ class TestTheBoundFirstRunsAreLive(unittest.TestCase):
         self.assertIn("is not the witnessed harness version", p.stderr)
 
 
+class TestSecurityHardening782(unittest.TestCase):
+    """Regression tests for #782 hardening in certification.py."""
+
+    REPORT = "docs/runs/2026-10-24-review-it-first-run.md"
+
+    def _validate_with(self, mutate=None, strict_pin_witness=False):
+        rec = json.loads(RECORD.read_text(encoding="utf-8"))
+        if mutate is not None:
+            mutate(rec)
+        tmp = Path(tempfile.mkdtemp(prefix="of-cert-782-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        path = tmp / "record.json"
+        path.write_text(json.dumps(rec), encoding="utf-8")
+        return certification.validate(ROOT, record_path=path,
+                                      strict_pin_witness=strict_pin_witness)
+
+    def test_fixture_marker_in_unquoted_bound_artifact_is_refused(self):
+        real_bound = certification._bound_artifacts
+        for marker in ("worker=inert", "tier=fixture-tested",
+                       '"worker": "inert"', '"tier": "fixture-tested"', "(inert "):
+            with self.subTest(marker=marker):
+                def poisoned(rel, root, marker=marker):
+                    arts = dict(real_bound(rel, root))
+                    if rel == self.REPORT:
+                        arts["docs/runs/2026-10-24-review-it-first-run/extra.log"] = (
+                            f"unquoted line with {marker} marker",
+                        )
+                    return arts
+                with mock.patch.object(certification, "_bound_artifacts", side_effect=poisoned):
+                    errors, _, _ = self._validate_with()
+                self.assertTrue(any("fixture run" in e for e in errors), errors)
+
+    def test_structural_first_run_receipt_validation_catches_non_live_or_no_go(self):
+        real_bound = certification._bound_artifacts
+        cases = (
+            ("non-live worker", {"route": {"worker": "standin"}}, "route.worker="),
+            ("fixture tier", {"tier": "fixture-tested"}, "fixture"),
+            ("quoted NO-GO", {"verdict": "NO-GO"}, "must be 'GO'"),
+        )
+        for label, patch, needle in cases:
+            with self.subTest(case=label):
+                def tampered(rel, root, patch=patch):
+                    arts = dict(real_bound(rel, root))
+                    if rel == self.REPORT:
+                        for k, lines in list(arts.items()):
+                            if k.endswith("mac-ro/receipt.json"):
+                                obj = json.loads("\n".join(lines))
+                                obj.update(patch)
+                                arts[k] = tuple(ln.strip() for ln in json.dumps(obj, indent=2).splitlines())
+                    return arts
+                with mock.patch.object(certification, "_bound_artifacts", side_effect=tampered):
+                    errors, _, _ = self._validate_with()
+                self.assertTrue(any(needle in e for e in errors), errors)
+
+    def test_inert_in_harness_or_upstream_version_is_refused(self):
+        def set_inert_harness(rec):
+            live = next(g for g in rec["providers"]["posix"]["routes"]
+                        if g["tier"] == "live-witnessed")
+            live["witnessed"]["harness_version"] = "inert-claude 1.0"
+
+        errors, _, _ = self._validate_with(set_inert_harness)
+        self.assertTrue(any("inert" in e.lower() for e in errors), errors)
+        errors2, _, _ = self._validate_with(
+            lambda rec: rec["harnesses"]["claude"]["upstream"].update(version="inert-2.1.304")
+        )
+        self.assertTrue(any("inert" in e.lower() for e in errors2), errors2)
+
+    def test_pinned_provider_upstream_version_mismatch_is_checked_and_surfaced(self):
+        # Undisclosed version mismatch fails default validate()
+        def undisclosed_mismatch(rec):
+            orca_rw = next(
+                g for g in rec["providers"]["orca"]["routes"]
+                if g["tier"] == "live-witnessed" and g["profiles"] == ["rw"]
+            )
+            orca_rw["limitations"] = ["no mention of prior pin version"]
+        errors, _, _ = self._validate_with(undisclosed_mismatch)
+        self.assertTrue(any("does not match pinned upstream.version" in e for e in errors), errors)
+
+        # Strict mode rejects even disclosed source-delta carry-forwards (orca rw/claude at 1.4.224)
+        strict_errors, _, _ = self._validate_with(strict_pin_witness=True)
+        self.assertTrue(
+            any("orca" in e and "does not match pinned upstream.version" in e
+                for e in strict_errors),
+            strict_errors,
+        )
+
+        # matrix --json exposes witnessed_upstream and witness_matches_pin cleanly
+        p = cert_main("matrix", "--json")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        orca_rw_cell = next(
+            c for c in data
+            if c["name"] == "orca" and c["profile"] == "rw" and c["harness"] == "claude"
+        )
+        self.assertEqual(orca_rw_cell["witnessed_upstream"], "orca-ide 1.4.224")
+        self.assertFalse(orca_rw_cell["witness_matches_pin"])
+
+
 if __name__ == "__main__":
     unittest.main()
