@@ -13,12 +13,15 @@ services:
     image: python:3.13-slim@sha256:b3575dcf816cdacc5292df77a6e3e59b8941631078373a045efa2ac1e9c5c3b2
     working_dir: /srv/app
     volumes:
-      - .:/srv/app
+      - .:/srv/app:ro
       - app-data:/srv/data
+      - app-logs:/var/log/target-app
     environment:
       DATABASE_URL: sqlite:////srv/data/app.db
       TARGET_APP_SCRAPE_GAUGE: "1"
-    command: 'sh -c "pip install --quiet --require-hashes --only-binary :all: -r requirements.lock && python -m app.seed --count 0 && python -m uvicorn app.main:app --host 0.0.0.0 --port 8000"'
+      PYTHONUNBUFFERED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+    command: 'sh -c "pip install --quiet --require-hashes --only-binary :all: -r requirements.lock && python -m app.seed --count 0 && python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 2>&1 | tee -a /var/log/target-app/app.log"'
     ports:
       - "127.0.0.1:8000:8000"
 
@@ -26,12 +29,15 @@ services:
     image: python:3.13-slim@sha256:b3575dcf816cdacc5292df77a6e3e59b8941631078373a045efa2ac1e9c5c3b2
     working_dir: /srv/app
     volumes:
-      - .:/srv/app
+      - .:/srv/app:ro
       - staging-data:/srv/data
+      - app-logs:/var/log/target-app
     environment:
       DATABASE_URL: sqlite:////srv/data/staging.db
       TARGET_APP_SCRAPE_GAUGE: "1"
-    command: 'sh -c "pip install --quiet --require-hashes --only-binary :all: -r requirements.lock && python -m app.seed --count 0 && python -m uvicorn app.main:app --host 0.0.0.0 --port 8000"'
+      PYTHONUNBUFFERED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+    command: 'sh -c "pip install --quiet --require-hashes --only-binary :all: -r requirements.lock && python -m app.seed --count 0 && python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 2>&1 | tee -a /var/log/target-app/staging.log"'
     ports:
       - "127.0.0.1:8001:8000"
 
@@ -69,7 +75,7 @@ services:
     image: grafana/promtail:3.1.0@sha256:b3db8e7b1cba0e8c45ce2ae72ebddfd88ebdcae86383f1680edf0074e9010ff6
     volumes:
       - ./observability/promtail-config.yml:/etc/promtail/config.yml:ro
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - app-logs:/var/log/target-app:ro
     command: -config.file=/etc/promtail/config.yml
 
   alertmanager:
@@ -82,5 +88,6 @@ services:
 volumes:
   app-data:
   staging-data:
+  app-logs:
   grafana-data:
   loki-data:

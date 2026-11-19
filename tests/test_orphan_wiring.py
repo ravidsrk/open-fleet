@@ -70,18 +70,45 @@ class TheFenceIsTheOnlyPath(unittest.TestCase):
     """
 
     # `gh pr view` is not the only way in: inline review comments come from `gh api …/comments`,
-    # and a fence that covers one and not the other is not a fence (PR #308 review).
-    RAW_FETCH = re.compile(r"gh\s+(?:issue|pr)\s+view\b|gh\s+api\b[^`\n]*(?:comments|issues|pulls)")
+    # list/search verbs return untrusted titles/bodies, and tracker CLIs (`linear`/`jira`) cross
+    # the same trust boundary (PR #308 review, #780).
+    RAW_FETCH = re.compile(
+        r"gh\s+(?:issue|pr)\s+(?:view|list)\b"
+        r"|gh\s+api\b[^`\n;&|]*(?:comments|issues|pulls)"
+        r"|(?:<cli>|orca(?:-ide)?)\s+(?:linear|jira)\s+(?:list|search|issue|view|get)\b"
+    )
+    FENCED_PREFIX = re.compile(
+        r"guard_text\.py(?:\s+--(?:source|label|timeout)(?:\s+|=)(?:'[^']*'|\"[^\"]*\"|\S+))*"
+        r"\s+--fetch\s+$"
+    )
+
+    @classmethod
+    def _is_count_only_list(cls, cmd):
+        """Only numeric-count `--json number --jq 'length'` projections carry no untrusted text."""
+        if not re.match(r"^gh\s+(?:issue|pr)\s+list\b", cmd):
+            return False
+        jsons = re.findall(r"--json(?:\s+|=)(\S+)", cmd)
+        jqs = re.findall(r"(?:--jq|-q)(?:\s+|=)(['\"]?)(\S+?)\1(?=\s|$)", cmd)
+        return jsons == ["number"] and [val for _, val in jqs] == ["length"]
+
+    @classmethod
+    def _line_offenders(cls, line):
+        bad = []
+        for match in cls.RAW_FETCH.finditer(line):
+            if cls.FENCED_PREFIX.search(line[:match.start()]):
+                continue
+            cmd_tail = re.split(r"[`\n;&|)]", line[match.start():], maxsplit=1)[0]
+            if cls._is_count_only_list(cmd_tail):
+                continue
+            bad.append(match.group(0))
+        return bad
 
     def _offenders(self, directory):
         bad = []
         for path in sorted(directory.rglob("*.md")):
             for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-                if not self.RAW_FETCH.search(line):
-                    continue
-                if "guard_text.py" in line:  # through the fence — the sanctioned form
-                    continue
-                bad.append(f"{path.relative_to(ROOT)}:{i}: {line.strip()[:90]}")
+                for hit in self._line_offenders(line):
+                    bad.append(f"{path.relative_to(ROOT)}:{i}: {hit} ({line.strip()[:70]})")
         return bad
 
     def test_no_mission_fetches_tracker_text_outside_the_fence(self):
@@ -91,6 +118,58 @@ class TheFenceIsTheOnlyPath(unittest.TestCase):
     def test_no_playbook_fetches_tracker_text_outside_the_fence(self):
         self.assertEqual(self._offenders(PLAYBOOKS), [],
                          "a playbook reads issue/PR text raw; route it through guard_text.py")
+
+    def test_raw_fetch_catches_unfenced_list_and_tracker_reads(self):
+        samples = (
+            "gh pr list --repo upstream/repo --state open",
+            "gh issue list --state open --json title,body",
+            "gh pr list --state open --json number,title --jq 'length'",
+            "<cli> linear list --filter open --json",
+            "orca linear view LIN-1 --json",
+            "orca-ide jira search 'project = X' --json",
+            "<cli> jira list --filter all --json",
+            "<cli> jira issue PROJ-1 --json",
+            "<cli> jira get PROJ-1 --json",
+        )
+        for sample in samples:
+            with self.subTest(sample=sample):
+                self.assertTrue(self._line_offenders(sample),
+                                f"unfenced fetch slipped past RAW_FETCH: {sample}")
+
+    def test_raw_fetch_exempts_numeric_count_projections_and_fenced_calls(self):
+        allowed = (
+            "count=$(gh pr list --state open --limit 1 --json number --jq 'length')",
+            "count=$(gh issue list --state open --label 'x' --limit 1 --json number --jq 'length')",
+            "`runtime/scripts/guard_text.py --source pr --fetch gh pr list --state open`",
+            "`runtime/scripts/guard_text.py --source issue --fetch <cli> linear list --json`",
+            "`runtime/scripts/guard_text.py --source issue --label 't' --fetch orca jira search 'q'`",
+        )
+        for sample in allowed:
+            with self.subTest(sample=sample):
+                self.assertEqual(self._line_offenders(sample), [])
+
+    def test_guard_text_elsewhere_on_line_never_exempts_a_second_unfenced_fetch(self):
+        smuggled = (
+            "`runtime/scripts/guard_text.py --source issue --fetch <cli> jira search 'q'`"
+            " (or `<cli> jira list --filter all`)",
+            "guard_text.py --source pr --fetch gh pr view 1 && gh pr list --state open",
+            "guard_text.py --source pr --fetch gh api --paginate repos/o/r/pulls/1/comments"
+            " && gh api --paginate repos/o/r/pulls/2/comments",
+            "use guard_text.py; gh issue list --state open",
+        )
+        for sample in smuggled:
+            with self.subTest(sample=sample):
+                self.assertEqual(len(self._line_offenders(sample)), 1,
+                                 f"second unfenced fetch on same line went unflagged: {sample}")
+
+    def test_playbooks_route_overlap_and_tracker_fetches_through_guard_text(self):
+        upstream = read("playbooks/upstream-contribution.md")
+        self.assertIn("runtime/scripts/guard_text.py --source pr --fetch gh pr list", upstream)
+        linear = read("playbooks/linear-enumeration.md")
+        for verb in ("linear list", "jira search", "jira list", "jira issue"):
+            with self.subTest(verb=verb):
+                self.assertIn(f"runtime/scripts/guard_text.py --source issue --fetch <cli> {verb}",
+                              linear)
 
     def test_every_gh_api_list_fetch_paginates(self):
         # PR #308 review. `gh api` returns 30 items per page. verify.py:409 already carries the
@@ -724,6 +803,58 @@ class DormantMechanismsSaySo(unittest.TestCase):
                       "supervision doctrine names no liveness mechanism")
         self.assertIn("--heartbeats", text,
                       "the watchdog is named but not its invocation")
+
+
+class PreflightRunsBeforeSubstantiveWork(unittest.TestCase):
+    """#783: quarantine and capability refusal only protects a run when preflight executes
+    before any untrusted reads, device pairing, repo init, or commits — not mid-pipeline."""
+
+    PIPELINE_RE = re.compile(r"## Pipeline[^\n]*\n+```[^\n]*\n(.*?)```", re.DOTALL)
+
+    def test_every_mission_runs_preflight_at_step_zero(self):
+        missions = sorted(d for d in SKILLS.iterdir()
+                          if d.is_dir() and not d.name.startswith((".", "_"))
+                          and (d / "SKILL.md").is_file())
+        self.assertEqual(len(missions), 22)
+        for skill_dir in missions:
+            name = skill_dir.name
+            text = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+            with self.subTest(mission=name):
+                if name == "review-it":
+                    before_pipeline = text.split("## Pipeline", 1)[0]
+                    self.assertIn("preflight.py --mission review-it --mode readonly",
+                                  before_pipeline)
+                    continue
+                pipe = self.PIPELINE_RE.search(text)
+                self.assertIsNotNone(pipe, f"{name} has no ## Pipeline code block")
+                first_step = pipe.group(1).split("→", 1)[0]
+                self.assertIn("runtime/scripts/preflight.py", first_step,
+                              f"{name} does not invoke runtime/scripts/preflight.py at step 0")
+                self.assertIn(f"--mission {name}", first_step,
+                              f"{name} does not pass --mission {name} at step 0")
+
+    def test_no_mission_uses_bare_preflight_without_script_path(self):
+        for skill_dir in sorted(SKILLS.iterdir()):
+            skill_md = skill_dir / "SKILL.md"
+            if not skill_md.is_file():
+                continue
+            text = skill_md.read_text(encoding="utf-8")
+            with self.subTest(mission=skill_dir.name):
+                self.assertNotRegex(text, r"\bpreflight\s+--mission\b",
+                                    f"{skill_dir.name} invokes bare `preflight --mission` "
+                                    "instead of `runtime/scripts/preflight.py`")
+
+    def test_harden_it_bootstraps_base_before_threat_model_commit(self):
+        text = read("skills/harden-it/SKILL.md")
+        pipe = self.PIPELINE_RE.search(text)
+        self.assertIsNotNone(pipe)
+        body = pipe.group(1)
+        bootstrap_pos = body.find("BOOTSTRAP integration BASE")
+        threat_pos = body.find("THREAT-MODEL")
+        self.assertGreater(bootstrap_pos, -1)
+        self.assertGreater(threat_pos, -1)
+        self.assertLess(bootstrap_pos, threat_pos,
+                        "harden-it must bootstrap BASE (BASE != default) before THREAT-MODEL commits")
 
 
 if __name__ == "__main__":

@@ -83,6 +83,7 @@ def test_latency_histogram_observes_requests(client: TestClient) -> None:
 def test_middleware_records_error_path() -> None:
     """Route exceptions still emit a 500 latency sample (Greptile P2 fix)."""
     import asyncio
+    from types import SimpleNamespace
 
     from fastapi import Request
 
@@ -96,7 +97,7 @@ def test_middleware_records_error_path() -> None:
         "method": "GET",
         "path": "/issues/1",
         "headers": [],
-        "route": None,
+        "route": SimpleNamespace(path="/issues/1"),
     }
     before = _hist_count("GET", "/issues/1", "500")
     with pytest.raises(RuntimeError, match="boom"):
@@ -129,3 +130,64 @@ def test_ui_form_create_increments_gauge(client: TestClient) -> None:
     assert response.status_code == 303
     body = client.get("/metrics").text
     assert "app_issues_total 1.0" in body
+
+
+def test_unmatched_route_uses_bounded_prometheus_label(
+    client: TestClient, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import json
+
+    from app.telemetry import configure_logging
+
+    configure_logging()
+    before_unmatched = _hist_count("GET", "__unmatched__", "404")
+    probe = "/no-such-route-cardinality-probe"
+    response = client.get(probe)
+    assert response.status_code == 404
+    assert _hist_count("GET", "__unmatched__", "404") == before_unmatched + 1
+    assert _hist_count("GET", probe, "404") == 0.0
+    captured = capsys.readouterr()
+    entries = [json.loads(ln) for ln in captured.out.splitlines() if ln.startswith("{")]
+    assert any(e.get("path") == probe and e.get("status_code") == 404 for e in entries)
+
+
+def test_unmatched_route_exception_uses_bounded_prometheus_label(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import asyncio
+    import json
+
+    from fastapi import Request, Response
+
+    from app import telemetry as T
+
+    T.configure_logging()
+
+    async def boom(_request: Request) -> Response:
+        raise RuntimeError("unmatched-boom")
+
+    probe = "/unmatched-error-probe"
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": probe,
+        "headers": [],
+        "route": None,
+    }
+    before_unmatched = _hist_count("GET", "__unmatched__", "500")
+    with pytest.raises(RuntimeError, match="unmatched-boom"):
+        asyncio.run(T.telemetry_middleware(Request(scope), boom))
+    assert _hist_count("GET", "__unmatched__", "500") == before_unmatched + 1
+    assert _hist_count("GET", probe, "500") == 0.0
+    captured = capsys.readouterr()
+    entries = [json.loads(ln) for ln in captured.out.splitlines() if ln.startswith("{")]
+    assert any(e.get("path") == probe and e.get("status_code") == 500 for e in entries)
+
+
+def test_alembic_env_wires_base_metadata() -> None:
+    from app.models import Base
+
+    env_text = (FIXTURE_DIR / "alembic" / "env.py").read_text(encoding="utf-8")
+    assert "from app.models import Base" in env_text
+    assert "target_metadata = Base.metadata" in env_text
+    assert {"issues", "comments"} <= set(Base.metadata.tables)

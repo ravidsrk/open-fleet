@@ -59,7 +59,7 @@ DEFERRED READS: liveness-resume.md when a worker stalls or a run resumes.
 ## Pipeline
 
 ```
-SELF-ORIENT → EXTRACT the public surface at BASE head with a SCRIPT, not a reading (exports, CLI
+REFUSE-IF-QUARANTINED (runtime/scripts/preflight.py --mode readonly --mission document-it) → SELF-ORIENT → EXTRACT the public surface at BASE head with a SCRIPT, not a reading (exports, CLI
   commands and flags, config keys, env vars, endpoints, published skills). Paste the command, its
   output, and the SHA. An un-extractable sub-surface is PARKED, never dropped from the denominator.
 → MAP coverage per quadrant (reference · how-to · tutorial · explanation) by grep-able evidence —

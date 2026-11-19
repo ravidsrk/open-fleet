@@ -51,7 +51,7 @@ runtime-prove pass). Worker TASK pack: one of matt | addy — never co-mount.
 ## Pipeline
 
 ```
-DETECT: run the suite DETECT_RUNS times (default 30; varied seed/order; parallel only at the target
+REFUSE-IF-QUARANTINED (runtime/scripts/preflight.py --mode readonly --mission deflake-it) → DETECT: run the suite DETECT_RUNS times (default 30; varied seed/order; parallel only at the target
   env's concurrency — self-parallel copies colliding on ports/tmp/DB measure a different distribution,
   so record the run conditions with the rate) → per-test flake RATE;
   mine CI retry history (pass-on-retry tests flake in an env local runs don't reproduce — capture even

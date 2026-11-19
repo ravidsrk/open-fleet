@@ -76,8 +76,8 @@ claims enter the enumeration FIRST.
 ## Pipeline
 
 ```
-SELF-ORIENT → ENUMERATE (per source) → SKEPTIC-TRIAGE (reproduce-or-refute) → FREEZE
-  → BOOTSTRAP integration BASE (preflight --mission clean-sweep --base <BASE> --fork-point <header sha>; BASE ≠ default)
+REFUSE-IF-QUARANTINED (runtime/scripts/preflight.py --mode readonly --mission clean-sweep) → SELF-ORIENT → ENUMERATE (per source) → SKEPTIC-TRIAGE (reproduce-or-refute) → FREEZE
+  → BOOTSTRAP integration BASE (runtime/scripts/preflight.py --mission clean-sweep --base <BASE> --fork-point <header sha>; BASE ≠ default)
   → PER-FINDING (remediate-finding: verify-real → build-change → PR → build-blind review → merge_ready)
   → conductor LAND (merge-serialization) → CLOSE with evidence
   → re-ENUMERATE (loop until dry) → FINAL REPORT + `compound-learn` (run-close commits)

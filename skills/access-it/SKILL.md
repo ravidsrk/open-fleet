@@ -56,7 +56,7 @@ DEFERRED READS, never at activation: human-handoff.md at PARK, and whenever a De
 ## Pipeline
 
 ```
-FREEZE (decide-and-freeze, ONE-WAY) the surface: the page/flow/component set × the WCAG 2.2 AA criteria — the
+REFUSE-IF-QUARANTINED (runtime/scripts/preflight.py --mode readonly --mission access-it) → FREEZE (decide-and-freeze, ONE-WAY) the surface: the page/flow/component set × the WCAG 2.2 AA criteria — the
   denominator, digest-locked. The human confirms it; headless/spawned publishes the proposal and PARKS there.
   → BOOTSTRAP integration BASE (runtime/scripts/preflight.py --mission access-it --base <BASE> --fork-point <sha
     recorded in the ledger header at BASE creation>; BASE ≠ default — dispatch-lifecycle.md)
