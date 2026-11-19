@@ -16,3 +16,8 @@
   22 missions, fixes `diff_scope.py` rename/untracked coverage, closes prompt-guard/playbook
   and path-containment gaps, fixes `target-app` lock/cookie/rate-limit issues, and hardens URL
   encoding and pagination fail-closed behavior (#780, #781, #783, #784, #787, #788).
+  Follow-up re-attack adds `runtime/providers` to the unchanged 80% coverage floor (#769),
+  pins omitted broker requests to `service_tier=standard_only` and rejects max-size bodies whose
+  tier cannot be pinned (#778), downgrades Orca rw/claude to `source-only` until its witness
+  matches the pin (#782), replaces threaded-fork parsing with exec'd workers (#785), and runs the target app's
+  app containers as non-root users with fresh-window LogQL smoke checks and failure logs (#787).

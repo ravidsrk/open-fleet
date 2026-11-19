@@ -436,7 +436,7 @@ jobs:
           pattern: coverage-shard-*
           merge-multiple: true
           path: ${{ runner.temp }}/coverage-shards
-      - name: "Coverage floor (D9: line >= 80% on scripts + runtime/scripts)"
+      - name: "Coverage floor (D9: line >= 80% on scripts + runtime/scripts + runtime/providers)"
         # CONSTRAINTS.md D9, wired by the floor-it WIRE phase: the six matrix
         # jobs each traced their own shard (one parallel-mode data file per
         # shard, uploaded beside the job), and this step downloads all six,

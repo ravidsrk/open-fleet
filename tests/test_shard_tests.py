@@ -776,6 +776,20 @@ class LocalCheckCommand(unittest.TestCase):
         self.assertEqual(steps["ruff"], ["ruff", "check", "--config", "ruff.toml",
                                          *self.check.RUFF_PATHS])
 
+    def test_coveragerc_measures_runtime_providers_without_lowering_the_floor(self):
+        import configparser
+        config = configparser.ConfigParser()
+        self.assertEqual(config.read(ROOT / ".coveragerc"), [str(ROOT / ".coveragerc")])
+        self.assertEqual(
+            {part.strip() for part in config["run"]["source"].split(",")},
+            {"scripts", "runtime/scripts", "runtime/providers"},
+        )
+        self.assertEqual(
+            {line.strip() for line in config["report"]["include"].splitlines() if line.strip()},
+            {"scripts/*", "runtime/scripts/*", "runtime/providers/*"},
+        )
+        self.assertEqual(config["report"]["fail_under"], "80")
+
     def test_validate_workflow_pins_coveragerc_and_pr_decisions_base(self):
         # #769 + #772: CI pins COVERAGE_RCFILE to .coveragerc and checks PR DECISIONS diffs
         # against the PR's remote-tracking base ref with --pin-ref before `check`.

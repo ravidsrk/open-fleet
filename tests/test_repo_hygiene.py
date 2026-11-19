@@ -788,8 +788,9 @@ class EveryWorkflowToolComesFromAHashedLock(unittest.TestCase):
     def test_every_container_image_is_pinned_by_digest(self):
         compose = (ROOT / "evals" / "demo" / "target-app" / "compose.yaml").read_text(
             encoding="utf-8")
-        self.assertEqual(len([ln for ln in compose.splitlines() if self.IMAGE.match(ln)]), 7,
-                         "the demo stack's image count changed; pin the new one by digest")
+        images = {m.group(1) for ln in compose.splitlines() if (m := self.IMAGE.match(ln))}
+        self.assertEqual(len(images), 6,
+                         "the demo stack's distinct image set changed; pin any new image by digest")
         self.assertEqual(self._mutable_images(compose), [],
                          "compose.yaml runs an image by a tag a registry can re-point")
         for path in WORKFLOWS:  # a job `container:` or `services:` image, should one appear
@@ -923,6 +924,31 @@ class EveryWorkflowToolComesFromAHashedLock(unittest.TestCase):
         for m in re.finditer(r'(?m)^\s*-\s*"([^"]+:\d+:\d+)"\s*$', compose):
             self.assertTrue(m.group(1).startswith("127.0.0.1:"),
                             f"port mapping must bind 127.0.0.1: {m.group(1)}")
+
+    def test_demo_app_containers_run_non_root_with_owned_volumes(self):
+        compose = (self.APP / "compose.yaml").read_text(encoding="utf-8")
+        self.assertIn("chown -R 10001:10001 /srv/app-data /srv/staging-data /var/log/target-app", compose)
+        for service in ("app", "staging"):
+            with self.subTest(service=service):
+                match = re.search(
+                    rf"(?ms)^  {service}:\n(.*?)(?=^  [a-z][a-z0-9-]*:\n|\Z)", compose,
+                )
+                self.assertIsNotNone(match, service)
+                block = match.group(1)
+                self.assertIn('user: "10001:10001"', block)
+                self.assertIn("volume-init:\n        condition: service_completed_successfully", block)
+                self.assertIn("python -m venv /tmp/venv", block)
+                self.assertIn("/tmp/venv/bin/python -m uvicorn", block)
+
+    def test_smoke_logql_refreshes_its_window_and_dumps_failure_logs(self):
+        workflow = (ROOT / ".github" / "workflows" / "fixture-target-app.yml").read_text(
+            encoding="utf-8")
+        logql = workflow.split('name: LogQL smoke', 1)[1].split("      - name:", 1)[0]
+        self.assertLess(logql.index("for i"), logql.index("END=$(date"))
+        self.assertIn("FOUND=1", logql)
+        self.assertIn('test "$FOUND" -eq 1', logql)
+        self.assertIn("if: failure()", workflow)
+        self.assertIn("docker compose logs --no-color app staging promtail loki", workflow)
 
     def test_the_containers_lock_is_the_uv_lock(self):
         import tomllib
@@ -1562,7 +1588,7 @@ class TheCoverageFloorReadsOnlyTheShardsOwnFiles(unittest.TestCase):
         # (coverage.Coverage.current().get_data().add_lines(...)), and they land in the one
         # legitimate shard file. The floor step must say which instance is closed and that the
         # rest is an accepted residual, not that the numbers are the suite's own.
-        floor = self._step("gates", "Coverage floor (D9: line >= 80% on scripts + runtime/scripts)")
+        floor = self._step("gates", "Coverage floor (D9: line >= 80% on scripts + runtime/scripts + runtime/providers)")
         said = " ".join(" ".join(ln.strip().lstrip("#").strip() for ln in floor
                                  if ln.strip().startswith("#")).split())
         self.assertIn("the checkout-glob instance (a planted `.coverage.*` file) is closed", said)
@@ -1609,7 +1635,7 @@ class TheCoverageFloorReadsOnlyTheShardsOwnFiles(unittest.TestCase):
 
     def _floor(self, downloaded, planted_in_tree=()):
         script = _step_script(self._step(
-            "gates", "Coverage floor (D9: line >= 80% on scripts + runtime/scripts)"))
+            "gates", "Coverage floor (D9: line >= 80% on scripts + runtime/scripts + runtime/providers)"))
         with tempfile.TemporaryDirectory() as tmp:
             shards, tree = Path(tmp) / "coverage-shards", Path(tmp) / "tree"
             shards.mkdir()

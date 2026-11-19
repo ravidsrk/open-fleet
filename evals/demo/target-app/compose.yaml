@@ -9,9 +9,22 @@
 # and run the app from /srv/app, where `python -m` finds it: no `pip install -e .`, so neither
 # the pyproject's `>=` ranges nor its build backend resolve at run time (W6-13).
 services:
+  volume-init:
+    image: python:3.13-slim@sha256:b3575dcf816cdacc5292df77a6e3e59b8941631078373a045efa2ac1e9c5c3b2
+    user: "0:0"
+    volumes:
+      - app-data:/srv/app-data
+      - staging-data:/srv/staging-data
+      - app-logs:/var/log/target-app
+    command: 'sh -c "chown -R 10001:10001 /srv/app-data /srv/staging-data /var/log/target-app"'
+
   app:
     image: python:3.13-slim@sha256:b3575dcf816cdacc5292df77a6e3e59b8941631078373a045efa2ac1e9c5c3b2
+    user: "10001:10001"
     working_dir: /srv/app
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
     volumes:
       - .:/srv/app:ro
       - app-data:/srv/data
@@ -19,15 +32,20 @@ services:
     environment:
       DATABASE_URL: sqlite:////srv/data/app.db
       TARGET_APP_SCRAPE_GAUGE: "1"
+      HOME: /tmp
       PYTHONUNBUFFERED: "1"
       PYTHONDONTWRITEBYTECODE: "1"
-    command: 'sh -c "pip install --quiet --require-hashes --only-binary :all: -r requirements.lock && python -m app.seed --count 0 && python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 2>&1 | tee -a /var/log/target-app/app.log"'
+    command: 'sh -c "python -m venv /tmp/venv && /tmp/venv/bin/pip install --quiet --require-hashes --only-binary :all: -r requirements.lock && /tmp/venv/bin/python -m app.seed --count 0 && /tmp/venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 2>&1 | tee -a /var/log/target-app/app.log"'
     ports:
       - "127.0.0.1:8000:8000"
 
   staging:
     image: python:3.13-slim@sha256:b3575dcf816cdacc5292df77a6e3e59b8941631078373a045efa2ac1e9c5c3b2
+    user: "10001:10001"
     working_dir: /srv/app
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
     volumes:
       - .:/srv/app:ro
       - staging-data:/srv/data
@@ -35,9 +53,10 @@ services:
     environment:
       DATABASE_URL: sqlite:////srv/data/staging.db
       TARGET_APP_SCRAPE_GAUGE: "1"
+      HOME: /tmp
       PYTHONUNBUFFERED: "1"
       PYTHONDONTWRITEBYTECODE: "1"
-    command: 'sh -c "pip install --quiet --require-hashes --only-binary :all: -r requirements.lock && python -m app.seed --count 0 && python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 2>&1 | tee -a /var/log/target-app/staging.log"'
+    command: 'sh -c "python -m venv /tmp/venv && /tmp/venv/bin/pip install --quiet --require-hashes --only-binary :all: -r requirements.lock && /tmp/venv/bin/python -m app.seed --count 0 && /tmp/venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 2>&1 | tee -a /var/log/target-app/staging.log"'
     ports:
       - "127.0.0.1:8001:8000"
 

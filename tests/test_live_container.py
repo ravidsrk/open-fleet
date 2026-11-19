@@ -1070,6 +1070,7 @@ class TheBrokerHoldsTheTokenAndTheCap(unittest.TestCase):
 
     def body(self, **extra):
         return {"model": "claude-haiku-5-5", "max_tokens": 1000, "stream": True,
+                "service_tier": "standard_only",
                 "messages": [{"role": "user", "content": "Reply with the single word ok"}], **extra}
 
     def events(self):
@@ -1427,7 +1428,17 @@ class TheBrokerHoldsTheTokenAndTheCap(unittest.TestCase):
 
     def test_a_handler_fault_is_recorded_in_the_ledger_not_lost(self):
         self.broker()
-        with mock.patch.object(lb, "terms", side_effect=RuntimeError(f"boom {self.token}")):
+        (self.tmp / "sitecustomize.py").write_text(
+            "import json\n"
+            "_loads = json.loads\n"
+            "def fault(raw, *args, **kwargs):\n"
+            "    if isinstance(raw, (bytes, bytearray)) and b'\"max_tokens\": 1000' in raw:\n"
+            "        raise RuntimeError('boom redacted')\n"
+            "    return _loads(raw, *args, **kwargs)\n"
+            "json.loads = fault\n",
+            encoding="utf-8",
+        )
+        with mock.patch.dict(os.environ, {"PYTHONPATH": str(self.tmp)}):
             conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
             conn.request("POST", "/v1/messages", body=json.dumps(self.body()).encode(),
                          headers={"Content-Type": "application/json"})
@@ -1736,7 +1747,8 @@ class TheBrokerHoldsTheTokenAndTheCap(unittest.TestCase):
         stalled.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
                         b"Content-Length: %d\r\n\r\n{" % lb.MAX_BODY)  # one byte of a max-size body
         time.sleep(0.3)
-        head = b'{"model":"claude-haiku-5-5","max_tokens":10,"messages":[{"role":"user","content":"'
+        head = (b'{"service_tier":"standard_only","model":"claude-haiku-5-5","max_tokens":10,'
+                b'"messages":[{"role":"user","content":"')
         end = b'"}]}'
         body = head + b"a" * (lb.MAX_BODY - len(head) - len(end)) + end
         started = time.monotonic()
@@ -2011,7 +2023,8 @@ class TheBrokerHoldsTheTokenAndTheCap(unittest.TestCase):
         # several at once. Parent and parse child together stay under the container's memory.
         if not sys.platform.startswith("linux"):
             return  # the broker runs in a Linux container; VmHWM is Linux's
-        head = b'{"model":"claude-haiku-5-5","max_tokens":10,"messages":[{"role":"user","content":"'
+        head = (b'{"service_tier":"standard_only","model":"claude-haiku-5-5","max_tokens":10,'
+                b'"messages":[{"role":"user","content":"')
         end = b'"}]}'
 
         def body(tail):
@@ -2656,6 +2669,29 @@ class LiveBrokerHardening770_778_785(unittest.TestCase):
                 self.assertEqual(lb.terms(doc), (None, 1.0, 1))
         self.assertEqual(self.api.requests, [])
 
+    def test_omitted_service_tier_is_pinned_before_pricing_and_forwarding_778_3(self):
+        self.broker()
+        self.assertEqual(self.post()[0], 200)
+        omitted = json.loads(self.api.requests[-1]["body"])
+        self.assertEqual(omitted["service_tier"], "standard_only")
+
+        explicit_doc = self.body(service_tier="standard_only")
+        raw = (" \n" + json.dumps(explicit_doc)).encode()
+        self.assertEqual(self.post(raw=raw)[0], 200)
+        forwarded = self.api.requests[-1]["body"]
+        self.assertEqual(forwarded, raw, "an explicit standard tier must not be rewritten or duplicated")
+        self.assertEqual(forwarded.count(b'"service_tier"'), 1)
+        self.assertEqual(json.loads(forwarded), explicit_doc)
+
+    def test_max_size_body_without_service_tier_is_refused_778_3(self):
+        self.broker()
+        head = b'{"model":"claude-haiku-5-5","max_tokens":10,"messages":[{"role":"user","content":"'
+        end = b'"}]}'
+        raw = head + b"a" * (lb.MAX_BODY - len(head) - len(end)) + end
+        self.assertEqual(len(raw), lb.MAX_BODY)
+        self.assertEqual(self.post(raw=raw)[0], 413)
+        self.assertEqual(self.api.requests, [])
+
     def test_non_standard_service_tier_settles_fail_closed_778_3(self):
         self.assertEqual(lb.merged_usage({}, {"service_tier": "priority"})["service_tier"], "priority")
         with self.assertRaises(ValueError):
@@ -2705,15 +2741,18 @@ class LiveBrokerHardening770_778_785(unittest.TestCase):
         with self.assertRaises(ValueError):
             lb.reservation(100, 10, "claude-haiku-5-5", mult=float("inf"))
 
-    def test_concurrent_parse_in_child_no_write_fd_hang_and_no_fd_leak_on_fork_error_785_1(self):
-        # Slow first parse and fast second parse run concurrently: fast must not wait for slow's exit.
-        real_terms = lb.terms
-
-        def delayed_terms(doc):
-            if isinstance(doc, dict) and doc.get("max_tokens") == 777:
-                time.sleep(1.5)
-            return real_terms(doc)
-
+    def test_concurrent_exec_workers_no_pipe_hang_and_no_fd_leak_on_spawn_error_785_1(self):
+        # A sitecustomize in the exec'd workers delays only the slow parse; the parent is untouched.
+        (self.tmp / "sitecustomize.py").write_text(
+            "import json, time\n"
+            "_loads = json.loads\n"
+            "def delayed(raw, *args, **kwargs):\n"
+            "    if isinstance(raw, (bytes, bytearray)) and b'\"max_tokens\": 777' in raw:\n"
+            "        time.sleep(1.5)\n"
+            "    return _loads(raw, *args, **kwargs)\n"
+            "json.loads = delayed\n",
+            encoding="utf-8",
+        )
         slow_body = json.dumps(self.body(max_tokens=777)).encode()
         fast_body = json.dumps(self.body(max_tokens=10)).encode()
         timings = {}
@@ -2723,7 +2762,8 @@ class LiveBrokerHardening770_778_785(unittest.TestCase):
             res = lb._parse_in_child(body, 32 << 20)
             timings[name] = (time.monotonic() - t0, res)
 
-        with mock.patch.object(lb, "terms", delayed_terms):
+        with mock.patch.dict(os.environ, {"PYTHONPATH": str(self.tmp)}), \
+                mock.patch.object(lb.os, "fork", side_effect=AssertionError("threaded os.fork called")):
             t_slow = threading.Thread(target=run_one, args=("slow", slow_body))
             t_fast = threading.Thread(target=run_one, args=("fast", fast_body))
             t_slow.start()
@@ -2733,16 +2773,39 @@ class LiveBrokerHardening770_778_785(unittest.TestCase):
             t_slow.join(5)
         self.assertEqual(timings["fast"][1]["max_tokens"], 10)
         self.assertLess(timings["fast"][0], 1.0,
-                        f"fast parse blocked on slow sibling child ({timings['fast'][0]:.2f}s)")
-        # Fork error must close both pipe ends (no FD leak).
+                        f"fast parse blocked on slow sibling worker ({timings['fast'][0]:.2f}s)")
         before = len(os.listdir("/proc/self/fd")) if os.path.isdir("/proc/self/fd") else None
-        with mock.patch.object(lb.os, "fork", side_effect=OSError("EAGAIN")):
+        with mock.patch.object(lb.subprocess, "Popen", side_effect=OSError("EAGAIN")):
             for _ in range(10):
                 with self.assertRaises(OSError):
                     lb._parse_in_child(fast_body, 16 << 20)
         if before is not None:
             after = len(os.listdir("/proc/self/fd"))
-            self.assertEqual(after, before, f"pipe FDs leaked on fork error: before={before} after={after}")
+            self.assertEqual(after, before, f"FDs leaked on spawn error: before={before} after={after}")
+
+    def test_parse_worker_timeout_is_killed_reaped_and_fd_clean_785_1(self):
+        (self.tmp / "sitecustomize.py").write_text(
+            "import json, time\n"
+            "_loads = json.loads\n"
+            "def delayed(raw, *args, **kwargs):\n"
+            "    if isinstance(raw, (bytes, bytearray)) and b'\"max_tokens\": 777' in raw:\n"
+            "        time.sleep(5)\n"
+            "    return _loads(raw, *args, **kwargs)\n"
+            "json.loads = delayed\n",
+            encoding="utf-8",
+        )
+        body = json.dumps(self.body(max_tokens=777)).encode()
+        before = len(os.listdir("/proc/self/fd")) if os.path.isdir("/proc/self/fd") else None
+        with mock.patch.dict(os.environ, {"PYTHONPATH": str(self.tmp)}), \
+                mock.patch.object(lb, "PARSE_SECONDS", 0.2):
+            started = time.monotonic()
+            facts = lb._parse_in_child(body, 32 << 20)
+            elapsed = time.monotonic() - started
+        self.assertEqual(facts, {"timeout": True})
+        self.assertLess(elapsed, 2.0, "the timed-out worker was not killed and reaped")
+        if before is not None:
+            after = len(os.listdir("/proc/self/fd"))
+            self.assertEqual(after, before, f"FDs leaked on timeout: before={before} after={after}")
 
     def test_evict_vs_track_and_reclaim_vs_request_read_races_785_2(self):
         server = self.served_broker()

@@ -42,9 +42,9 @@ MIN_BODY_RATE, past BODY_GRACE_S, is stalled, and a request waiting for budget t
 itself, what a stalled body holds past its buffer, evicting it. A take that may wait waits up to
 BODY_WAIT_S for room and is otherwise refused (503, a "body-budget" refusal);
 a body whose bound could pass the whole budget, that nests past MAX_DEPTH, or whose pre-scan passes
-MAX_SCAN_STEPS is refused unparsed (413, a "body-parse" refusal). The parse itself runs in a forked
-child whose RLIMIT_DATA is that bound, so a parse that would pass it fails in the child and the body
-is refused (413): the broker never holds a parsed body. So what the slots hold, and their parses,
+MAX_SCAN_STEPS is refused unparsed (413, a "body-parse" refusal). The parse itself runs in an exec'd
+worker whose RLIMIT_DATA covers the body and that bound, so a parse that would pass it fails in the
+worker and the body is refused (413): the broker never holds a parsed body. So what the slots hold, and their parses,
 fit the broker's container memory. A connection past the bound with none to evict is closed
 unanswered. Every connection closed without an answer (evicted, past the bound, timed out,
 malformed, a body cut short, or closed before its request) is counted as a "drop" (W5-16).
@@ -78,9 +78,10 @@ with a priced model and a positive max_tokens, every field is one the broker pri
 tool is the client's own wherever it is defined (in `tools` or inside the content), and all content is inline and
 bounded by its bytes. So an image or
 document by URL or file id, a PDF, an advisor or other server-side tool, an MCP server,
-server-side compaction, a service tier, and an inference geography other than global or US are
-refused: each is billed beyond what the body's bytes bound. A call that names no geography
-reserves at the US premium, and every call settles at the geography the API reports.
+server-side compaction, a non-standard service tier, and an inference geography other than global
+or US are refused: each is billed beyond what the body's bytes bound. An omitted service tier is
+pinned to standard_only in the forwarded body. A call that names no geography reserves at the US
+premium, and every call settles at the geography the API reports.
 
 The ledger (--ledger, appended, mode 0600) is one JSON line per event: open, start, settle,
 refuse, free, drop, fault and tally (refusals, drops and faults counted per kind and written at
@@ -98,7 +99,6 @@ if (__name__ == "__main__" and not getattr(sys.flags, "safe_path", False) and sy
 import argparse
 import contextlib
 import ctypes
-import gc
 import http.client
 import io
 import json
@@ -106,9 +106,10 @@ import math
 import os
 import re
 import resource
-import select
 import signal
 import socket
+import subprocess
+import tempfile
 import threading
 import time
 import traceback
@@ -165,10 +166,10 @@ MAX_BODY = 32_000_000
 # waits up to BODY_WAIT_S for room, as does the one body read in full that may wait for the rest
 # (_BodyBudget: any other is refused at once), else is refused (503) and counted, and a body whose
 # bound alone is past the budget is refused (413) unparsed and counted. The parse itself
-# runs in a forked child whose RLIMIT_DATA is that bound (_parse_in_child), so the bound is not an
-# estimate the container trusts: a parse that would pass it fails there, and the body is refused.
-# The worst body MAX_BODY can hold (13 times its bytes, see parse_cost) fits, and the budget leaves
-# the interpreter, its threads and PARSERS children room in the container's memory.
+# runs in an exec'd worker whose RLIMIT_DATA covers the body and that bound (_parse_in_child), so
+# the bound is not an estimate the container trusts: a parse that would pass it fails there, and
+# the body is refused. The worst body MAX_BODY can hold (13 times its bytes, see parse_cost) fits,
+# and the budget leaves the interpreter, its threads and PARSERS workers room in the container's memory.
 BODY_BUDGET = 400 << 20
 BODY_WAIT_S = 30
 # The most one parsed JSON value costs, its slot in its container included: measured at peak on
@@ -440,8 +441,6 @@ def _frames(err):
 
 
 _PARSING = threading.BoundedSemaphore(PARSERS)
-_FORK_LOCK = threading.Lock()
-_ACTIVE_READ_FDS = set()
 
 
 def free_terms(doc):
@@ -477,14 +476,28 @@ def _parse_facts(body, free=False):
                 "max_tokens": None, "fast": False}
     why, mult, images = terms(doc)
     facts = {"why": why and short(why, 300), "mult": mult, "images": images, "model": None, "max_tokens": None,
-             "fast": False}
+             "fast": False, "inject_service_tier": False}
     if isinstance(doc, dict):
         raw_model = doc.get("model")
         priced_model = raw_model if isinstance(raw_model, str) and model_key(raw_model) is not None else None
-        facts.update(model=priced_model, fast=doc.get("speed") == "fast")
+        facts.update(model=priced_model, fast=doc.get("speed") == "fast",
+                     inject_service_tier=not why and "service_tier" not in doc)
         if not why:
             facts["max_tokens"] = doc["max_tokens"]
     return facts
+
+
+STANDARD_TIER_INJECTION = b'"service_tier":"standard_only",'
+
+
+def _inject_standard_service_tier(body):
+    """Pin an omitted tier into the validated top-level object without re-serializing its JSON."""
+    at = 0
+    while at < len(body) and body[at] in b" \t\r\n":
+        at += 1
+    if at >= len(body) or body[at] != ord("{"):
+        raise ValueError("a validated request body is not a JSON object")
+    body[at + 1:at + 1] = STANDARD_TIER_INJECTION
 
 
 def _vm_data():
@@ -496,89 +509,67 @@ def _vm_data():
         return None
 
 
-def _parse_in_child(body, allowance, free=False):
-    """_parse_facts(body), computed in a forked child that may allocate `allowance` bytes (and
-    PARSE_SLACK) past what it inherited -- RLIMIT_DATA, which Linux, where the broker runs, enforces
-    on every private writable mapping -- so a parse past the bound parse_cost put on it fails in the
-    child, never in the broker. The child shares the body with the broker (copy-on-write), runs with
-    the garbage collector off (a collection would touch, and so copy, the broker's whole heap), and
-    hands back only the facts. At most PARSERS at once. _FORK_LOCK serializes pipe()+fork()+
-    close(write_fd) so a sibling parse child can never inherit another parse's write_fd and block
-    its EOF, and closes both pipe ends on fork error. Returns the facts; {"memory": True} when the
-    parse passed its bound; {"error": name, "frames": [...]} when it raised; {"timeout": True} past
-    PARSE_SECONDS."""
-    with _PARSING:
-        with _FORK_LOCK:
-            read_fd, write_fd = os.pipe()
-            sibling_reads = tuple(_ACTIVE_READ_FDS)
-            try:
-                pid = os.fork()
-            except BaseException:
-                os.close(read_fd)
-                os.close(write_fd)
-                raise
-            if pid == 0:  # the child: never returns, so no frame of the broker's runs here
-                code = 70
-                try:
-                    os.close(read_fd)
-                    for fd in sibling_reads:
-                        with contextlib.suppress(OSError):
-                            os.close(fd)
-                    gc.disable()
-                    held = _vm_data()
-                    if held is not None:
-                        soft, hard = resource.getrlimit(resource.RLIMIT_DATA)
-                        want = held + allowance + PARSE_SLACK
-                        resource.setrlimit(resource.RLIMIT_DATA, (want if hard == resource.RLIM_INFINITY
-                                                                  else min(want, hard), hard))
-                    try:
-                        facts = _parse_facts(body, free=free)
-                    except MemoryError:
-                        facts = {"memory": True}
-                    except Exception as exc:  # e.g. a fault in terms(): its name and frames, never its text
-                        facts = {"error": type(exc).__name__, "frames": _frames(exc)}
-                    view = memoryview(json.dumps(facts, allow_nan=False).encode())
-                    while view:
-                        written = os.write(write_fd, view)
-                        if written <= 0:
-                            break
-                        view = view[written:]
-                    os.close(write_fd)
-                    code = 0
-                except BaseException:
-                    code = 71
-                finally:
-                    os._exit(code)
-            os.close(write_fd)
-            _ACTIVE_READ_FDS.add(read_fd)
-        chunks, deadline, timed_out, eof = [], time.monotonic() + PARSE_SECONDS, False, False
-        try:
-            while True:
-                left = deadline - time.monotonic()
-                if left <= 0:
-                    timed_out = True
-                    break
-                if not select.select([read_fd], [], [], min(left, 1.0))[0]:
-                    continue
-                chunk = os.read(read_fd, 1 << 16)
-                if not chunk:
-                    eof = True
-                    break
-                chunks.append(chunk)
-        finally:
-            with _FORK_LOCK:
-                _ACTIVE_READ_FDS.discard(read_fd)
-                os.close(read_fd)
-            if timed_out or not eof:
-                with contextlib.suppress(ProcessLookupError):
-                    os.kill(pid, signal.SIGKILL)
-            os.waitpid(pid, 0)
-    if timed_out:
-        return {"timeout": True}
+def _parse_worker(fd, nbytes, allowance, free):
+    """Exec-only parser worker: read one anonymous-file body and return its facts on stdout."""
     try:
-        facts = json.loads(b"".join(chunks), parse_constant=_reject_nonfinite)
+        held = _vm_data()
+        if held is not None:
+            soft, hard = resource.getrlimit(resource.RLIMIT_DATA)
+            want = held + nbytes + allowance + PARSE_SLACK
+            resource.setrlimit(resource.RLIMIT_DATA, (want if hard == resource.RLIM_INFINITY
+                                                      else min(want, hard), hard))
+        with os.fdopen(fd, "rb", closefd=True) as fh:
+            body = fh.read(nbytes + 1)
+        if len(body) != nbytes:
+            raise ValueError("parser worker received a short body")
+        try:
+            facts = _parse_facts(body, free=free)
+        except MemoryError:
+            facts = {"memory": True}
+        except Exception as exc:
+            facts = {"error": type(exc).__name__, "frames": _frames(exc)}
+    except MemoryError:
+        facts = {"memory": True}
+    except Exception as exc:
+        facts = {"error": type(exc).__name__, "frames": _frames(exc)}
+    try:
+        sys.stdout.buffer.write(json.dumps(facts, allow_nan=False).encode())
+        sys.stdout.buffer.flush()
+    except (OSError, ValueError):
+        return 71
+    return 0
+
+
+def _parse_in_child(body, allowance, free=False):
+    """Parse in an exec'd interpreter, never Python code running after a threaded os.fork().
+
+    The body travels through an anonymous temporary file inherited by the worker, so workers do
+    not inherit one another's result pipes. RLIMIT_DATA covers the body's bytes plus the parse
+    allowance. At most PARSERS workers run at once; a timeout kills the whole worker process.
+    """
+    with _PARSING:
+        with tempfile.TemporaryFile() as payload:
+            if payload.write(body) != len(body):
+                raise OSError("could not stage the parser body")
+            payload.seek(0)
+            proc = subprocess.Popen(
+                [sys.executable, os.path.abspath(__file__), "--parse-worker", str(payload.fileno()),
+                 str(len(body)), str(allowance), "1" if free else "0"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                pass_fds=(payload.fileno(),), close_fds=True,
+            )
+        try:
+            out, _ = proc.communicate(timeout=PARSE_SECONDS)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            return {"timeout": True}
+        if proc.returncode != 0:
+            return {"memory": True}
+    try:
+        facts = json.loads(out, parse_constant=_reject_nonfinite)
     except ValueError:
-        return {"memory": True}  # it died without a word: out of memory where nothing could be raised
+        return {"memory": True}
     return facts if isinstance(facts, dict) else {"memory": True}
 
 
@@ -1154,7 +1145,15 @@ class Broker(BaseHTTPRequestHandler):
         bound; check its terms, reserve its worst case, and relay it. The broker never holds the
         parsed body."""
         facts = _parse_in_child(body, allowance)
+        if facts.get("inject_service_tier"):
+            if len(body) + len(STANDARD_TIER_INJECTION) > MAX_BODY:
+                self.server.bodies.give(self.ticket, self.ticket.held - len(body))
+                why = "a max-size body must explicitly name service_tier=standard_only"
+                self.ledger.refuse("terms", why, facts.get("model"))
+                return self.fail(413, "invalid_request_error", why)
+            _inject_standard_service_tier(body)
         # The parse child has exited: what its bound held goes back, and the body keeps its buffer.
+        # An injected tier remains charged until the enlarged buffer is dropped.
         self.server.bodies.give(self.ticket, self.ticket.held - len(body))
         if facts.get("error"):
             # A fault in the child (in terms(), say): recorded as a handler fault, and, as one
@@ -1648,4 +1647,6 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 6 and sys.argv[1] == "--parse-worker":
+        sys.exit(_parse_worker(int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), sys.argv[5] == "1"))
     sys.exit(main())

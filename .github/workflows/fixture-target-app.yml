@@ -149,19 +149,25 @@ jobs:
             --data-urlencode 'query=app_issues_total' | grep -Fq '"result":[{'
       - name: LogQL smoke ({service="app"} non-empty)
         run: |
-          END=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           START=$(date -u -d '15 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
+          FOUND=0
           for i in $(seq 1 24); do
-            curl -fsS -G 'http://127.0.0.1:3100/loki/api/v1/query_range' \
+            END=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            if curl -fsS -G 'http://127.0.0.1:3100/loki/api/v1/query_range' \
               --data-urlencode 'query={service="app"}' \
               --data-urlencode "start=$START" --data-urlencode "end=$END" \
-              | grep -q '"values":\[\[' && break
+              | grep -q '"values":\[\['; then
+              FOUND=1
+              break
+            fi
             sleep 5
           done
-          curl -fsS -G 'http://127.0.0.1:3100/loki/api/v1/query_range' \
-            --data-urlencode 'query={service="app"}' \
-            --data-urlencode "start=$START" --data-urlencode "end=$END" \
-            | grep -q '"values":\[\['
+          test "$FOUND" -eq 1
+      - name: Dump stack diagnostics on failure
+        if: failure()
+        run: |
+          docker compose ps
+          docker compose logs --no-color app staging promtail loki
       - name: Teardown leaves nothing behind
         if: always()
         run: |

@@ -334,31 +334,15 @@ def _version_matches(expected: str, observed: str) -> bool:
     return bool(re.search(rf"(?<![0-9.]){re.escape(bare)}(?![0-9]|\.[0-9])", observed))
 
 
-def _prior_pin_disclosed(expected: str, observed: str, limitations) -> bool:
-    """True when a pinned provider's limitations explicitly disclose a source-delta carry-forward
-    from `observed` to `expected`."""
-    if not isinstance(limitations, list):
-        return False
-    joined = "\n".join(str(x) for x in limitations)
-    if "source delta" not in joined.lower():
-        return False
-    if not _version_matches(expected, joined):
-        return False
-    tokens = re.findall(r"\d+(?:\.\d+)+", observed)
-    return bool(tokens) and any(_version_matches(tok, joined) for tok in tokens)
-
-
-def _witness_field_errors(where: str, kind: str, upstream: dict, witnessed, root: Path, run_report,
-                          *, limitations=(), strict_pin_witness: bool = False) -> list[str]:
+def _witness_field_errors(where: str, kind: str, upstream: dict, witnessed, root: Path, run_report) -> list[str]:
     """The fields a maintainer copies from the run's receipt agree with the witness (#596, #782).
 
     A harness cell's own `upstream.version` is the version the run reported (receipt
     facts.harness.version, quoted as witnessed.harness_version); an in-repo provider is witnessed
     at the catalog commit the run ran (receipt host.catalog_commit), which must be in this
     repository's history; a pinned external provider's `witnessed.upstream_version` matches
-    `upstream.version` (or explicitly discloses a source-delta carry-forward unless strict);
-    neither harness_version nor upstream.version may name an inert stand-in; and the date is a
-    calendar date.
+    `upstream.version`; neither harness_version nor upstream.version may name an inert stand-in;
+    and the date is a calendar date.
     """
     if not isinstance(witnessed, dict):
         return []
@@ -389,11 +373,10 @@ def _witness_field_errors(where: str, kind: str, upstream: dict, witnessed, root
                       f"{uv!r} must be the run receipt's host.catalog_commit, an ancestor of HEAD")
     if kind == "provider" and upstream.get("pin") and version and version != IN_REPO and uv:
         if not _version_matches(str(version), uv):
-            if strict_pin_witness or not _prior_pin_disclosed(str(version), uv, limitations):
-                errors.append(
-                    f"{where}: witnessed.upstream_version {uv!r} does not match pinned upstream.version "
-                    f"{version!r} — re-witness against {version} or downgrade the cell (#782)"
-                )
+            errors.append(
+                f"{where}: witnessed.upstream_version {uv!r} does not match pinned upstream.version "
+                f"{version!r} — re-witness against {version} or downgrade the cell (#782)"
+            )
     return errors
 
 
@@ -463,8 +446,8 @@ def _expand_groups(where, kind, name, groups, want, entry, errors) -> list[dict]
     return cells
 
 
-def validate(root: Path, record_path: Path | None = None, pins_path: Path | None = None,
-             *, strict_pin_witness: bool = False) -> tuple[list[str], list[str], list[dict]]:
+def validate(root: Path, record_path: Path | None = None,
+             pins_path: Path | None = None) -> tuple[list[str], list[str], list[dict]]:
     """(errors, stale_notes, cells). Errors include staleness; notes say what to recheck."""
     record = read_json(record_path or root / "runtime" / "providers" / "certification.json")
     caps = read_json(root / "runtime" / "providers" / "capabilities.json")
@@ -501,7 +484,6 @@ def validate(root: Path, record_path: Path | None = None, pins_path: Path | None
                 errors.append(f"{where}: live-witnessed on an upstream whose version is unknown")
             errors += _witness_field_errors(
                 where, cell["kind"], cell["upstream"], cell["witnessed"], root, run_report,
-                limitations=cell["limitations"], strict_pin_witness=strict_pin_witness,
             )
         elif cell["witnessed"] is not None:
             errors.append(f"{where}: only a live-witnessed route carries `witnessed`")
@@ -577,15 +559,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--record", default=None, help="certification record (default runtime/providers/certification.json)")
     ap.add_argument("--pins", default=None, help="pins file to compare against (default each pin's own file)")
     ap.add_argument("--json", action="store_true", help="matrix: print JSON cells")
-    ap.add_argument("--strict-pin-witness", action="store_true",
-                    help="fail check even on disclosed source-delta prior-pin live-witnessed cells")
     args = ap.parse_args(sys.argv[1:] if argv is None else argv)
     root = Path(args.root).resolve()
     try:
         errors, _stale, cells = validate(
             root, Path(args.record) if args.record else None,
             Path(args.pins) if args.pins else None,
-            strict_pin_witness=args.strict_pin_witness,
         )
         record = read_json(Path(args.record) if args.record else root / "runtime" / "providers" / "certification.json")
     except (OSError, ValueError) as exc:
@@ -612,14 +591,6 @@ def main(argv: list[str] | None = None) -> int:
     for err in errors:
         print(f"FAIL: {err}", file=sys.stderr)
     if args.mode == "check" and not errors:
-        for c in cells:
-            if c.get("witness_matches_pin") is False:
-                print(
-                    f"NOTE: {c['kind']} {c['name']} {c['profile']}/{c['harness']} is witnessed at "
-                    f"{c['witnessed_upstream']!r}, prior to pinned {c['upstream'].get('version')!r} "
-                    "(source-delta carry-forward)",
-                    file=sys.stderr,
-                )
         by = {t: sum(c["effective"] == t for c in cells) for t in TIERS}
         print(f"certification: OK — {len(cells)} cells, fresh against their pins ("
               + ", ".join(f"{n} {t}" for t, n in by.items() if n) + ")")
