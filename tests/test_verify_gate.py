@@ -1172,3 +1172,83 @@ class TheGateRunsTheVerifierIsolated(GateCase):
         self.assertIn("isolated 1", r.stdout, r.stderr)
         self.assertNotIn(str(scripts), r.stdout.split("json-from", 1)[-1])
         self.assertEqual(r.returncode, 0, r.stderr)
+
+
+class TestVerifyGateCustodyAndBasePrefix(unittest.TestCase):
+    """Regression pins for #766 (_hgit/_dgit hardened custody floor) and #788 (ORCA_BASE=origin/main
+    does not probe refs/remotes/origin/origin/main)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(prefix="vgate-766-788-")
+        self.addCleanup(self._tmp.cleanup)
+        self.repo = Path(self._tmp.name) / "repo"
+        self.repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "config", "user.email", "t@example.com"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "config", "user.name", "t"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "config", "commit.gpgsign", "false"], check=True)
+        (self.repo / ".orca").mkdir()
+        (self.repo / ".orca" / "dispatch-pubkey").write_text("00" * 32 + "\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "pin"], check=True)
+        head = subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        subprocess.run(
+            ["git", "-C", str(self.repo), "update-ref", "refs/remotes/origin/main", head],
+            check=True,
+        )
+        # Drop origin/HEAD so key discovery MUST use KEY_BASE.
+        subprocess.run(
+            ["git", "-C", str(self.repo), "update-ref", "-d", "refs/remotes/origin/HEAD"],
+            capture_output=True,
+        )
+        (self.repo / ".orca" / "dispatch-pubkey").unlink()
+        self.scripts = Path(self._tmp.name) / "scripts"
+        self.scripts.mkdir()
+        shutil.copy2(GATE, self.scripts / "verify-gate.sh")
+        (self.scripts / "verify.py").write_text(
+            "import sys\nprint('ARGV:', ' '.join(sys.argv[1:]))\n", encoding="utf-8",
+        )
+        self.manifest = self.repo / "m.json"
+        self.manifest.write_text("{}\n", encoding="utf-8")
+
+    def test_origin_prefixed_and_full_remote_base_discover_pubkey(self):
+        for base in ("origin/main", "refs/remotes/origin/main", "main"):
+            with self.subTest(base=base):
+                env = {
+                    "PATH": os.environ.get("PATH", ""),
+                    "ORCA_MANIFEST": str(self.manifest),
+                    "ORCA_BASE": base,
+                    "ORCA_PROVENANCE": "ci",
+                }
+                r = subprocess.run(
+                    ["sh", str(self.scripts / "verify-gate.sh"), "--event", "task"],
+                    cwd=str(self.repo), env=env, capture_output=True, text=True, timeout=60,
+                )
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertIn("--dispatch-pubkey .orca/dispatch-pubkey@refs/remotes/origin/main", r.stdout)
+
+    def test_key_discovery_ignores_repo_fsmonitor_and_inherited_git_selectors(self):
+        fired = self.repo / "fsmonitor-fired.txt"
+        subprocess.run(
+            ["git", "-C", str(self.repo), "config", "core.fsmonitor", f"sh -c 'echo FIRED > {fired}; true'"],
+            check=True,
+        )
+        env = {
+            "PATH": os.environ.get("PATH", ""),
+            "ORCA_MANIFEST": str(self.manifest),
+            "ORCA_BASE": "origin/main",
+            "GIT_DIR": "/nonexistent/evil-git-dir",
+            "GIT_CONFIG_PARAMETERS": f"'core.fsmonitor=sh -c \"echo FIRED > {fired}\"'",
+            "GIT_EXTERNAL_DIFF": f"sh -c 'echo FIRED > {fired}'",
+            "GIT_SSH_COMMAND": f"sh -c 'echo FIRED > {fired}'",
+        }
+        r = subprocess.run(
+            ["sh", str(self.scripts / "verify-gate.sh"), "--event", "task"],
+            cwd=str(self.repo), env=env, capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("--dispatch-pubkey .orca/dispatch-pubkey@refs/remotes/origin/main", r.stdout)
+        self.assertFalse(fired.exists(), "planted fsmonitor or inherited GIT_* channel fired during key discovery")

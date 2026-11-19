@@ -1164,6 +1164,11 @@ class RunReportBinding(unittest.TestCase):
     def test_a_recorded_red_verifier_still_binds(self):
         # A solo run cannot manufacture an independent approver; recording that
         # RED is honest and must not cost the tier.
+        tree = _git(self.repo, "rev-parse", "HEAD^{tree}")
+        self._remanifest({"unit": "u1", "commands": [{
+            "label": "verify", "cmd": self.verifier_cmd,
+            "cmd_sha256": hashlib.sha256(self.verifier_cmd.encode("utf-8")).hexdigest(),
+            "exit": 2, "wtree": tree}]})
         self._write(verifier="RED")
         self.assertEqual(self._check(), [])
 
@@ -1497,6 +1502,11 @@ class SignedTranscriptRequired(SignedKeyFixture):
         self.assertTrue(any("exit" in e and "GREEN" in e for e in errors), errors)
 
     def test_a_recorded_red_binds_when_the_transcript_agrees(self):
+        tree = _git(self.repo, "rev-parse", "HEAD^{tree}")
+        self._remanifest({"unit": "u1", "commands": [{
+            "label": "verify", "cmd": self.verifier_cmd,
+            "cmd_sha256": hashlib.sha256(self.verifier_cmd.encode("utf-8")).hexdigest(),
+            "exit": 2, "wtree": tree}]})
         self._commit(pubkey=True, transcript=self._envelope(self._verdict(exit=2, fatal=["x"])))
         self._write(verifier="RED", header_extra=f" transcript={self.TRANSCRIPT}")
         self._sign_report()
@@ -2211,6 +2221,73 @@ class ASelfPinnedKeyNeverChoosesItsJudge(RunReportBinding):
         at, why = run_report.key_rev(rev, self.repo)
         self.assertEqual(at, rev)
         self.assertIn("the pin", why)
+
+
+class AdversarialVerifierRunHardening(RunReportBinding):
+    """Regression pins for #784: _parsed_manifest no-abbrev/help rejection, executes_verifier
+    forbidden env vars, and verifier_ran exit-code matching."""
+
+    def test_help_and_abbreviated_manifest_flags_are_rejected(self):
+        m = self.manifest
+        V = "runtime/scripts/verify.py"
+        for cmd in (
+            f"python3 {V} --manifest {m} --help",
+            f"python3 {V} --manifest {m} -h",
+            f"python3 {V} --manifest {m} --h",
+            f"python3 {V} --manifest {m} --he",
+            f"python3 {V} --manifest {m} --hel",
+            f"python3 {V} --man {m}",
+            f"python3 {V} --m {m}",
+            f"python3 {V} -h --manifest {m}",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertFalse(run_report.executes_verifier(cmd, m, self.repo), cmd)
+
+    def test_forbidden_env_assignments_are_rejected_in_executes_verifier(self):
+        m = self.manifest
+        V = "runtime/scripts/verify.py"
+        for assign in (
+            "PATH=/tmp/evil",
+            "PYTHONPATH=/tmp/evil",
+            "PYTHONSTARTUP=/tmp/evil.py",
+            "PYTHONHOME=/tmp/evil",
+            "LD_PRELOAD=/tmp/evil.so",
+            "LD_LIBRARY_PATH=/tmp/evil",
+            "DYLD_INSERT_LIBRARIES=/tmp/evil.dylib",
+            "HOME=/tmp/evil",
+            "SHELL=/tmp/evil",
+            "BASH_ENV=/tmp/evil",
+            "ENV=/tmp/evil",
+            "IFS=:",
+            "CDPATH=/tmp/evil",
+        ):
+            for prefix in (assign, f"env {assign}"):
+                cmd = f"{prefix} python3 {V} --manifest {m}"
+                with self.subTest(cmd=cmd):
+                    self.assertFalse(run_report.executes_verifier(cmd, m, self.repo), cmd)
+        self.assertTrue(run_report.executes_verifier(f"env FOO=1 python3 {V} --manifest {m}", m, self.repo))
+
+    def test_verifier_ran_checks_exit_code_against_header_verdict(self):
+        cmd = self.verifier_cmd
+        tree = _git(self.repo, "rev-parse", "HEAD^{tree}")
+        sha = hashlib.sha256(cmd.encode("utf-8")).hexdigest()
+        for bad_exit in (2, 1, False, None, "0"):
+            with self.subTest(bad_exit=bad_exit):
+                self._remanifest({"unit": "u1", "commands": [{
+                    "label": "verify", "cmd": cmd, "cmd_sha256": sha,
+                    "exit": bad_exit, "wtree": tree}]})
+                self._write(verifier="GREEN")
+                errs = self._check()
+                self.assertTrue(any("exit code" in e and "GREEN" in e for e in errs), errs)
+        # RED requires exit 2, refusing exit 0 or 1.
+        for bad_red_exit in (0, 1, True):
+            with self.subTest(bad_red_exit=bad_red_exit):
+                self._remanifest({"unit": "u1", "commands": [{
+                    "label": "verify", "cmd": cmd, "cmd_sha256": sha,
+                    "exit": bad_red_exit, "wtree": tree}]})
+                self._write(verifier="RED")
+                errs = self._check()
+                self.assertTrue(any("exit code" in e and "RED" in e for e in errs), errs)
 
 
 if __name__ == "__main__":

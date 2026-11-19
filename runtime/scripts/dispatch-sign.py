@@ -402,6 +402,25 @@ def verify_dispatch(
             return 2
         rec_obj = env_obj["record"]
 
+    if env_obj is not None and profile is not None:
+        rec_profile = rec_obj.get("profile")
+        if rec_profile is None:
+            print(f"dispatch-sign: --profile {profile!r} requested, but signed dispatch record "
+                  "carries no profile", file=sys.stderr)
+            return 2
+        if rec_profile not in PROFILE_RANK:
+            print(f"dispatch-sign: signed dispatch record carries invalid profile {rec_profile!r}",
+                  file=sys.stderr)
+            return 2
+        if profile not in PROFILE_RANK:
+            print(f"dispatch-sign: invalid profile {profile!r} (expected one of ro, rw, danger)",
+                  file=sys.stderr)
+            return 2
+        if profile != rec_profile:
+            print(f"dispatch-sign: requested profile {profile!r} does not match signed record "
+                  f"profile {rec_profile!r}", file=sys.stderr)
+            return 2
+
     eff_profile = profile or rec_obj.get("profile")
     # The flag and the SIGNED parent both bound the child; neither can widen the other.
     ok, reason = check_profile_narrowing(eff_profile, parent_profile, None, rec_obj.get("parent_profile"))

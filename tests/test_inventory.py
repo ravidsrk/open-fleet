@@ -746,5 +746,71 @@ class SeedCustodyAtSign(InventorySigningFixture):
         self.assertIn("0600", r.stderr)
 
 
+class InventoryFenceAndSymlinkHardening(unittest.TestCase):
+    """Regression pins for #784: fenced code block tracking in find_blocks and symlink/containment
+    rejection in resolve."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_inventory_under_test", INVENTORY)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        cls.inv = mod
+
+    def test_headings_inside_fenced_blocks_are_ignored(self):
+        lines = [
+            "# Report",
+            "```markdown",
+            "## Example integrity inventory (sha256)",
+            "0" * 64 + "  fake.txt",
+            "```",
+            "## Run-close integrity inventory (sha256)",
+            "~~~",
+            "# comment that looks like a heading inside the inventory fence",
+            "a" * 64 + "  real.txt",
+            "~~~",
+            "## Closing notes",
+        ]
+        blocks = self.inv.find_blocks(lines)
+        self.assertEqual(blocks, [(5, 10)])
+        entries = self.inv.parse_entries(lines, *blocks[0])
+        self.assertEqual([(p, h) for _ln, p, h, _s in entries], [("real.txt", "a" * 64)])
+
+    def test_unclosed_fence_fails_closed(self):
+        lines = [
+            "## Run-close integrity inventory (sha256)",
+            "```",
+            "a" * 64 + "  real.txt",
+        ]
+        with self.assertRaises(self.inv.InventoryError) as ctx:
+            self.inv.find_blocks(lines)
+        self.assertIn("unclosed", str(ctx.exception).lower())
+
+    def test_resolve_rejects_symlinks_and_parent_symlink_escape(self):
+        with tempfile.TemporaryDirectory(prefix="inv-sym-784-") as tmp:
+            base = Path(tmp)
+            outside = base / "outside"
+            outside.mkdir()
+            secret = outside / "secret.txt"
+            secret.write_text("secret\n", encoding="utf-8")
+            repo = base / "repo"
+            repo.mkdir()
+            report = repo / "report.md"
+            report.write_text("# r\n", encoding="utf-8")
+            inside = repo / "inside.txt"
+            inside.write_text("ok\n", encoding="utf-8")
+            # Direct symlink to outside file
+            (repo / "escape.txt").symlink_to(secret)
+            # Direct symlink to inside file
+            (repo / "alias.txt").symlink_to(inside)
+            # Intermediate symlink directory pointing outside
+            (repo / "symdir").symlink_to(outside)
+            self.assertEqual(self.inv.resolve("inside.txt", report, repo), inside)
+            self.assertIsNone(self.inv.resolve("escape.txt", report, repo))
+            self.assertIsNone(self.inv.resolve("alias.txt", report, repo))
+            self.assertIsNone(self.inv.resolve("symdir/secret.txt", report, repo))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
