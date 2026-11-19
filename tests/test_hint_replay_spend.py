@@ -775,3 +775,83 @@ class TheBoundLiveRecordIsTheFullDesign(unittest.TestCase):
         renamed = json.loads(json.dumps(results))
         renamed["results"][0]["call"] = renamed["results"][1]["call"]
         self.assertTrue(design_problems(renamed, ledger, corpus))
+
+
+class HintReplaySecurityHardening785_788(StandInRun):
+    """#785 corpus path traversal + oracle env scrubbing; #788 preflight model/terminator checks."""
+
+    def _base_scenario(self):
+        return {
+            "id": "scn-sec",
+            "commits": [{"name": "c0", "files": {"src/a.py": "x = 1\n"}}],
+            "runs": [{"run": "r1", "manifest": {"unit": "U1", "status": "verified", "head_sha": "@c0"}}],
+            "query": ["src/a.py"],
+            "expect": {"r1/U1": {"currency": "CURRENT", "reason": None, "class": "useful", "marker": "x"}},
+        }
+
+    def test_corpus_path_traversal_and_git_internals_are_refused_785(self):
+        bad_paths = ("../escape.txt", "/tmp/abs.txt", ".git/config", "sub/.git/hooks/x", "a\\b.txt")
+        for bad in bad_paths:
+            mutations = (
+                ("commits.files", lambda s, b=bad: s["commits"][0]["files"].__setitem__(b, "x")),
+                ("commits.rename.old", lambda s, b=bad: s["commits"][0].__setitem__("rename", {b: "ok.txt"})),
+                ("commits.rename.new", lambda s, b=bad: s["commits"][0].__setitem__("rename", {"src/a.py": b})),
+                ("commits.delete", lambda s, b=bad: s["commits"][0].__setitem__("delete", [b])),
+                ("worktree_edits", lambda s, b=bad: s.__setitem__("worktree_edits", {b: "x"})),
+                ("runs.run", lambda s, b=bad: s["runs"][0].__setitem__("run", b)),
+                ("runs.file", lambda s, b=bad: s["runs"][0].__setitem__("file", b)),
+                ("runs.artifacts", lambda s, b=bad: s["runs"][0].__setitem__("artifacts", {b: "x"})),
+                ("runs.tamper_artifacts", lambda s, b=bad: s["runs"][0].__setitem__("tamper_artifacts", {b: "x"})),
+            )
+            for label, mutate in mutations:
+                with self.subTest(bad=bad, label=label):
+                    scn = self._base_scenario()
+                    mutate(scn)
+                    cpath = self.tmp / "bad-corpus.json"
+                    cpath.write_text(json.dumps({"version": 1, "scenarios": [scn]}), encoding="utf-8")
+                    with self.assertRaises(replay_mod.CorpusError):
+                        replay_mod.load_corpus(cpath)
+        # Direct _write / build_repo / build_archive calls refuse traversal too.
+        root = self.tmp / "direct"
+        root.mkdir()
+        for bad in ("../pwn", "/tmp/pwn", ".git/hooks/post-checkout"):
+            with self.assertRaises(replay_mod.CorpusError):
+                replay_mod._write(root, {bad: "x"})
+
+    def test_oracle_runs_with_scrubbed_minimal_env_785(self):
+        corpus = json.loads((ROOT / "tests" / "fixtures" / "hint-replay.json").read_text(encoding="utf-8"))
+        scn = dict(next(s for s in corpus["scenarios"] if s["id"] == SCENARIO))
+        env_dump = self.tmp / "oracle_env.json"
+        scn["live_task"] = dict(
+            scn["live_task"],
+            oracle=[sys.executable, "-c",
+                    f"import json, os; open({str(env_dump)!r}, 'w').write(json.dumps(dict(os.environ)))"],
+        )
+        cpath = self.tmp / "scrub-corpus.json"
+        cpath.write_text(json.dumps({**corpus, "scenarios": [scn]}), encoding="utf-8")
+        canary = "SECRET_CANARY_HINT_REPLAY_785"
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": canary, "CLAUDE_CODE_OAUTH_TOKEN": canary}):
+            code, _out, err = self.main([
+                "--live", "--tier", "stub", "--agent-cmd", self.agent("plain", "json", 0),
+                "--corpus", str(cpath), "--scenario", SCENARIO, "--attempts", "1",
+                "--max-runs", "3", "--out", str(self.out),
+            ])
+        self.assertEqual(code, 0, err)
+        seen_env = json.loads(env_dump.read_text(encoding="utf-8"))
+        self.assertNotIn("ANTHROPIC_API_KEY", seen_env)
+        self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", seen_env)
+        self.assertEqual(seen_env.get("PYTHONDONTWRITEBYTECODE"), "1")
+        self.assertEqual(seen_env.get("LANG"), "C.UTF-8")
+
+    def test_preflight_live_refuses_repeated_model_fallback_model_and_terminator_788(self):
+        for cmd, needle in (
+            ("claude -p --model stand-in-not-a-model --model other-model", "disagrees"),
+            ("claude -p --model stand-in-not-a-model --fallback-model other-model", "--fallback-model"),
+            ("claude -p --model stand-in-not-a-model --", "option terminator"),
+            (f"{self.agent()} -- extra", "option terminator"),
+        ):
+            with self.subTest(cmd=cmd):
+                code, _out, err = self.main(self.live(agent=cmd))
+                self.assertEqual(code, 2, err)
+                self.assertIn(needle, err)
+                self.assertEqual(self.calls(), [])

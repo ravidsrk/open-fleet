@@ -2100,6 +2100,53 @@ class TestProperties(Base):
                     events.append_events(self.log, scenario_clean()[3:4])
                 self.assertEqual(self.cli("verify").returncode, 3)
 
+    def test_money_rejects_nonfinite_and_ingest_usage_survives_nan_inf_778(self):
+        for bad in (float("nan"), float("inf"), float("-inf"), -0.01, True, False):
+            with self.subTest(bad=bad):
+                self.assertIsNone(events._money(bad))
+        self.assertEqual(events._money(0.125), "0.125")
+        stream = self.tmp / "nan-usage.jsonl"
+        stream.write_text(
+            '{"type":"system","subtype":"init","model":"claude-haiku-5-5"}\n'
+            '{"type":"result","total_cost_usd":NaN,"usage":{"input_tokens":10,"output_tokens":5}}\n'
+            '{"type":"result","total_cost_usd":Infinity,"usage":{"input_tokens":3,"output_tokens":2}}\n',
+            encoding="utf-8",
+        )
+        proc = self.cli("ingest-usage", "--stream", str(stream), "--run", "run-nan", "--epoch", "1",
+                        "--clock", "host-a", "--task", "t1", "--dispatch", "d1")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        recorded = events.read_log(self.log)[0]
+        usage_events = [e for e in recorded if e["kind"] == "model.usage"]
+        self.assertEqual(len(usage_events), 2)
+        self.assertEqual([e["data"]["cost_usd"] for e in usage_events], [None, None])
+
+    def test_events_entrypoint_carries_canonical_w301_guard_770(self):
+        import ast
+        guard_test = importlib.import_module("tests.test_entrypoint_guard")
+        rel = "runtime/scripts/events.py"
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        tree = ast.parse(text, filename=rel)
+        body = list(tree.body)
+        if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
+                and isinstance(body[0].value.value, str):
+            body = body[1:]
+        self.assertTrue(isinstance(body[0], ast.Import) and [a.name for a in body[0].names] == ["sys"])
+        self.assertEqual(ast.dump(body[1]), ast.dump(ast.parse(guard_test.CANONICAL_GUARD).body[0]))
+        futures = [n.lineno for n in ast.walk(tree)
+                   if isinstance(n, ast.ImportFrom) and n.module == "__future__"]
+        self.assertEqual(futures, [])
+        # Behavioural check: planted stdlib shadow next to events.py must not load.
+        tree_dir = self.tmp / "w301"
+        shutil.copytree(ROOT / "runtime", tree_dir / "runtime",
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        for mod in ("json", "math", "os", "re", "argparse"):
+            (tree_dir / "runtime" / "scripts" / f"{mod}.py").write_text(guard_test.PLANT, encoding="utf-8")
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("PYTHON", "ORCA_", "OPEN_FLEET_"))}
+        proc = subprocess.run([sys.executable, str(tree_dir / rel), "--help"],
+                              cwd=tree_dir, env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(list((tree_dir / "runtime" / "scripts").glob("PLANT-*")), [])
+
 
 if __name__ == "__main__":
     unittest.main()

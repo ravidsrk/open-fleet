@@ -46,6 +46,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -352,15 +353,16 @@ def _cap_errors(cap):
     def money(key, positive=True):
         value = cap.get(key)
         ok = isinstance(value, (int, float)) and not isinstance(value, bool) \
-            and (value > 0 if positive else value >= 0)
+            and math.isfinite(value) and (value > 0 if positive else value >= 0)
         if not ok:
-            errors.append(f"cost_cap.{key} must be a {'positive' if positive else 'non-negative'} number")
+            errors.append(f"cost_cap.{key} must be a {'positive' if positive else 'non-negative'} finite number")
 
     money("proposed_usd")
     money("max_cost_per_agent_run_usd")
     money("grader_reserve_usd")
     fraction = cap.get("harness_limit_fraction")
-    if not isinstance(fraction, (int, float)) or isinstance(fraction, bool) or not 0 < fraction <= 1:
+    if (not isinstance(fraction, (int, float)) or isinstance(fraction, bool)
+            or not math.isfinite(fraction) or not 0 < fraction <= 1):
         errors.append("cost_cap.harness_limit_fraction must be in (0, 1]: a call's limit sits at or "
                       "below its reservation")
     status = cap.get("status")

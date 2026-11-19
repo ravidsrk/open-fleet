@@ -63,6 +63,7 @@ if (__name__ == "__main__" and not getattr(sys.flags, "safe_path", False) and sy
     del sys.path[0]
 
 import argparse
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -70,6 +71,7 @@ import math
 import os
 import re
 import shlex
+import signal
 import subprocess
 import tempfile
 from pathlib import Path, PurePosixPath
@@ -1641,21 +1643,88 @@ def check_workspace_state(checks: list[dict], workspace: Path,
     return failed
 
 
+_CONTAINMENT = None
+_ORIG_SUBPROCESS_RUN = subprocess.run
+_TRACE_DELIM_RE = re.compile(r"={2,}\s*TRACE\s+(?:START|END)\s*={2,}", re.IGNORECASE)
+
+
+def _containment():
+    """runtime/scripts/containment.py, loaded by path on demand."""
+    global _CONTAINMENT
+    if _CONTAINMENT is None:
+        spec = importlib.util.spec_from_file_location(
+            "of_eval_containment", ROOT / "runtime" / "scripts" / "containment.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _CONTAINMENT = mod
+    return _CONTAINMENT
+
+
+def _behavioral_live_disabled() -> str | None:
+    """Why a non---dry-run behavioral eval cannot run on this host, or None inside the live harness."""
+    return _containment().live_disabled()
+
+
+def _defuse_trace(trace: str) -> str:
+    """Neutralize embedded trace-fence delimiters so untrusted output cannot close the grader fence."""
+    return _TRACE_DELIM_RE.sub(lambda m: m.group(0).replace("=", "-"), trace)
+
+
+def _run_isolated(cmd: list[str], *, input: str, timeout: float,
+                  cwd: Path | None = None) -> subprocess.CompletedProcess:
+    """Run an agent or grader command in its own session and SIGKILL its whole process group on
+    timeout or error so grandchildren never outlive the call (#785). Delegates to subprocess.run
+    when tests patch eval_mod.subprocess.run."""
+    if subprocess.run is not _ORIG_SUBPROCESS_RUN:
+        return subprocess.run(
+            cmd, input=input, capture_output=True, text=True,
+            cwd=cwd, timeout=timeout, check=True, start_new_session=True,
+        )
+    proc = subprocess.Popen(
+        cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, cwd=cwd, start_new_session=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(input=input, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        try:
+            proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        raise subprocess.TimeoutExpired(cmd, timeout) from None
+    except BaseException:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            proc.wait(timeout=5)
+        raise
+    finally:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGKILL)
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd, output=stdout, stderr=stderr)
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+
+
 def _grade_trace(assertions: list[str], trace: str) -> dict | None:
     """Second headless call: grade `trace` against `assertions`, trace fenced."""
     remaining = set(assertions)
     if not remaining or len(remaining) != len(assertions):
         return None
+    fenced_trace = _defuse_trace(trace)
     prompt = "\n\n".join([
         GRADER_PREAMBLE,
         "Assertions:\n" + "\n".join(f"{i + 1}. {a}" for i, a in enumerate(assertions)),
         UNTRUSTED_FENCE,
-        f"===TRACE START===\n{trace}\n===TRACE END===",
+        f"===TRACE START===\n{fenced_trace}\n===TRACE END===",
         GRADER_SCHEMA,
     ])
-    result = subprocess.run(
+    result = _run_isolated(
         _agent_cmd("EVAL_GRADER_CMD", DEFAULT_GRADER_CMD),
-        input=prompt, capture_output=True, text=True, timeout=GRADER_TIMEOUT_S, check=True,
+        input=prompt, timeout=GRADER_TIMEOUT_S,
     )
     match = re.search(r"\{.*\}", result.stdout, re.S)
     if not match:
@@ -1685,6 +1754,11 @@ def _grade_trace(assertions: list[str], trace: str) -> dict | None:
 
 def run_behavioral_eval(mission: str, dry_run: bool = False) -> dict:
     """Run (or plan) one mission's behavioral evals. Catalog tooling, not proof."""
+    if not dry_run:
+        why = _behavioral_live_disabled()
+        if why:
+            return {"mission": mission, "error": why, "cases": [], "failures": 0,
+                    "dry_run": False, "refused": True}
     if not mission or not VALID_MISSION_RE.match(mission):
         return {"mission": mission, "error": f"invalid mission name '{mission}'", "cases": []}
     mission_dir = SKILLS_DIR / mission
@@ -1750,9 +1824,8 @@ def run_behavioral_eval(mission: str, dry_run: bool = False) -> dict:
             skill_text = (mission_dir / "SKILL.md").read_text(encoding="utf-8")
             agent_input = f"Follow this mission exactly:\n\n{skill_text}\n\n{ev.get('prompt', '')}"
             try:
-                run = subprocess.run(
-                    agent_cmd, input=agent_input, capture_output=True, text=True,
-                    cwd=workspace, timeout=AGENT_TIMEOUT_S, check=True,
+                run = _run_isolated(
+                    agent_cmd, input=agent_input, cwd=workspace, timeout=AGENT_TIMEOUT_S,
                 )
             except (OSError, subprocess.SubprocessError) as err:
                 case["error"] = f"agent invocation failed: {_process_error(err)}"
@@ -1862,7 +1935,9 @@ def cmd_run(args: argparse.Namespace) -> int:
                             line += f", {held}/{case['state_checks']} state checks held"
                             line += "".join(f"\n      state: {f}" for f in case["state_failed"])
                     print(line)
-        if result.get("error") or result.get("failures"):
+        if result.get("refused"):
+            exit_code = 2
+        elif result.get("error") or result.get("failures"):
             exit_code = 1
         if getattr(args, "json", False):
             print(json.dumps(payload, indent=2))

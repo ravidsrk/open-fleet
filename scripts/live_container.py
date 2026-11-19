@@ -66,7 +66,12 @@ start (whatever was created is destroyed first) · 3 a container could not be ve
 (fail closed) · 124 the wall-clock limit ended it (verified destroyed) · 128+N on signal N
 (verified destroyed).
 """
-from __future__ import annotations
+import sys
+
+if (__name__ == "__main__" and not getattr(sys.flags, "safe_path", False) and sys.path
+        and ("os" not in sys.modules or sys.modules["os"].path.realpath(sys.path[0])
+             == sys.modules["os"].path.dirname(sys.modules["os"].path.realpath(__file__)))):
+    del sys.path[0]
 
 import argparse
 import contextlib
@@ -74,6 +79,7 @@ import fcntl
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import platform
 import posixpath
@@ -83,7 +89,6 @@ import shutil
 import signal
 import stat
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -422,8 +427,11 @@ def destroy(ids, nonce):
             why = (proc.stderr.strip().splitlines() or [""])[0][:160]
             nonzero.append(f"docker {' '.join(args[:2])}: exit {proc.returncode}: {why}")
         return proc
-    for cid in reversed(ids):  # the arm first: the broker settles what it left in flight, then goes
+    for cid in reversed(ids[1:]):  # the arm first: the broker settles what it left in flight, then goes
         attempt("kill", cid)
+    if ids:  # graceful SIGTERM so the broker settles active relays and flushes its tally before kill
+        attempt("stop", "-t", "5", ids[0])
+        attempt("kill", ids[0])
     for cid in reversed(ids):
         attempt("rm", "-f", cid)
     check = ["ps", "-a", "--filter", f"label={LABEL}={nonce}", "--format", "{{.ID}}"]
@@ -486,18 +494,29 @@ def launch_lock(path):
         os.close(fd)
 
 
+def _reject_nonfinite(token):
+    raise ValueError(f"non-finite JSON constant: {token}")
+
+
 def spend(ledger):
     """The broker's ledger, summarised for the receipt: what the arm spent, by the broker's count."""
     try:
         lines = Path(ledger).read_text(encoding="utf-8").splitlines()
     except OSError as err:
         return {"ledger": str(ledger), "read": False, "error": type(err).__name__}
-    events = []
+    events, corrupt = [], 0
     for line in lines:
-        try:
-            events.append(json.loads(line))
-        except ValueError:
+        if not line:
             continue
+        try:
+            doc = json.loads(line, parse_constant=_reject_nonfinite)
+        except ValueError:
+            corrupt += 1
+            continue
+        if not isinstance(doc, dict):
+            corrupt += 1
+            continue
+        events.append(doc)
     starts = {e.get("call"): e for e in events if e.get("event") == "start"}
     settles = {e.get("call"): e for e in events if e.get("event") == "settle"}
     opened = next((e for e in events if e.get("event") == "open"), {})
@@ -508,11 +527,14 @@ def spend(ledger):
     tallies = [e["refused"] for e in events if isinstance(e.get("refused"), dict)]
     refused = (sum(n for n in tallies[-1].values() if isinstance(n, int)) if tallies
                else sum(1 for e in events if e.get("event") == "refuse"))
-    return {"ledger": str(ledger), "read": True, "cap_usd": opened.get("cap_usd"), "calls": len(starts),
-            "refused": refused,
-            "settled_usd": round(sum(e.get("cost_usd") or 0 for e in settles.values()), 6),
-            "unsettled_calls": len(unsettled),
-            "unsettled_reserved_usd": round(sum(starts[c].get("reserved_usd") or 0 for c in unsettled), 6)}
+    summary = {"ledger": str(ledger), "read": corrupt == 0, "cap_usd": opened.get("cap_usd"), "calls": len(starts),
+               "refused": refused,
+               "settled_usd": round(sum(e.get("cost_usd") or 0 for e in settles.values()), 6),
+               "unsettled_calls": len(unsettled),
+               "unsettled_reserved_usd": round(sum(starts[c].get("reserved_usd") or 0 for c in unsettled), 6)}
+    if corrupt:
+        summary["corrupt_lines"] = corrupt
+    return summary
 
 
 def write_new(path, data, mode=0o600):
@@ -532,12 +554,12 @@ def run(args):
     """Check the request, then launch under the lock. Returns the exit code."""
     if args.arm not in ARMS:
         raise Refused(f"unknown arm {args.arm!r}: one of {', '.join(ARMS)}")
-    if args.timeout <= 0:
-        raise Refused("--timeout must be a positive number of seconds")
-    if not args.cap_usd > 0:
-        raise Refused("--cap-usd must be a positive number of dollars: the broker refuses every call past it")
-    if args.per_call_usd is not None and not 0 < args.per_call_usd <= args.cap_usd:
-        raise Refused("--per-call-usd must be a positive number of dollars, at most --cap-usd")
+    if not (math.isfinite(args.timeout) and args.timeout > 0):
+        raise Refused("--timeout must be a positive finite number of seconds")
+    if not (math.isfinite(args.cap_usd) and args.cap_usd > 0):
+        raise Refused("--cap-usd must be a positive finite number of dollars: the broker refuses every call past it")
+    if args.per_call_usd is not None and not (math.isfinite(args.per_call_usd) and 0 < args.per_call_usd <= args.cap_usd):
+        raise Refused("--per-call-usd must be a positive finite number of dollars, at most --cap-usd")
     if why := output_problem(args.arm, args.arm_args):
         raise Refused(why)
     results = Path(args.results).expanduser().resolve()
@@ -670,13 +692,14 @@ def launch(args, results, receipts, token_file, token, repo, commit, image):
         except subprocess.TimeoutExpired:
             receipt["timed_out"] = True
         finally:
-            receipt["ended_at"], receipt["elapsed_s"] = now(), round(time.monotonic() - started, 1)
-            if attach.poll() is None:
-                receipt["destroyed"] = destroy(ids, nonce)
-                attach.kill()
-                attach.wait()
-            pumper.join(timeout=30)
-            attach.stdout.close()
+            with _mask_teardown_signals():
+                receipt["ended_at"], receipt["elapsed_s"] = now(), round(time.monotonic() - started, 1)
+                if attach.poll() is None:
+                    receipt["destroyed"] = destroy(ids, nonce)
+                    attach.kill()
+                    attach.wait()
+                pumper.join(timeout=30)
+                attach.stdout.close()
     except Refused as err:
         if not attempted:
             raise
@@ -685,22 +708,23 @@ def launch(args, results, receipts, token_file, token, repo, commit, image):
         receipt["interrupted"] = getattr(err, "code", None) or 128 + signal.SIGINT
         raise
     finally:
-        if attempted and not receipt["destroyed"]["verified"]:
-            first, receipt["destroyed"] = receipt["destroyed"], destroy(ids, nonce)
-            for key in ("errors", "nonzero"):  # a retry adds to what the first teardown saw (#673)
-                receipt["destroyed"][key] = first.get(key, []) + receipt["destroyed"][key]
-        shutil.rmtree(staging, ignore_errors=True)
-        if redactor is not None:
-            with contextlib.suppress(OSError, ValueError):
-                redactor.close()
-            receipt["token_redactions"] = redactor.count
-        if attempted:
-            receipt["broker"]["spend"] = spend(ledger_dir / "spend.jsonl")
-            text = json.dumps(receipt, indent=2, sort_keys=True) + "\n"
-            if token in text:  # never: nothing above holds it
-                raise RuntimeError("the receipt would carry the token")
-            write_new(base.with_suffix(".json"), text.encode())
-            print(f"live_container: receipt {base.with_suffix('.json')}", file=sys.stderr)
+        with _mask_teardown_signals():
+            if attempted and not receipt["destroyed"]["verified"]:
+                first, receipt["destroyed"] = receipt["destroyed"], destroy(ids, nonce)
+                for key in ("errors", "nonzero"):  # a retry adds to what the first teardown saw (#673)
+                    receipt["destroyed"][key] = first.get(key, []) + receipt["destroyed"][key]
+            shutil.rmtree(staging, ignore_errors=True)
+            if redactor is not None:
+                with contextlib.suppress(OSError, ValueError):
+                    redactor.close()
+                receipt["token_redactions"] = redactor.count
+            if attempted:
+                receipt["broker"]["spend"] = spend(ledger_dir / "spend.jsonl")
+                text = json.dumps(receipt, indent=2, sort_keys=True) + "\n"
+                if token in text:  # never: nothing above holds it
+                    raise RuntimeError("the receipt would carry the token")
+                write_new(base.with_suffix(".json"), text.encode())
+                print(f"live_container: receipt {base.with_suffix('.json')}", file=sys.stderr)
     if not receipt["destroyed"]["verified"]:
         print(f"live_container: FAIL-CLOSED: launch {nonce}'s containers could not be verified destroyed: "
               f"{receipt['destroyed']['output']}", file=sys.stderr)
@@ -809,7 +833,27 @@ def parser():
     return p
 
 
+_TEARDOWN_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+
+
+@contextlib.contextmanager
+def _mask_teardown_signals():
+    """Ignore SIGTERM/SIGHUP/SIGINT while teardown destroys containers, removes staging, and writes
+    the receipt, then restore prior handlers."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    saved = {s: signal.signal(s, signal.SIG_IGN) for s in _TEARDOWN_SIGNALS}
+    try:
+        yield
+    finally:
+        for s, handler in saved.items():
+            signal.signal(s, signal.SIG_DFL if handler is None else handler)
+
+
 def _signalled(signum, _frame):
+    for s in _TEARDOWN_SIGNALS:
+        signal.signal(s, signal.SIG_IGN)
     raise SystemExit(128 + signum)
 
 
@@ -817,7 +861,11 @@ def main(argv=None):
     args = parser().parse_args(argv)
     if args.command == "run":
         args.arm_args = args.arm_args[1:] if args.arm_args[:1] == ["--"] else args.arm_args
-    previous = {s: signal.signal(s, _signalled) for s in (signal.SIGTERM, signal.SIGHUP)}
+    previous = {}
+    if threading.current_thread() is threading.main_thread():
+        previous = {s: signal.getsignal(s) for s in _TEARDOWN_SIGNALS}
+        for s in (signal.SIGTERM, signal.SIGHUP):
+            signal.signal(s, _signalled)
     try:
         return build(args) if args.command == "build" else run(args)
     except Refused as err:
@@ -827,7 +875,7 @@ def main(argv=None):
         return 128 + signal.SIGINT
     finally:
         for s, handler in previous.items():
-            signal.signal(s, handler)
+            signal.signal(s, signal.SIG_DFL if handler is None else handler)
 
 
 if __name__ == "__main__":

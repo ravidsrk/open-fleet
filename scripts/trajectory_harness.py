@@ -55,6 +55,21 @@ LOCAL_CONFIG = (("user.name", "trajectory-harness"), ("user.email", "harness@exa
 # Never handed to the agent: an SSH or GPG agent could sign for it.
 _DROPPED = ("SSH_AUTH_SOCK", "GPG_AGENT_INFO")
 BASE_MESSAGE = "base: the cell's materialized initial state (trajectory_harness.py)"
+SPILL_BYTES = 16 << 20        # spill captured stream to a temp file above 16 MiB in RAM
+MAX_CAPTURE_BYTES = 128 << 20  # hard capture ceiling so runaway stdout cannot fill disk
+MAX_LINE_BYTES = 16 << 20      # single line cap for incremental tool_use/tool_result scanning
+_GITEXEC = None
+
+
+def _gitexec():
+    global _GITEXEC
+    if _GITEXEC is None:
+        spec = importlib.util.spec_from_file_location("trajectory_harness_gitexec",
+                                                      ROOT / "runtime" / "scripts" / "gitexec.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _GITEXEC = mod
+    return _GITEXEC
 
 
 def isolated_env(environ, gnupghome):
@@ -70,9 +85,9 @@ def isolated_env(environ, gnupghome):
 
 
 def _git(workspace, env, *args):
-    result = subprocess.run(["git", "-C", str(workspace), "-c", f"core.hooksPath={os.devnull}",
-                             "-c", "core.fsmonitor=false", *args], capture_output=True, text=True,
-                            env=env, stdin=subprocess.DEVNULL, timeout=60)
+    gx = _gitexec()
+    result = subprocess.run(gx.argv("-C", str(workspace), *args), capture_output=True, text=True,
+                            env=gx.custody_env(env), stdin=subprocess.DEVNULL, timeout=60)
     if result.returncode != 0:
         raise RuntimeError(f"git {args[0]} failed: {result.stderr.strip()}")
     return result.stdout
@@ -89,8 +104,10 @@ def prepare_workspace(workspace, env=None):
         _git(workspace, env, "init", "-q", "-b", "main")
     for key, value in LOCAL_CONFIG:
         _git(workspace, env, "config", "--local", key, value)
-    has_head = subprocess.run(["git", "-C", str(workspace), "rev-parse", "--verify", "-q", "HEAD"],
-                              capture_output=True, env=env, stdin=subprocess.DEVNULL).returncode == 0
+    gx = _gitexec()
+    has_head = subprocess.run(gx.argv("-C", str(workspace), "rev-parse", "--verify", "-q", "HEAD"),
+                              capture_output=True, env=gx.custody_env(env),
+                              stdin=subprocess.DEVNULL, timeout=60).returncode == 0
     if not has_head or _git(workspace, env, "status", "--porcelain", "--untracked-files=all"):
         _git(workspace, env, "add", "-A")
         _git(workspace, env, "commit", "-q", "--allow-empty", "-m", BASE_MESSAGE)
@@ -174,24 +191,99 @@ def use_ids(line):
 
 
 class Stream:
-    """The agent's stdout as it passes through: forwarded byte for byte, kept, and read line by
-    line for the calls it starts and the results it reads back."""
+    """The agent's stdout as it passes through: forwarded byte for byte, kept (spilled to a
+    temp file past `spill_bytes` and bounded by `max_bytes`), and read line by line in O(N) time
+    for the calls it starts and the results it reads back."""
 
-    def __init__(self, fd):
-        self.fd, self.kept, self.partial, self.open, self.eof = fd, bytearray(), b"", True, False
+    def __init__(self, fd, *, spill_bytes=None, max_bytes=None, max_line_bytes=None):
+        self.fd, self.kept, self.open, self.eof = fd, bytearray(), True, False
+        self._spill = None
+        self.captured = 0
+        self.truncated = False
+        self.spill_bytes = SPILL_BYTES if spill_bytes is None else spill_bytes
+        self.max_bytes = MAX_CAPTURE_BYTES if max_bytes is None else max_bytes
+        self.max_line_bytes = MAX_LINE_BYTES if max_line_bytes is None else max_line_bytes
+        self._partial_chunks = []
+        self._partial_bytes = 0
+        self._partial_oversized = False
         self.started = []
+        self._started_set = set()
+
+    def _keep(self, chunk):
+        if self.truncated or not chunk:
+            return
+        if self.captured + len(chunk) > self.max_bytes:
+            self.truncated = True
+            return
+        if self._spill is None and len(self.kept) + len(chunk) > self.spill_bytes:
+            self._spill = tempfile.TemporaryFile(mode="w+b", prefix="of-traj-stream-")
+            if self.kept:
+                self._spill.write(self.kept)
+                self.kept.clear()
+        if self._spill is not None:
+            self._spill.write(chunk)
+        else:
+            self.kept += chunk
+        self.captured += len(chunk)
+
+    def read_kept(self):
+        """Return all captured stream bytes, reading back from the spill file when spilled."""
+        if self._spill is not None:
+            self._spill.flush()
+            self._spill.seek(0)
+            return self._spill.read()
+        return bytes(self.kept)
+
+    def close(self):
+        if self._spill is not None:
+            self._spill.close()
+            self._spill = None
 
     def take(self, chunk):
         """Forward and keep `chunk`; the tool_use ids whose results its complete lines carry."""
-        self.kept += chunk
+        self._keep(chunk)
         self.open = _forward(sys.stdout.fileno(), chunk, self.open)
-        *lines, self.partial = (self.partial + chunk).split(b"\n")
+        if b"\n" not in chunk:
+            if not self._partial_oversized:
+                self._partial_bytes += len(chunk)
+                if self._partial_bytes > self.max_line_bytes:
+                    self._partial_chunks.clear()
+                    self._partial_oversized = True
+                else:
+                    self._partial_chunks.append(chunk)
+            return []
+        first, *middle, tail = chunk.split(b"\n")
+        lines = []
+        if self._partial_oversized:
+            self._partial_oversized = False
+            self._partial_bytes = 0
+        elif self._partial_chunks:
+            if self._partial_bytes + len(first) <= self.max_line_bytes:
+                self._partial_chunks.append(first)
+                lines.append(b"".join(self._partial_chunks))
+            self._partial_chunks.clear()
+            self._partial_bytes = 0
+        elif len(first) <= self.max_line_bytes:
+            lines.append(first)
+        for mid in middle:
+            if len(mid) <= self.max_line_bytes:
+                lines.append(mid)
+        if tail:
+            if len(tail) > self.max_line_bytes:
+                self._partial_oversized = True
+                self._partial_bytes = len(tail)
+            else:
+                self._partial_chunks.append(tail)
+                self._partial_bytes = len(tail)
         return self.lines(lines)
 
     def lines(self, lines):
         results = []
         for line in lines:
-            self.started += [u for u in use_ids(line) if u not in self.started]
+            for uid in use_ids(line):
+                if uid not in self._started_set:
+                    self._started_set.add(uid)
+                    self.started.append(uid)
             results += result_ids(line)
         return results
 
@@ -209,8 +301,16 @@ class Stream:
         return results
 
     def finish(self):
-        results, self.partial = self.lines([self.partial]), b""
-        return results
+        if self._partial_oversized:
+            self._partial_oversized = False
+            self._partial_bytes = 0
+            return []
+        if not self._partial_chunks:
+            return []
+        last = b"".join(self._partial_chunks)
+        self._partial_chunks.clear()
+        self._partial_bytes = 0
+        return self.lines([last])
 
 
 def write_recording(dest, events):
@@ -266,25 +366,33 @@ def main(argv=None):
                                 "commits": commits})
                 results = later
         try:
-            while not out.eof:
-                snapshot(out.read())
-            snapshot(out.finish())
-            code = proc.wait()
+            try:
+                while not out.eof:
+                    snapshot(out.read())
+                snapshot(out.finish())
+                code = proc.wait()
+            finally:
+                for sig, handler in previous.items():
+                    signal.signal(sig, handler)
+            if any(snap["commits"] is None for snap in history):
+                history = None  # a snapshot git could not take: attribute named commits only
+            if out.truncated:
+                msg = f"stream exceeded capture limit ({out.max_bytes} bytes)"
+                refused.write_text(f"{msg}\n", encoding="utf-8")
+                print(f"trajectory_harness: recording refused: {msg}", file=sys.stderr)
+            else:
+                engine = _engine()
+                try:
+                    events = engine.record_stream(out.read_kept().decode("utf-8", "replace"), workspace,
+                                                  base, history=history)
+                    write_recording(dest, events)
+                except engine.RecordingRefused as err:
+                    refused.write_text(f"{err}\n", encoding="utf-8")
+                    print(f"trajectory_harness: recording refused: {err}", file=sys.stderr)
+                except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as err:
+                    print(f"trajectory_harness: no recording written: {err}", file=sys.stderr)
         finally:
-            for sig, handler in previous.items():
-                signal.signal(sig, handler)
-        if any(snap["commits"] is None for snap in history):
-            history = None  # a snapshot git could not take: attribute named commits only
-        engine = _engine()
-        try:
-            events = engine.record_stream(bytes(out.kept).decode("utf-8", "replace"), workspace,
-                                          base, history=history)
-            write_recording(dest, events)
-        except engine.RecordingRefused as err:
-            refused.write_text(f"{err}\n", encoding="utf-8")
-            print(f"trajectory_harness: recording refused: {err}", file=sys.stderr)
-        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as err:
-            print(f"trajectory_harness: no recording written: {err}", file=sys.stderr)
+            out.close()
         return code if code >= 0 else 128 - code
     finally:
         shutil.rmtree(gnupghome, ignore_errors=True)

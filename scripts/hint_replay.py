@@ -153,9 +153,34 @@ def _git(cwd, *args, when=None):
     return proc.stdout.strip()
 
 
+def _safe_relpath(rel, what, root=None, *, single=False):
+    """Validate a corpus relative path against absolute paths, traversal (`..`), `.git`
+    components, and escaping `root`."""
+    if not isinstance(rel, str) or not rel or "\0" in rel:
+        raise CorpusError(f"{what}: path {rel!r} must be a non-empty relative path")
+    if os.path.isabs(rel) or rel.startswith(("/", "\\")) or "\\" in rel:
+        raise CorpusError(f"{what}: path {rel!r} must be relative (no absolute or backslash paths)")
+    parts = Path(rel).parts
+    if not parts or any(part in ("", ".", "..") or part.lower() == ".git" for part in parts):
+        raise CorpusError(f"{what}: path {rel!r} escapes or targets .git internals")
+    if single and (len(parts) != 1 or "/" in rel):
+        raise CorpusError(f"{what}: {rel!r} must be a single safe directory name")
+    if root is None:
+        return Path(rel)
+    base = Path(root).resolve()
+    target = (base / rel).resolve()
+    if not target.is_relative_to(base) or target == base:
+        raise CorpusError(f"{what}: path {rel!r} resolves outside {base}")
+    if any(part.lower() == ".git" for part in target.relative_to(base).parts):
+        raise CorpusError(f"{what}: path {rel!r} resolves into .git internals")
+    return target
+
+
 def _write(root, files):
+    if not isinstance(files, dict):
+        raise CorpusError("files map must be an object")
     for rel, content in files.items():
-        target = Path(root) / rel
+        target = _safe_relpath(rel, "files", root=root)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
 
@@ -196,10 +221,19 @@ def build_repo(scenario, repo):
             _git(repo, "checkout", "-q", branch)
         current = branch
         _write(repo, commit.get("files", {}))
-        for old, new in commit.get("rename", {}).items():
-            (repo / new).parent.mkdir(parents=True, exist_ok=True)
+        renames = commit.get("rename", {})
+        if not isinstance(renames, dict):
+            raise CorpusError(f"{scenario['id']}: rename must be an object")
+        for old, new in renames.items():
+            _safe_relpath(old, f"{scenario['id']}: rename", root=repo)
+            new_target = _safe_relpath(new, f"{scenario['id']}: rename", root=repo)
+            new_target.parent.mkdir(parents=True, exist_ok=True)
             _git(repo, "mv", "--", old, new)
-        for gone in commit.get("delete", []):
+        deletes = commit.get("delete", [])
+        if not isinstance(deletes, list):
+            raise CorpusError(f"{scenario['id']}: delete must be a list")
+        for gone in deletes:
+            _safe_relpath(gone, f"{scenario['id']}: delete", root=repo)
             _git(repo, "rm", "-q", "--", gone)
         _git(repo, "add", "-A")
         _git(repo, "commit", "-q", "--allow-empty", "-m", commit["name"], when=i)
@@ -218,24 +252,35 @@ def build_archive(scenario, archive, shas):
     _git(archive, "init", "-q", "-b", "main")
     tamper = []
     for run in scenario["runs"]:
-        run_dir = runs_dir / run["run"]
+        run_dir = _safe_relpath(run.get("run"), f"{scenario['id']}: run", root=runs_dir, single=True)
         run_dir.mkdir(parents=True, exist_ok=True)
         manifest = _resolve_refs(copy.deepcopy(run["manifest"]), shas)
         recorded = []
-        for name, content in run.get("artifacts", {}).items():
-            (run_dir / name).write_text(content, encoding="utf-8")
+        artifacts = run.get("artifacts", {})
+        if not isinstance(artifacts, dict):
+            raise CorpusError(f"{scenario['id']}: artifacts must be an object")
+        for name, content in artifacts.items():
+            art = _safe_relpath(name, f"{scenario['id']}: artifacts", root=run_dir)
+            art.parent.mkdir(parents=True, exist_ok=True)
+            art.write_text(content, encoding="utf-8")
             recorded.append({"path": f"docs/runs/{run['run']}/{name}",
                              "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest()})
         if recorded:
             manifest["artifacts"] = recorded
-        path = run_dir / run.get("file", "manifest.json")
+        path = _safe_relpath(run.get("file", "manifest.json"), f"{scenario['id']}: file", root=run_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         tamper.append((run, run_dir, path, manifest))
     _git(archive, "add", "-A")
     _git(archive, "commit", "-q", "-m", "archive", when=0)
     for run, run_dir, path, manifest in tamper:
-        for name, content in run.get("tamper_artifacts", {}).items():
-            (run_dir / name).write_text(content, encoding="utf-8")
+        tamper_arts = run.get("tamper_artifacts", {})
+        if not isinstance(tamper_arts, dict):
+            raise CorpusError(f"{scenario['id']}: tamper_artifacts must be an object")
+        for name, content in tamper_arts.items():
+            tart = _safe_relpath(name, f"{scenario['id']}: tamper_artifacts", root=run_dir)
+            tart.parent.mkdir(parents=True, exist_ok=True)
+            tart.write_text(content, encoding="utf-8")
         if run.get("tamper_manifest"):
             manifest.update(run["tamper_manifest"])
             path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
@@ -329,6 +374,46 @@ def load_corpus(path):
         for key, expect in scn["expect"].items():
             if "/" not in key or expect.get("class") not in CLASSES or not expect.get("marker"):
                 raise CorpusError(f"{scn['id']}: expect {key} needs run/unit, a class and a marker")
+        sid = scn["id"]
+        if not isinstance(scn["commits"], list):
+            raise CorpusError(f"{sid}: commits must be a list")
+        for i, commit in enumerate(scn["commits"]):
+            if not isinstance(commit, dict):
+                raise CorpusError(f"{sid}: commits[{i}] must be an object")
+            files = commit.get("files", {})
+            if not isinstance(files, dict):
+                raise CorpusError(f"{sid}: commits[{i}].files must be an object")
+            for rel in files:
+                _safe_relpath(rel, f"{sid}: commits[{i}].files")
+            renames = commit.get("rename", {})
+            if not isinstance(renames, dict):
+                raise CorpusError(f"{sid}: commits[{i}].rename must be an object")
+            for old, new in renames.items():
+                _safe_relpath(old, f"{sid}: commits[{i}].rename")
+                _safe_relpath(new, f"{sid}: commits[{i}].rename")
+            deletes = commit.get("delete", [])
+            if not isinstance(deletes, list):
+                raise CorpusError(f"{sid}: commits[{i}].delete must be a list")
+            for gone in deletes:
+                _safe_relpath(gone, f"{sid}: commits[{i}].delete")
+        edits = scn.get("worktree_edits", {})
+        if not isinstance(edits, dict):
+            raise CorpusError(f"{sid}: worktree_edits must be an object")
+        for rel in edits:
+            _safe_relpath(rel, f"{sid}: worktree_edits")
+        if not isinstance(scn["runs"], list):
+            raise CorpusError(f"{sid}: runs must be a list")
+        for i, run in enumerate(scn["runs"]):
+            if not isinstance(run, dict):
+                raise CorpusError(f"{sid}: runs[{i}] must be an object")
+            _safe_relpath(run.get("run"), f"{sid}: runs[{i}].run", single=True)
+            _safe_relpath(run.get("file", "manifest.json"), f"{sid}: runs[{i}].file")
+            for field in ("artifacts", "tamper_artifacts"):
+                mapping = run.get(field, {})
+                if not isinstance(mapping, dict):
+                    raise CorpusError(f"{sid}: runs[{i}].{field} must be an object")
+                for rel in mapping:
+                    _safe_relpath(rel, f"{sid}: runs[{i}].{field}")
     return corpus, hashlib.sha256(raw).hexdigest()
 
 
@@ -507,8 +592,17 @@ def _live_call(ctx, scenario, arm, attempt, call):
         cost, models = reported_cost(paths["stdout"].read_text(encoding="utf-8", errors="replace"))
         if emptied:
             ledger.settle(call, "agent", call_charge(cost, killed, reserve, ctx["tier"]), cost, killed)
+            oracle_home = Path(tmp) / "oracle-home"
+            (oracle_home / "tmp").mkdir(parents=True)
+            oracle_env = {
+                "PATH": os.pathsep.join([os.path.dirname(sys.executable), "/usr/bin", "/bin"]),
+                "HOME": str(oracle_home),
+                "TMPDIR": str(oracle_home / "tmp"),
+                "LANG": "C.UTF-8",
+                "PYTHONDONTWRITEBYTECODE": "1",
+            }
             oracle_code, oracle_killed, oracle_emptied = spend.contained_run(
-                task["oracle"], cwd=repo, env=ctx["env"], timeout=ORACLE_TIMEOUT_S, stdout_path=paths["oracle"])
+                task["oracle"], cwd=repo, env=oracle_env, timeout=ORACLE_TIMEOUT_S, stdout_path=paths["oracle"])
             output = paths["oracle"].read_text(encoding="utf-8", errors="replace")
         else:  # something of the call survived: it stays open at its full reservation, and stops here (K4)
             oracle_code, oracle_killed, oracle_emptied, output = None, False, True, ""
@@ -670,11 +764,29 @@ def preflight_live(args):
         raise CorpusError("--live needs --tier, --agent-cmd, --max-runs and --attempts >= 1")
     if args.timeout_s <= 0:
         raise CorpusError("--timeout-s must be positive")
+    try:
+        agent_argv = shlex.split(args.agent_cmd)
+    except ValueError as err:
+        raise CorpusError(f"the agent command cannot be parsed: {err}") from err
+    if not agent_argv:
+        raise CorpusError("--agent-cmd must not be empty")
     budget, per_call = args.budget_usd, args.per_call_usd
     if args.tier == "live":
         if not args.model or budget is None or not math.isfinite(budget) or budget <= 0:
             raise CorpusError("a live tier needs a declared --model and a positive --budget-usd: an "
                               "explicit, finite cap")
+        problem = spend.terminator_problem(agent_argv)
+        if problem:
+            raise CorpusError(f"the agent command {problem}")
+        wrong = sorted({named for named in spend.model_flags(agent_argv) if named != args.model})
+        if wrong:
+            raise CorpusError(f"--model {args.model} disagrees with the agent command's --model "
+                              f"{', '.join(wrong)}: the results would name a model the call was not asked for")
+        fallback = sorted({named for named in spend.model_flags(agent_argv, "--fallback-model")
+                           if named != args.model})
+        if fallback:
+            raise CorpusError(f"the agent command names --fallback-model {', '.join(fallback)}: the call "
+                              f"could switch off {args.model} mid-run, and the results name one model")
         if per_call is None or not math.isfinite(per_call) or per_call <= 0:
             raise CorpusError("a live run needs a per-call reservation (--per-call-usd > 0, the worst "
                               "case one call is held to): without one no cap can be enforced before the spend")

@@ -216,7 +216,7 @@ for event in stream:
 # verdict on, and writes what the call cost to $ABLATION_GRADER_USAGE. `text` output carries no
 # cost, and is then charged its full reservation.
 GRADER_METER = r'''
-import json, os, signal, subprocess, sys, time
+import json, math, os, signal, subprocess, sys, time
 fmt, argv = sys.argv[1], sys.argv[sys.argv.index("--") + 1:]
 limit = float(os.environ.get("ABLATION_GRADER_TIMEOUT") or 270)
 sink = os.environ.get("ABLATION_GRADER_USAGE")
@@ -287,12 +287,12 @@ if fmt == "claude-json":
         if not killed:
             answer = obj["result"] if isinstance(obj.get("result"), str) else ""
             value = obj.get("total_cost_usd")
-            if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0:
                 cost = value
 if sink:
     with open(sink, "w", encoding="utf-8") as fh:
         json.dump({"cost_usd": cost, "format": fmt, "exit": proc.returncode, "killed": killed,
-                   "models": models}, fh)
+                   "models": models}, fh, allow_nan=False)
 sys.stdout.write(answer)
 sys.stderr.write(err)
 sys.exit(124 if killed else proc.returncode)
@@ -797,6 +797,8 @@ def usage_of(stream_path, cell_id, task):
     ins = [fields["input_tokens"], fields["cache_read_input_tokens"], fields["cache_creation_input_tokens"]]
     tokens_in = sum(ins) if all(v is not None for v in ins) else None
     cost = float(Decimal(fields["cost_usd"])) if fields["cost_usd"] is not None else None
+    if cost is not None and (not math.isfinite(cost) or cost < 0):
+        cost = None
     return tokens_in, fields["output_tokens"], cost, reasons
 
 
@@ -844,12 +846,18 @@ def grade_behavioral(ev, workspace, originals, trace, grader_cmd, usage_path=Non
             if emptied:
                 LIVE_TAGS.discard(tag)
         try:
-            usage = json.loads(Path(usage_path).read_text(encoding="utf-8")) if usage_path else {}
+            usage = (json.loads(Path(usage_path).read_text(encoding="utf-8"), parse_constant=_reject_nonfinite)
+                     if usage_path else {})
         except (OSError, ValueError):
+            usage = {}
+        if not isinstance(usage, dict):
             usage = {}
         if graded is None and not errors:
             errors.append("grader returned no valid JSON verdict for the requested assertions")
     killed = bool(usage.get("killed")) or timed_out
+    raw_cost = usage.get("cost_usd")
+    grader_cost = (raw_cost if not killed and isinstance(raw_cost, (int, float))
+                   and not isinstance(raw_cost, bool) and math.isfinite(raw_cost) and raw_cost >= 0 else None)
     if not emptied:
         errors.append("a process of the grader's call survived SIGKILL, or the process table could "
                       "not be read: the call stays open at its full reservation")
@@ -860,7 +868,7 @@ def grade_behavioral(ev, workspace, originals, trace, grader_cmd, usage_path=Non
             "scope_violations": len(scope), "approval_violations": 0, "attempted": [],
             "narration_only": ev.get("narration_only") is True, "grader_called": grader_cmd is not None,
             # A killed grader's partial output is not a bill: it is charged its full reservation.
-            "grader_cost_usd": None if killed else usage.get("cost_usd"), "grader_killed": killed,
+            "grader_cost_usd": grader_cost, "grader_killed": killed,
             "grader_models": [m for m in usage.get("models") or [] if isinstance(m, str)],
             "orphans": not emptied, "attempted_violations": None,
             "assertion_rows": list((graded or {}).get("assertions") or []), "errors": errors}
@@ -1141,6 +1149,10 @@ def charge(cell, model, tier):
     return charged, breached
 
 
+def _reject_nonfinite(token):
+    raise ValueError(f"non-finite JSON constant: {token}")
+
+
 class SpendLedger:
     """Every paid call, durably, before and after (#652 review: an interrupt inside a cell skipped
     the charge, so the call in flight vanished from the spend).
@@ -1188,12 +1200,14 @@ class SpendLedger:
             if not line.strip():
                 continue
             try:
-                rec = json.loads(line)
+                rec = json.loads(line, parse_constant=_reject_nonfinite)
             except ValueError:
                 rec = None
             amount = {"start": "reserve_usd", "settle": "charged_usd"}.get((rec or {}).get("event"))
+            val = rec.get(amount) if isinstance(rec, dict) and amount else None
             if not (isinstance(rec, dict) and amount and all(isinstance(rec.get(k), str) for k in ("run", "cell", "call"))
-                    and isinstance(rec.get(amount), (int, float)) and not isinstance(rec.get(amount), bool)):
+                    and isinstance(val, (int, float)) and not isinstance(val, bool)
+                    and math.isfinite(val) and val >= 0):
                 raise Refused(f"the spend ledger {self.path} is unreadable at line {lineno}: spend "
                               "already made there cannot be counted, so nothing may start (inspect it)")
             records.append(rec)
@@ -1202,15 +1216,25 @@ class SpendLedger:
     def _append(self, record):
         record = {"run": self.run, **record}
         with open(self.path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record, sort_keys=True) + "\n")
+            fh.write(json.dumps(record, sort_keys=True, allow_nan=False) + "\n")
             fh.flush()
             os.fsync(fh.fileno())
         self.records.append(record)
 
     def start(self, cell, call, reserve_usd):
+        if (not isinstance(reserve_usd, (int, float)) or isinstance(reserve_usd, bool)
+                or not math.isfinite(reserve_usd) or reserve_usd < 0):
+            raise ValueError("reserve_usd must be finite and non-negative")
         self._append({"cell": cell, "call": call, "event": "start", "reserve_usd": reserve_usd})
 
     def settle(self, cell, call, charged_usd, measured_usd, killed):
+        if (not isinstance(charged_usd, (int, float)) or isinstance(charged_usd, bool)
+                or not math.isfinite(charged_usd) or charged_usd < 0):
+            raise ValueError("charged_usd must be finite and non-negative")
+        if measured_usd is not None and (not isinstance(measured_usd, (int, float))
+                                         or isinstance(measured_usd, bool)
+                                         or not math.isfinite(measured_usd) or measured_usd < 0):
+            measured_usd = None
         self._append({"cell": cell, "call": call, "event": "settle", "charged_usd": round(charged_usd, 6),
                       "measured_usd": measured_usd, "killed": killed})
 

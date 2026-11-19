@@ -3531,5 +3531,74 @@ class TestABindingRerunKeepsItsMarkersAndItsFiles(DryRun):
         self.assertIn("one re-run", p.stderr)
 
 
+class TestWipCurveHardening766_778_788(unittest.TestCase):
+    """#766 git custody env, #778 finite cost/budget I/O, #788 extract_tree attribute isolation."""
+
+    def test_git_env_uses_custody_env_766(self):
+        env = wip.git_env({"PATH": "/usr/bin", "GIT_DIR": "/tmp/poison", "GIT_INDEX_FILE": "/tmp/idx"})
+        self.assertNotIn("GIT_DIR", env)
+        self.assertNotIn("GIT_INDEX_FILE", env)
+        self.assertEqual(env.get("GIT_ALLOW_PROTOCOL"), "file")
+        self.assertEqual(env.get("GIT_NO_LAZY_FETCH"), "1")
+        self.assertEqual(env.get("GIT_ATTR_NOSYSTEM"), "1")
+        keys = {env[k] for k in env if k.startswith("GIT_CONFIG_KEY_")}
+        self.assertIn("core.alternateRefsCommand", keys)
+
+    def test_stream_cost_and_budget_reject_nan_and_inf_778(self):
+        tmp = Path(tempfile.mkdtemp(prefix="wip-nan-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        for bad in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(bad=bad):
+                stream = tmp / f"s-{bad}.jsonl"
+                stream.write_text(
+                    '{"type":"result","total_cost_usd":0.10}\n'
+                    f'{{"type":"result","total_cost_usd":{bad}}}\n',
+                    encoding="utf-8",
+                )
+                self.assertIsNone(wip.Run.stream_cost(stream))
+        budget_dir = tmp / "budget"
+        budget_dir.mkdir()
+        (budget_dir / "budget.jsonl").write_text(
+            '{"call":"r/t/a1/builder","state":"charged","usd":"NaN"}\n', encoding="utf-8",
+        )
+        with self.assertRaises(wip.SourceError):
+            wip.Budget(budget_dir).calls()
+        (budget_dir / "budget.jsonl").write_text(
+            '{"call":"r/t/a1/builder","state":"charged","usd":Infinity}\n', encoding="utf-8",
+        )
+        with self.assertRaises(wip.SourceError):
+            wip.Budget(budget_dir).calls()
+        clean = tmp / "clean"
+        clean.mkdir()
+        with self.assertRaises(ValueError):
+            wip.Budget(clean).charge("r/t/a1/builder", Decimal("NaN"), True, run="r")
+        with self.assertRaises(ValueError):
+            wip.Budget(clean).charge("r/t/a1/builder", Decimal("Infinity"), True, run="r")
+
+    def test_extract_tree_ignores_gitattributes_and_info_attributes_788(self):
+        tmp = Path(tempfile.mkdtemp(prefix="wip-attr-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        repo = tmp / "repo"
+        repo.mkdir()
+        env = wip.git_env({"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+                           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"})
+        wip.git(repo, "init", "-q", "-b", "main", env=env)
+        (repo / ".gitattributes").write_text("hidden.txt export-ignore\nsubst.txt export-subst\n", encoding="utf-8")
+        (repo / "hidden.txt").write_text("must-exist\n", encoding="utf-8")
+        (repo / "subst.txt").write_text("$Format:%H$\n", encoding="utf-8")
+        wip.git(repo, "add", "-A", env=env)
+        wip.git(repo, "commit", "-qm", "seed", env=env)
+        info_dir = repo / ".git" / "info"
+        info_dir.mkdir(parents=True, exist_ok=True)
+        (info_dir / "attributes").write_text("hidden.txt export-ignore\n", encoding="utf-8")
+        dest = tmp / "extracted"
+        wip.extract_tree(repo, "HEAD", dest, env=env)
+        self.assertTrue((dest / "hidden.txt").is_file(), "export-ignore hid hidden.txt")
+        self.assertEqual((dest / "hidden.txt").read_text(encoding="utf-8"), "must-exist\n")
+        self.assertEqual((dest / "subst.txt").read_text(encoding="utf-8"), "$Format:%H$\n",
+                         "export-subst rewrote subst.txt")
+
+
 if __name__ == "__main__":
     unittest.main()
