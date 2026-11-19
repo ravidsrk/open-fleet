@@ -118,8 +118,9 @@ FULL_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 # may change it; docs/ops.md#merge-gate says why the line is drawn here.
 # 1. What GitHub or the runner reads to choose which commands a required job executes, before
 #    any repository code runs: the workflows, local actions, and the hashed tool lock.
-GRADER_DIRS = (".github/workflows/", ".github/actions/")
-GRADER_FILES = (".github/ci-tools.lock",)
+GRADER_DIRS = (".github/workflows/", ".github/actions/", "bench/vf-bench/")
+GRADER_FILES = (".github/ci-tools.lock", "ruff.toml", ".ruff.toml", ".coveragerc",
+                ".gitleaks.toml", ".gitleaksignore")
 # 2. The scripts a required job names on a run: line (gates and its needs, pinned-demo; guard runs
 #    the base branch's floor_guard.py): each IS a gate, and a one-file rewrite of it greens that
 #    gate (PR #718 re-attack). tests/test_verdict_check.py holds this list to the workflows.
@@ -159,37 +160,49 @@ def _verdict_at(review, head, pr_author):
     """"GO", "NO-GO" or None: what one review says about the head ``head`` (lowercase).
 
     Only a trusted author's review is a verdict at all. A GO is an APPROVED or COMMENTED review
-    whose every VERDICT line reads exactly GO and whose full reviewed_sha is the head. A NO-GO is
-    a CHANGES_REQUESTED review, or a review with any other VERDICT line, bound to the head by its
-    reviewed_sha or, lacking one, by the commit GitHub recorded it on (``commit_id``). A
-    DISMISSED review, a review without a verdict, or one bound to another commit says nothing.
+    matching strict ``VERDICT_RE`` whose every VERDICT line reads exactly GO and whose every
+    ``reviewed_sha`` line equals the full head (at least one, with no conflicting SHAs). A NO-GO
+    is a CHANGES_REQUESTED review, or a review with any non-GO VERDICT line, bound to the head by
+    EITHER ``commit_id`` OR any ``reviewed_sha`` line in the body (#779). A DISMISSED review, a
+    review without a verdict, or one bound only to another commit says nothing.
     """
     state = review.get("state")
-    if state not in ("APPROVED", "COMMENTED", "CHANGES_REQUESTED") \
+    if not head or state not in ("APPROVED", "COMMENTED", "CHANGES_REQUESTED") \
             or not _author_trusted(review, pr_author):
         return None
     body = review.get("body") or ""
     lines = ANY_VERDICT_RE.findall(body)
-    match = SHA_RE.search(body)
-    bound = (match.group(1).lower() if match else (review.get("commit_id") or "").lower()) == head
-    if state == "CHANGES_REQUESTED" or any(v.strip() != "GO" for v in lines):
-        return "NO-GO" if bound and (state == "CHANGES_REQUESTED" or lines) else None
-    if lines and match and match.group(1).lower() == head:
+    shas = [s.lower() for s in SHA_RE.findall(body)]
+    commit_id = (review.get("commit_id") or "").lower()
+    bound_veto = (commit_id == head) or (head in shas)
+    if state == "CHANGES_REQUESTED":
+        return "NO-GO" if bound_veto else None
+    if lines and any(v.strip() != "GO" for v in lines):
+        return "NO-GO" if bound_veto else None
+    if VERDICT_RE.search(body) and lines and all(v.strip() == "GO" for v in lines) \
+            and shas and all(s == head for s in shas):
         return "GO"
     return None
+
+
+def _verdicts_at_tip(reviews, head_sha, pr_author=None):
+    """[(submitted_at, index, verdict, review)] for every trusted verdict bound to ``head_sha``."""
+    head = (head_sha or "").lower()
+    if not head:
+        return []
+    return [(review.get("submitted_at") or "", i, verdict, review)
+            for i, review in enumerate(reviews)
+            if isinstance(review, dict) and (verdict := _verdict_at(review, head, pr_author))]
 
 
 def _latest_verdict(reviews, head_sha, pr_author=None):
     """(verdict, review) for the latest trusted verdict bound to the head, or (None, None).
 
     Latest by ``submitted_at``, then by list order (GitHub lists reviews oldest first): a later
-    trusted NO-GO vetoes an earlier GO, and a later GO clears an earlier NO-GO (PR #718
-    re-attack: an owner's CHANGES_REQUESTED after a GO left the gate green).
+    trusted NO-GO vetoes an earlier GO, and a later qualifying GO clears an earlier NO-GO (PR #718
+    re-attack: an owner's CHANGES_REQUESTED after a GO left the gate green; #779).
     """
-    head = (head_sha or "").lower()
-    said = [(review.get("submitted_at") or "", i, verdict, review)
-            for i, review in enumerate(reviews)
-            if isinstance(review, dict) and (verdict := _verdict_at(review, head, pr_author))]
+    said = _verdicts_at_tip(reviews, head_sha, pr_author)
     if not said:
         return None, None
     _when, _i, verdict, review = max(said, key=lambda entry: (entry[0], entry[1]))
@@ -197,38 +210,20 @@ def _latest_verdict(reviews, head_sha, pr_author=None):
 
 
 def go_reviews_at_tip(reviews, head_sha, pr_author=None):
-    """Return the trusted GO reviews bound to ``head_sha``, or [] when the latest trusted
-    verdict bound to it is a NO-GO.
+    """Return the trusted GO reviews bound to ``head_sha`` strictly newer than any trusted NO-GO
+    bound to that head, or [] when none exists or a NO-GO stands (#779).
 
     ``reviews`` is a list of GitHub review objects (``state``, ``body``,
     ``user.login``, ``author_association``, ``submitted_at``, ``commit_id`` keys).
     The VERDICT line matches the exact uppercase literal; the SHA comparison
     is case-insensitive hex but must be a full 40 hex digits — short SHAs
-    never match.
+    never match, and conflicting ``reviewed_sha`` lines fail closed.
     """
-    if _latest_verdict(reviews, head_sha, pr_author)[0] == "NO-GO":
-        return []
-    head = head_sha.lower()
-    hits = []
-    for review in reviews:
-        state = review.get("state")
-        if state not in ("APPROVED", "COMMENTED") or not _author_trusted(review, pr_author):
-            # DISMISSED never counts; CHANGES_REQUESTED with a GO marker is
-            # self-contradictory; an APPROVED or COMMENTED review from an untrusted
-            # author is a drive-by: any account can submit either on a public
-            # repository (PR #460 review, P1; PR #718 review, P1).
-            continue
-        body = review.get("body") or ""
-        if not VERDICT_RE.search(body):
-            continue
-        if any(v.strip() != "GO" for v in ANY_VERDICT_RE.findall(body)):
-            # `VERDICT: GO` then `VERDICT: NO-GO` read as GO: the first GO line won. Any other
-            # verdict line in the same review voids it — fail closed (2026-10-23 review, §5).
-            continue
-        match = SHA_RE.search(body)
-        if match and match.group(1).lower() == head:
-            hits.append(review)
-    return hits
+    said = _verdicts_at_tip(reviews, head_sha, pr_author)
+    vetoes = [(when, i) for when, i, verdict, _r in said if verdict == "NO-GO"]
+    last_veto = max(vetoes) if vetoes else None
+    return [review for when, i, verdict, review in said
+            if verdict == "GO" and (last_veto is None or (when, i) > last_veto)]
 
 
 def verdict_at_tip(reviews, head_sha, pr_author=None):
@@ -375,14 +370,20 @@ def _is_owner(pr, repo):
     return pr.get("author_association") == "OWNER" or bool(login) and login.lower() == owner.lower()
 
 
-def grader_refusal(pr_number, repo, head_sha):
+def _has_owner_go(hits):
+    """True when at least one qualifying GO at tip was authored by a repository OWNER (#779)."""
+    return any(isinstance(r, dict) and r.get("author_association") == "OWNER" for r in hits)
+
+
+def grader_refusal(pr_number, repo, head_sha, hits=None):
     """(grader paths, refusal reason or None) for the PR at ``head_sha`` (W6-01).
 
-    The owner's PR from a branch of this repository may change the grader, and is decided from
-    the PR object check_pr already read, before anything else is read: it gets no refusal, and
-    the compare read below only lists its grader paths, best-effort. An API failure there must
-    never fail the owner's PR, or one bad read would block every owner PR on main, the fix
-    included, with admins enforced (PR #718 review).
+    The owner's PR from a branch of this repository may change the grader ONLY when no non-owner
+    collaborator is standing in for the owner's verdict: either an OWNER GO binds ``head_sha``,
+    or there is no GO at all (so the verdict check itself fails, preserving availability when
+    compare is unreachable on an owner's own-branch PR; PR #718 review, #779). A non-owner
+    collaborator who pushes grader edits onto an owner-opened PR branch and posts VERDICT: GO
+    receives no exemption and fails closed.
 
     Any other PR fails closed, and every read failure is a refusal (a posted failure status, not
     a missing one). The PR is re-read (its head must still be ``head_sha``), then what that exact
@@ -391,8 +392,9 @@ def grader_refusal(pr_number, repo, head_sha):
     re-attack). A list the API may have cut short fails closed, and so does a PR whose base
     cannot be named.
     """
+    owner_verdict_ok = hits is not None and (not hits or _has_owner_go(hits))
     first = _PRS_READ.get((repo, str(pr_number)))
-    if first is not None and _is_owner(first, repo) and _same_repo(first):
+    if first is not None and _is_owner(first, repo) and _same_repo(first) and owner_verdict_ok:
         try:
             return _changed_grader_paths(first, repo, head_sha)[0] or [], None
         except RuntimeError as exc:
@@ -405,7 +407,7 @@ def grader_refusal(pr_number, repo, head_sha):
         if not head_sha or now.lower() != head_sha.lower():
             return [], (f"head moved to {now[:12] or 'nothing'} while it was read; "
                         "re-run the gate on the new head")
-        if _is_owner(pr, repo) and _same_repo(pr):  # only when check_pr's read is not at hand
+        if _is_owner(pr, repo) and _same_repo(pr) and owner_verdict_ok:
             try:
                 return _changed_grader_paths(pr, repo, head_sha)[0] or [], None
             except RuntimeError:
@@ -424,7 +426,7 @@ def grader_refusal(pr_number, repo, head_sha):
     if paths:
         more = f" +{len(paths) - 1} more" if len(paths) > 1 else ""
         return paths, (f"changes the CI grader ({paths[0]}{more}); only the owner's own-branch "
-                       "PR may — this PR's checks ran its own copy")
+                       "PR with an OWNER GO may")
     return paths, None
 
 
@@ -445,18 +447,33 @@ def _changed_grader_paths(pr, repo, head_sha):
     return grader_paths(files), files
 
 
-def pr_for_head(head_sha, repo):
+def pr_for_head(head_sha, repo, head_repo=None, head_branch=None):
     """The number of the one OPEN pull request whose head is ``head_sha``.
 
     A ``workflow_run`` event lists no pull request for a fork's branch, so the gate
-    finds it by head. None or several is an error, never a guess: a status posted
-    for the wrong PR would gate the right one with someone else's verdict.
+    finds it by head. When ``head_repo`` (``owner/repo``, case-insensitive) and/or
+    ``head_branch`` (exact ref name) are supplied, only PRs matching them qualify so
+    a duplicate-head fork PR cannot DoS resolution (#779). None or several is an
+    error, never a guess: a status posted for the wrong PR would gate the right one
+    with someone else's verdict.
     """
     if not FULL_SHA_RE.match(head_sha or ""):
         raise RuntimeError(f"--head-sha must be a full 40-hex SHA, got {head_sha!r}")
     pulls = _gh_api("pulls?state=open&per_page=100", repo, paginate=True)
-    matches = [p for p in pulls if isinstance(p, dict)
-               and ((p.get("head") or {}).get("sha") or "").lower() == head_sha.lower()]
+    matches = []
+    for p in pulls:
+        if not isinstance(p, dict):
+            continue
+        head = p.get("head") or {}
+        if (head.get("sha") or "").lower() != head_sha.lower():
+            continue
+        if head_repo:
+            p_repo = (head.get("repo") or {}).get("full_name") or ""
+            if p_repo.lower() != head_repo.lower():
+                continue
+        if head_branch and (head.get("ref") or "") != head_branch:
+            continue
+        matches.append(p)
     if len(matches) != 1:
         raise RuntimeError(f"{len(matches)} open pull requests have head {head_sha}; "
                            "the gate needs exactly one")
@@ -481,7 +498,11 @@ def post_status(repo, sha, state, description, context=STATUS_CONTEXT):
     env = dict(os.environ)
     if os.environ.get("GH_STATUS_TOKEN"):
         env["GH_TOKEN"] = os.environ["GH_STATUS_TOKEN"]
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False, env=env)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False, env=env,
+                              timeout=GH_API_TIMEOUT)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"{GH_API} statuses/{sha} gave no answer in {GH_API_TIMEOUT}s") from exc
     if proc.returncode != 0:
         raise RuntimeError(f"{GH_API} statuses/{sha} failed: {proc.stderr.strip()}")
 
@@ -494,6 +515,10 @@ def main(argv=None):
                        help="evaluate the one open PR whose head is this SHA (fork PRs)")
     parser.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", ""),
                         help="owner/repo (default: $GITHUB_REPOSITORY)")
+    parser.add_argument("--head-repo", default="",
+                        help="with --head-sha: disambiguate by head repository full_name")
+    parser.add_argument("--head-branch", default="",
+                        help="with --head-sha: disambiguate by head branch name")
     parser.add_argument("--resolve-pr", action="store_true",
                         help="with --head-sha: print the PR number and exit (no verdict)")
     parser.add_argument("--post-status", metavar="CONTEXT", nargs="?", const=STATUS_CONTEXT,
@@ -506,17 +531,24 @@ def main(argv=None):
     if args.resolve_pr and not args.head_sha:
         print("verdict_check: --resolve-pr needs --head-sha", file=sys.stderr)
         return 2
+    if (args.head_repo or args.head_branch) and not args.head_sha:
+        print("verdict_check: --head-repo/--head-branch need --head-sha", file=sys.stderr)
+        return 2
     # Only a failure before the PR's head SHA is known (naming the PR, or reading it) leaves no
     # status: there is no commit to post one on. After that every read failure is a posted
     # failure saying which read (PR #718 review round 4: a hung reviews read posted nothing).
     try:
-        pr_number = args.pr or pr_for_head(args.head_sha, args.repo)
+        pr_number = args.pr or pr_for_head(
+            args.head_sha, args.repo,
+            head_repo=args.head_repo or None,
+            head_branch=args.head_branch or None,
+        )
         if args.resolve_pr:
             print(pr_number)
             return 0
         head_sha, reviews, hits, pr_author = check_pr(pr_number, args.repo)
         try:
-            graded, refusal = grader_refusal(pr_number, args.repo, head_sha)
+            graded, refusal = grader_refusal(pr_number, args.repo, head_sha, hits=hits)
         except RuntimeError as exc:  # it fails closed itself; this holds if a new read does not
             if not FULL_SHA_RE.match(head_sha or ""):
                 raise

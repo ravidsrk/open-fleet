@@ -188,7 +188,19 @@ jobs:
         # decisions.py check had no CI caller (2026-10-26 review). Records stamped before
         # 2026-09-24 predate the human-source, class and payload-v2 rules they would fail and are
         # history, not drafts: counted, never re-litigated. Every later record must pass.
-        run: python3 runtime/scripts/decisions.py check --since 2026-09-24
+        # On pull_request (#772), bind the grant pubkey and diff newly added lines against the
+        # PR's remote-tracking base ref (fetched by checkout's fetch-depth: 0) so backdated
+        # timestamps cannot bypass validation.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            python3 runtime/scripts/decisions.py --pin-ref "refs/remotes/origin/${PR_BASE_REF}" \
+              check --since 2026-09-24 --base "refs/remotes/origin/${PR_BASE_REF}"
+          else
+            python3 runtime/scripts/decisions.py check --since 2026-09-24
+          fi
       - name: Validate missions, playbooks, and evals
         run: python3 scripts/validate.py
       - name: CHANGELOG entries arrive as fragments, not as edits to the shared file
@@ -343,7 +355,8 @@ jobs:
           echo "negative control: a planted credential is caught in the waived file, under every top-level directory and in a binary file, whatever the attributes say"
       - name: Ruff (syntax / undefined names)
         # Installed from the hashed lock above (#301), not re-resolved here.
-        run: ruff check scripts runtime/scripts tests bench evals/demo
+        # Pin --config ruff.toml so a PR cannot shadow it with .ruff.toml or nested configs (#769).
+        run: ruff check --config ruff.toml scripts runtime/scripts runtime/providers tests bench evals/demo
       - name: Publish the gate summary (proof rollup + routing score)
         # Observability only (#213): the numbers land in the run summary even
         # when a gate is red. The routing GATE is the step above; this one
@@ -438,6 +451,9 @@ jobs:
         # (W6-02): the checkout-glob instance (a planted `.coverage.*` file) is closed. A test
         # can still add lines to the live tracer, which land in its shard's one legitimate file,
         # so coverage remains the PR's own measurement of itself, an accepted residual.
+        # COVERAGE_RCFILE pins .coveragerc explicitly so pyproject.toml/setup.cfg cannot shadow it (#769).
+        env:
+          COVERAGE_RCFILE: .coveragerc
         run: |
           set -euo pipefail
           dir="$RUNNER_TEMP/coverage-shards"
@@ -481,6 +497,10 @@ jobs:
         # waiver without an issue. One invocation and nothing else: release_check.py gate 3
         # counts only a step whose whole run: is that (PR #718 review). The runner's own
         # `bash -e -o pipefail` wraps it, and the step's duration is in the run log.
+        # W3-01 (#770): PYTHONSAFEPATH + PYTHONNOUSERSITE isolate sys.path like -I.
+        env:
+          PYTHONSAFEPATH: "1"
+          PYTHONNOUSERSITE: "1"
         run: python3 bench/vf-bench/gate.py
   vfbench_replay:
     # #601: the second environment. bench/vf-bench/replay-reference.json is a replay published from
@@ -509,6 +529,9 @@ jobs:
             $SUDO ldconfig
           fi
       - name: Reproduce the published VF-Bench replay in this environment
+        env:
+          PYTHONSAFEPATH: "1"
+          PYTHONNOUSERSITE: "1"
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/vf-bench-replay"
@@ -516,13 +539,22 @@ jobs:
             --out "$RUNNER_TEMP/vf-bench-replay/report.json" \
             --summary "$RUNNER_TEMP/vf-bench-replay/summary.txt"
       - name: A deleted or edited corpus case or fixture fails the replay
+        env:
+          PYTHONSAFEPATH: "1"
+          PYTHONNOUSERSITE: "1"
         run: python3 bench/vf-bench/replay.py drill --rev HEAD
       - name: The held-out protocol is complete and pinned to the shipped corpus
+        env:
+          PYTHONSAFEPATH: "1"
+          PYTHONNOUSERSITE: "1"
         run: python3 bench/vf-bench/heldout.py validate
       - name: No commit carries a held-out v1 case or its canary
         # #601: held-out v1's digests are published, so every PR proves the solver's history holds
         # none of its cases (verbatim, reformatted, embedded) and not its canary. Full history:
         # the checkout above is fetch-depth 0, and a shallow one would fail as UNSCANNED.
+        env:
+          PYTHONSAFEPATH: "1"
+          PYTHONNOUSERSITE: "1"
         run: python3 bench/vf-bench/heldout.py check --digests bench/vf-bench/heldout-v1-digests.json --all-history
       - name: Publish the replay summary
         if: always()

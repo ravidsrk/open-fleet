@@ -671,7 +671,7 @@ class LocalCheckCommand(unittest.TestCase):
 
     def test_ruff_lints_exactly_what_ci_lints(self):
         wf = (ROOT / ".github" / "workflows" / "validate.yml").read_text(encoding="utf-8")
-        ci = re.search(r"run: ruff check (.+)$", wf, re.M)
+        ci = re.search(r"run: ruff check --config ruff\.toml (.+)$", wf, re.M)
         self.assertIsNotNone(ci, "the CI ruff step moved; update check.py's RUFF_PATHS with it")
         self.assertEqual(tuple(ci.group(1).split()), self.check.RUFF_PATHS)
         for rel in self.check.RUFF_PATHS:
@@ -767,6 +767,24 @@ class LocalCheckCommand(unittest.TestCase):
     def test_jobs_below_one_is_refused(self):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             self.check.main(["--jobs", "0", "--plan"])
+
+    def test_ruff_pins_config_and_covers_runtime_providers(self):
+        # #769: runtime/providers must be linted locally and in CI, and --config ruff.toml must
+        # be pinned so a PR cannot shadow it with .ruff.toml or a subdirectory config.
+        self.assertIn("runtime/providers", self.check.RUFF_PATHS)
+        steps = dict(self.check.plan(1, suite=False, ruff="ruff"))
+        self.assertEqual(steps["ruff"], ["ruff", "check", "--config", "ruff.toml",
+                                         *self.check.RUFF_PATHS])
+
+    def test_validate_workflow_pins_coveragerc_and_pr_decisions_base(self):
+        # #769 + #772: CI pins COVERAGE_RCFILE to .coveragerc and checks PR DECISIONS diffs
+        # against the PR's remote-tracking base ref with --pin-ref before `check`.
+        wf = (ROOT / ".github" / "workflows" / "validate.yml").read_text(encoding="utf-8")
+        self.assertIn("COVERAGE_RCFILE: .coveragerc", wf)
+        self.assertIn("PR_BASE_REF: ${{ github.base_ref }}", wf)
+        self.assertIn('python3 runtime/scripts/decisions.py --pin-ref "refs/remotes/origin/${PR_BASE_REF}"', wf)
+        self.assertIn('check --since 2026-09-24 --base "refs/remotes/origin/${PR_BASE_REF}"', wf)
+        self.assertIn("python3 runtime/scripts/decisions.py check --since 2026-09-24", wf)
 
 
 if __name__ == "__main__":

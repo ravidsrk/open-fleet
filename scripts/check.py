@@ -41,7 +41,7 @@ PY = sys.executable or "python3"
 
 # The exact paths CI lints (.github/workflows/validate.yml, the `ruff check` step).
 # tests/test_shard_tests.py fails if the two drift apart.
-RUFF_PATHS = ("scripts", "runtime/scripts", "tests", "bench", "evals/demo")
+RUFF_PATHS = ("scripts", "runtime/scripts", "runtime/providers", "tests", "bench", "evals/demo")
 
 TAIL_LINES = 60
 
@@ -54,7 +54,7 @@ def plan(jobs, suite=True, ruff=None):
     """[(name, argv | None)] in run order. argv None means the step is SKIPPED (tool missing)."""
     steps = [("validate", [PY, "-I", "scripts/validate.py"])]
     ruff = shutil.which("ruff") if ruff is None else ruff
-    steps.append(("ruff", [ruff, "check", *RUFF_PATHS] if ruff else None))
+    steps.append(("ruff", [ruff, "check", "--config", "ruff.toml", *RUFF_PATHS] if ruff else None))
     if suite:
         steps.append(("shard-partition", [PY, "scripts/shard-tests.py", "--check", "--of", str(jobs)]))
         for i in range(1, jobs + 1):

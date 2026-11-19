@@ -608,7 +608,7 @@ class TheLatestTrustedVerdictAtTheHeadDecides(unittest.TestCase):
                 self.at(self.NO_GO, "2026-10-27T02:00:00Z", association="NONE", login="x"),
                 self.at("Needs work.", "2026-10-27T02:00:00Z", state="CHANGES_REQUESTED",
                         association="CONTRIBUTOR", login="x"),
-                self.at(self.NO_GO.replace(HEAD, OTHER), "2026-10-27T02:00:00Z"),
+                self.at(self.NO_GO.replace(HEAD, OTHER), "2026-10-27T02:00:00Z", commit=OTHER),
                 self.at("Needs work.", "2026-10-27T02:00:00Z", state="CHANGES_REQUESTED",
                         commit=OTHER),
                 self.at("Needs work.", "2026-10-27T02:00:00Z", state="DISMISSED"),
@@ -1028,6 +1028,208 @@ class EveryReadAfterTheHeadPostsAStatus(unittest.TestCase):
                 # The owner's own-branch PR: the grader read is best-effort (docs/ops.md).
                 code, posted, out = self._run("compare", how, owner=True)
                 self.assertEqual((code, posted[0]["state"]), (0, "success"), out)
+
+
+class MergeGateBypassesClosed(unittest.TestCase):
+    """Regression tests for #779, #770, #769, and #771 merge-gate and workflow hardenings."""
+
+    @staticmethod
+    def _at(body, when, state="COMMENTED", association="OWNER", login="o", commit=HEAD):
+        r = review(body, state=state, login=login, association=association)
+        r["submitted_at"], r["commit_id"] = when, commit
+        return r
+
+    def test_indented_or_spaced_go_cannot_clear_veto_or_revive_pre_veto_go(self):
+        # #779-1: parser mismatch between ANY_VERDICT_RE and VERDICT_RE allowed a quoted
+        # `    VERDICT: GO` after a CHANGES_REQUESTED to clear the veto and revive the earlier GO.
+        go1 = self._at(go_body(HEAD), "2026-11-01T01:00:00Z")
+        veto = self._at("Needs fixes.", "2026-11-01T02:00:00Z", state="CHANGES_REQUESTED")
+        for quoted in (
+            f"Quoting earlier review:\n    VERDICT: GO\nreviewed_sha: {HEAD}\n",
+            f"VERDICT : GO\nreviewed_sha: {HEAD}\n",
+            f"\tVERDICT: GO\nreviewed_sha: {HEAD}\n",
+        ):
+            with self.subTest(quoted=quoted):
+                reviews = [go1, veto, self._at(quoted, "2026-11-01T03:00:00Z")]
+                self.assertEqual(go_reviews_at_tip(reviews, HEAD, pr_author="o"), [])
+                self.assertFalse(verdict_at_tip(reviews, HEAD, pr_author="o"))
+
+    def test_post_veto_go_returns_only_qualifying_reviews_newer_than_veto(self):
+        # #779-1: when a later strict GO clears a veto, only the post-veto GO is returned; the
+        # vetoed pre-veto GO is never revived in hits.
+        go1 = self._at(go_body(HEAD), "2026-11-01T01:00:00Z", association="OWNER", login="o")
+        veto = self._at("Stop.", "2026-11-01T02:00:00Z", state="CHANGES_REQUESTED")
+        go2 = self._at(go_body(HEAD), "2026-11-01T03:00:00Z", association="COLLABORATOR",
+                       login="collab")
+        hits = go_reviews_at_tip([go1, veto, go2], HEAD, pr_author="o")
+        self.assertEqual(hits, [go2])
+
+    def test_quoted_prior_reviewed_sha_does_not_nullify_head_veto(self):
+        # #779-2: a CHANGES_REQUESTED or non-GO VERDICT submitted on commit_id == HEAD still
+        # vetoes HEAD even when the body quotes an older `reviewed_sha: <OTHER>`.
+        go1 = self._at(go_body(HEAD), "2026-11-01T01:00:00Z")
+        for later in (
+            self._at(f"Earlier you had:\nreviewed_sha: {OTHER}\nFix this.",
+                     "2026-11-01T02:00:00Z", state="CHANGES_REQUESTED", commit=HEAD),
+            self._at(f"VERDICT: NO-GO\nreviewed_sha: {OTHER}\n",
+                     "2026-11-01T02:00:00Z", state="COMMENTED", commit=HEAD),
+            self._at(f"Still broken at head:\nreviewed_sha: {HEAD}\n",
+                     "2026-11-01T02:00:00Z", state="CHANGES_REQUESTED", commit=OTHER),
+        ):
+            with self.subTest(body=later["body"], commit=later["commit_id"]):
+                self.assertFalse(verdict_at_tip([go1, later], HEAD, pr_author="o"))
+
+    def test_conflicting_reviewed_sha_lines_in_go_body_fail_closed(self):
+        # #779-2: a GO body naming two different reviewed_sha values must fail closed.
+        for body in (
+            f"VERDICT: GO\nreviewed_sha: {HEAD}\nreviewed_sha: {OTHER}\n",
+            f"VERDICT: GO\nreviewed_sha: {OTHER}\nreviewed_sha: {HEAD}\n",
+        ):
+            with self.subTest(body=body):
+                self.assertFalse(verdict_at_tip([self._at(body, "2026-11-01T01:00:00Z")], HEAD))
+                # Also cannot clear an earlier veto.
+                go1 = self._at(go_body(HEAD), "2026-11-01T01:00:00Z")
+                veto = self._at("Hold.", "2026-11-01T02:00:00Z", state="CHANGES_REQUESTED")
+                self.assertFalse(verdict_at_tip(
+                    [go1, veto, self._at(body, "2026-11-01T03:00:00Z")], HEAD))
+
+    def test_collaborator_go_on_owner_opened_pr_cannot_bypass_grader_refusal(self):
+        # #779-3: a non-owner collaborator pushing grader edits onto an owner-opened base-repo PR
+        # and posting VERDICT: GO must be refused; benign edits with collaborator GO still pass;
+        # and a vetoed pre-veto OWNER GO followed by a collaborator GO is still refused.
+        pr = {"number": 7, "head": {"sha": HEAD, "repo": {"full_name": "o/r"}},
+              "base": {"ref": "main", "sha": "c" * 40, "repo": {"full_name": "o/r"}},
+              "user": {"login": "o"}, "author_association": "OWNER", "changed_files": 1}
+        collab_go = self._at(go_body(HEAD), "2026-11-01T03:00:00Z", state="APPROVED",
+                             association="COLLABORATOR", login="collab")
+        member_go = self._at(go_body(HEAD), "2026-11-01T03:00:00Z", state="APPROVED",
+                             association="MEMBER", login="member")
+        owner_go = self._at(go_body(HEAD), "2026-11-01T01:00:00Z", state="COMMENTED",
+                            association="OWNER", login="o")
+        veto = self._at("Re-check.", "2026-11-01T02:00:00Z", state="CHANGES_REQUESTED",
+                        association="OWNER", login="o")
+
+        def run_gate(reviews, files, compare_fail=False):
+            posted = []
+
+            def fake_api(path, repo, paginate=False):
+                if path == "pulls/7":
+                    return pr
+                if path == "pulls/7/reviews":
+                    return reviews
+                if path.startswith("compare/"):
+                    if compare_fail:
+                        raise RuntimeError("gh api compare failed: HTTP 502")
+                    return {"files": files}
+                self.fail(f"unexpected API path {path}")
+
+            def fake_run(cmd, **_kw):
+                posted.append(dict(c.split("=", 1) for i, c in enumerate(cmd)
+                                   if i and cmd[i - 1] == "-f"))
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                    mock.patch.object(verdict_check, "_gh_api", side_effect=fake_api), \
+                    mock.patch.object(verdict_check.subprocess, "run", side_effect=fake_run):
+                code = verdict_check.main(["--pr", "7", "--repo", "o/r", "--post-status"])
+            return code, posted, out.getvalue() + err.getvalue()
+
+        grader_file = [{"filename": ".github/workflows/validate.yml", "status": "modified"}]
+        benign_file = [{"filename": "docs/notes.md", "status": "modified"}]
+        for reviews in ([collab_go], [member_go], [owner_go, veto, collab_go]):
+            with self.subTest(reviews=len(reviews)):
+                code, posted, out = run_gate(reviews, grader_file)
+                self.assertEqual((code, posted[0]["state"]), (0, "failure"), out)
+                self.assertIn("grader", posted[0]["description"])
+                # Compare read failure also fails closed without an OWNER GO.
+                code, posted, out = run_gate(reviews, benign_file, compare_fail=True)
+                self.assertEqual((code, posted[0]["state"]), (0, "failure"), out)
+                self.assertIn("cannot read", posted[0]["description"])
+        # Benign edit on owner-opened PR with collaborator GO passes.
+        code, posted, out = run_gate([collab_go], benign_file)
+        self.assertEqual((code, posted[0]["state"]), (0, "success"), out)
+
+    def test_duplicate_head_fork_prs_disambiguated_by_head_repo_and_branch(self):
+        # #779-4: an attacker opening a second fork PR at the same head SHA must not DoS resolve.
+        pulls = [
+            {"number": 7, "head": {"sha": HEAD, "ref": "fix-bug",
+                                   "repo": {"full_name": "alice/r"}}},
+            {"number": 99, "head": {"sha": HEAD, "ref": "fix-bug",
+                                    "repo": {"full_name": "attacker/r"}}},
+            {"number": 100, "head": {"sha": HEAD, "ref": "other-branch",
+                                     "repo": {"full_name": "alice/r"}}},
+        ]
+        with mock.patch.object(verdict_check, "_gh_api", return_value=pulls):
+            self.assertEqual(
+                verdict_check.pr_for_head(HEAD, "o/r", head_repo="ALICE/r", head_branch="fix-bug"),
+                "7",
+            )
+            with self.assertRaises(RuntimeError):
+                verdict_check.pr_for_head(HEAD, "o/r")
+            with self.assertRaises(RuntimeError):
+                verdict_check.pr_for_head(HEAD, "o/r", head_repo="alice/r")
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                mock.patch.object(verdict_check, "_gh_api", return_value=pulls):
+            code = verdict_check.main(["--head-sha", HEAD, "--resolve-pr", "--repo", "o/r",
+                                       "--head-repo", "alice/r", "--head-branch", "fix-bug"])
+        self.assertEqual((code, out.getvalue().strip()), (0, "7"), err.getvalue())
+        # --head-repo/--head-branch without --head-sha is a usage error (exit 2).
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(verdict_check.main(["--pr", "7", "--repo", "o/r",
+                                                 "--head-repo", "alice/r"]), 2)
+        gate_yml = (_ROOT / ".github" / "workflows" / "verdict-gate.yml").read_text(encoding="utf-8")
+        self.assertIn("RUN_HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}",
+                      gate_yml)
+        self.assertIn("RUN_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}", gate_yml)
+        self.assertIn('--head-repo "$RUN_HEAD_REPO" --head-branch "$RUN_HEAD_BRANCH"', gate_yml)
+
+    def test_post_status_passes_timeout_and_wraps_timeout_expired(self):
+        # #779-5: post_status must bound `gh api` with GH_API_TIMEOUT.
+        seen = {}
+
+        def fake_ok(cmd, **kw):
+            seen["timeout"] = kw.get("timeout")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        with mock.patch.object(verdict_check.subprocess, "run", side_effect=fake_ok):
+            verdict_check.post_status("o/r", HEAD, "success", "ok")
+        self.assertEqual(seen["timeout"], verdict_check.GH_API_TIMEOUT)
+
+        def fake_hang(cmd, **kw):
+            raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+
+        with mock.patch.object(verdict_check.subprocess, "run", side_effect=fake_hang):
+            with self.assertRaises(RuntimeError) as ctx:
+                verdict_check.post_status("o/r", HEAD, "success", "ok")
+        self.assertIn("gave no answer", str(ctx.exception))
+
+    def test_vfbench_dir_and_config_files_are_guarded_grader_paths(self):
+        # #770 + #769: bench/vf-bench/ (including new stdlib-shadow files) and tool config files
+        # are grader paths that non-owner PRs cannot add or modify.
+        for path in ("bench/vf-bench/hashlib.py", "bench/vf-bench/vfbench.py",
+                     "bench/vf-bench/traps/new.json", "bench/vf-bench", "bench",
+                     "ruff.toml", ".ruff.toml", ".coveragerc", ".gitleaks.toml",
+                     ".gitleaksignore"):
+            with self.subTest(path=path):
+                self.assertTrue(verdict_check._is_grader(path), path)
+
+    def test_no_workflow_targets_concurrency_1_codebuild_and_verdict_needs_relay(self):
+        # #771: all concurrency-1 codebuild-gha-open-fleet-* jobs moved off CodeBuild to
+        # ubuntu-latest, and verdict-check.yml serializes `verdict` after `relay`.
+        wf_dir = _ROOT / ".github" / "workflows"
+        for wf in sorted(wf_dir.glob("*.yml")):
+            text = wf.read_text(encoding="utf-8")
+            run_lines = [ln for ln in text.splitlines()
+                         if ln.strip().startswith("runs-on:")]
+            for ln in run_lines:
+                with self.subTest(workflow=wf.name, line=ln.strip()):
+                    self.assertNotIn("codebuild-gha-open-fleet", ln.split("#", 1)[0])
+        vc = (wf_dir / "verdict-check.yml").read_text(encoding="utf-8")
+        verdict_job = vc.split("\n  verdict:\n", 1)[1]
+        self.assertIn("    needs: relay\n", verdict_job)
+
 
 if __name__ == "__main__":
     unittest.main()
