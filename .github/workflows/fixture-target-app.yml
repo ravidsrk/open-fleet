@@ -21,7 +21,7 @@ permissions:
 
 jobs:
   pytest:
-    runs-on: codebuild-gha-open-fleet-${{ github.run_id }}-${{ github.run_attempt }}
+    runs-on: ubuntu-latest  # CodeBuild project gha-open-fleet allows 1 concurrent build and runs as root; untrusted PR pytest stays off AWS CodeBuild (#771)
     timeout-minutes: 15
     defaults:
       run:

@@ -34,7 +34,7 @@ jobs:
       (github.event.workflow_run.conclusion == 'failure' &&
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
-    runs-on: codebuild-gha-open-fleet-${{ github.run_id }}-${{ github.run_attempt }}
+    runs-on: ubuntu-latest  # CodeBuild project gha-open-fleet allows 1 concurrent build; sibling/PR jobs collided with HTTP 400 (#771)
     timeout-minutes: 10
     env:
       GH_TOKEN: ${{ github.token }}

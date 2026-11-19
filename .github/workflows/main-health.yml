@@ -21,7 +21,7 @@ permissions:
 
 jobs:
   health:
-    runs-on: codebuild-gha-open-fleet-${{ github.run_id }}-${{ github.run_attempt }}
+    runs-on: ubuntu-latest  # CodeBuild project gha-open-fleet allows 1 concurrent build; sibling/PR jobs collided with HTTP 400 (#771)
     timeout-minutes: 15
     env:
       GH_TOKEN: ${{ github.token }}

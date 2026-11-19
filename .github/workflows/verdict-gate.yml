@@ -50,7 +50,7 @@ permissions: {}
 jobs:
   resolve:
     if: github.event.workflow_run.event == 'pull_request_review'
-    runs-on: codebuild-gha-open-fleet-${{ github.run_id }}-${{ github.run_attempt }}
+    runs-on: ubuntu-latest  # CodeBuild project gha-open-fleet allows 1 concurrent build; sibling/PR jobs collided with HTTP 400 (#771)
     timeout-minutes: 5
     permissions:
       contents: read
@@ -83,17 +83,19 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           RUN_PR: ${{ github.event.workflow_run.pull_requests[0].number }}
           RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+          RUN_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
         run: |
           if [ -z "$RUN_PR" ]; then
             # a fork's run lists no pull request; find the one open PR at that head
-            RUN_PR=$(python3 scripts/verdict_check.py --head-sha "$RUN_HEAD_SHA" --resolve-pr)
+            RUN_PR=$(python3 scripts/verdict_check.py --head-sha "$RUN_HEAD_SHA" --resolve-pr --head-repo "$RUN_HEAD_REPO" --head-branch "$RUN_HEAD_BRANCH")
           fi
           case "$RUN_PR" in ''|*[!0-9]*) echo "::error::no usable pull request number resolved"; exit 2 ;; esac
           printf 'pr=%s\n' "$RUN_PR" >> "$GITHUB_OUTPUT"
 
   gate:
     needs: resolve
-    runs-on: codebuild-gha-open-fleet-${{ github.run_id }}-${{ github.run_attempt }}
+    runs-on: ubuntu-latest  # CodeBuild project gha-open-fleet allows 1 concurrent build; sibling/PR jobs collided with HTTP 400 (#771)
     timeout-minutes: 10
     environment: verdict-gate
     permissions:
