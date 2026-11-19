@@ -4,7 +4,6 @@
   "mission": "[wip-curve](2026-10-25-wip-curve-604-live.md) (experiment, not a mission)",
   "target": "this catalog's WIP caps — #604's pre-registered curve (version 2) in the container harness: 4 WIP settings × 3 repetitions, `claude-sonnet-5-5` on Claude Code 2.1.304",
   "ran_as": "self-run",
-  "binds": "yes — at `doctrine-only`, advancing no tier; verifier GREEN under a coordinator-signed dispatch record",
-  "outcome": "12/12 runs complete and compliant as registered (the broker saw one side call off the pin; keep either way); throughput b1r1 120/h, b3r1 203/h, b6r1 194/h, b6r2 247/h, rework and conflicts rising with WIP; the decision rule recommends keep; USD 6.29 notional (broker) of a USD 150 cap",
-  "summary": "the 2026-10-25 #604 WIP-curve run, an experiment rather than a mission run, bound at `doctrine-only` with its verifier GREEN under a coordinator-signed dispatch record"
+  "binds": "no (uncommitted wtree 14df5c90150c)",
+  "outcome": "12/12 runs complete and compliant as registered (the broker saw one side call off the pin; keep either way); throughput b1r1 120/h, b3r1 203/h, b6r1 194/h, b6r2 247/h, rework and conflicts rising with WIP; the decision rule recommends keep; USD 6.29 notional (broker) of a USD 150 cap"
 }

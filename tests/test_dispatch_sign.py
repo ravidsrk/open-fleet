@@ -569,3 +569,36 @@ class BaseShaIsASignableDispatchInput(unittest.TestCase):
                 record = json.loads(out.getvalue())["record"]
                 self.assertEqual({k: v for k, v in record.items() if k == "base_sha"}, want)
         self.assertIn("base_sha", dispatch_sign._RECORD_FIELDS)
+
+
+class VerifyDispatchProfileBinding(unittest.TestCase):
+    """Regression pin for #784: verify_dispatch must bind --profile to the signed record's
+    profile rather than letting --profile overwrite or widen an absent/narrower signed profile."""
+
+    def test_verify_dispatch_refuses_mismatched_or_absent_signed_profile(self):
+        seed = bytes(range(1, 33))
+        pub = dispatch_sign._load_ed25519().publickey(seed).hex()
+        ro_env = json.dumps(dispatch_sign.envelope(seed, {
+            "manifest_id": "u1", "contract_digest": "sha256:abc",
+            "unit_class": "mutation", "profile": "ro",
+        }))
+        no_prof_env = json.dumps(dispatch_sign.envelope(seed, {
+            "manifest_id": "u1", "contract_digest": "sha256:abc",
+            "unit_class": "mutation",
+        }))
+        with unittest.mock.patch.dict(os.environ, {}, clear=False):
+            for k in dispatch_sign._PARENT_ENV:
+                os.environ.pop(k, None)
+            # Matching profile succeeds.
+            self.assertEqual(dispatch_sign.verify_dispatch(ro_env, pubkey_ref=pub, profile="ro"), 0)
+            # Escalation (--profile danger or rw against signed profile=ro) must fail closed.
+            for bad in ("rw", "danger"):
+                with contextlib.redirect_stderr(io.StringIO()) as err:
+                    rc = dispatch_sign.verify_dispatch(ro_env, pubkey_ref=pub, profile=bad)
+                self.assertEqual(rc, 2, bad)
+                self.assertIn("does not match signed record profile", err.getvalue())
+            # Requesting --profile when signed record omits profile must fail closed.
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                rc = dispatch_sign.verify_dispatch(no_prof_env, pubkey_ref=pub, profile="ro")
+            self.assertEqual(rc, 2)
+            self.assertIn("carries no profile", err.getvalue())

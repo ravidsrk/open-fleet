@@ -855,5 +855,61 @@ class TestTheBaseIsResolvedByExactNameW307(ScopeBase):
         self.assertIn(f"{tip}...HEAD", diffs[0])
 
 
+class TestShellCommentSanitizationAndGlobIntersects(ScopeBase):
+    """Regression pins for #781: shell-mode comment escaping and _glob_intersects fixes."""
+
+    def test_unmatched_filename_with_newline_cannot_inject_shell_command(self):
+        evil_name = "weird\necho INJECTED_781\x1bfile.xyz"
+        write(self.repo, evil_name, "hello\n")
+        r = self.run_scope("--base", "main")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        for line in r.stdout.splitlines():
+            self.assertTrue(
+                line.startswith(("SCOPE_", "# ")),
+                f"non-assignment, non-comment line leaked into shell output: {line!r}",
+            )
+        self.assertNotIn("\necho INJECTED_781", r.stdout)
+        self.assertIn("\\x0a", r.stdout)
+        self.assertIn("\\x1b", r.stdout)
+        self.assertEqual(diff_scope._shell_comment("a\rb\nc\x00d\x7fe"), r"a\x0db\x0ac\x00d\x7fe")
+
+    def test_error_comment_with_newline_is_single_comment_line(self):
+        r = self.run_scope("--base", "missing\necho INJECTED_BASE")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        for line in r.stdout.splitlines():
+            self.assertTrue(
+                line.startswith(("SCOPE_", "# ")),
+                f"injected line leaked into shell output: {line!r}",
+            )
+        self.assertNotIn("\necho INJECTED_BASE", r.stdout)
+
+    def test_overlap_shell_comment_sanitizes_control_bytes(self):
+        spec_file = Path(self.tmp) / "ctrl.json"
+        spec_file.write_text(json.dumps({
+            "units": [
+                {"id": "u1\necho PWN1", "scope": ["src/*.py"]},
+                {"id": "u2\recho PWN2", "scope": ["src/app.py"]},
+            ]
+        }), encoding="utf-8")
+        r = self.run_scope("--overlap", str(spec_file))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        for line in r.stdout.splitlines():
+            self.assertTrue(
+                line.startswith(("OVERLAP_COUNT=", "# ")),
+                f"injected line leaked into overlap shell output: {line!r}",
+            )
+        self.assertNotIn("\necho PWN1", r.stdout)
+
+    def test_glob_intersects_preserves_dot_prefixes_and_zero_segment_globstar(self):
+        self.assertFalse(diff_scope._glob_intersects(".github/*", "github/*"))
+        self.assertFalse(diff_scope._glob_intersects(".env", "env"))
+        self.assertTrue(diff_scope._glob_intersects("./.github/*", ".github/workflows/ci.yml"))
+        self.assertTrue(diff_scope._glob_intersects("src/**/foo.py", "src/foo.py"))
+        self.assertTrue(diff_scope._glob_intersects("src/foo.py", "src/**/foo.py"))
+        self.assertTrue(diff_scope._glob_intersects("src/**/*.py", "src/app.py"))
+        self.assertTrue(diff_scope._glob_intersects("**/foo.py", "foo.py"))
+        self.assertFalse(diff_scope._glob_intersects("src/**/foo.py", "src/bar.py"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -577,9 +577,10 @@ if [ -n "$DECLARED" ]; then
               # `(pattern)`: a bare `pattern)` inside $( ) trips bash 3.2's parser (macOS /bin/sh).
               case $((_i % 3)) in
                 (0) _path=$_f ;;
-                (2) case "$NL$DECLARED" in
-                      (*"$NL$_f$NL"*) printf '%s%s%s\n' "$_f" "$TAB" "$_path"; break ;;
-                    esac ;;
+                (2) if [ -n "$_f" ] && printf '%s' "$DECLARED" | grep -F -x -q -- "$_f" >/dev/null 2>&1; then
+                      printf '%s%s%s\n' "$_f" "$TAB" "$_path"
+                      break
+                    fi ;;
               esac
               _i=$((_i + 1))
             done; })
