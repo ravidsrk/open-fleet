@@ -55,10 +55,19 @@ How to wire
     A contract test that greps missions and playbooks for raw ``gh issue view``
     outside this script is what keeps the fence the only path.
 """
+import sys
+
+# W3-01: drop the script's own directory from sys.path before any non-builtin import so a
+# planted sibling named like a stdlib module cannot shadow the stdlib when run without -I.
+if (__name__ == "__main__" and not getattr(sys.flags, "safe_path", False) and sys.path
+        and ("os" not in sys.modules or sys.modules["os"].path.realpath(sys.path[0])
+             == sys.modules["os"].path.dirname(sys.modules["os"].path.realpath(__file__)))):
+    del sys.path[0]
+
 import argparse
+import os
 import re
 import subprocess
-import sys
 import unicodedata
 
 EXIT_OK = 0
@@ -99,15 +108,51 @@ INJECTION_PATTERNS = [
 ]
 
 
-def normalize_for_detection(text):
-    """NFKC-fold and strip every Unicode format character. Matched, never emitted.
+_ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])")
+_LINE_BREAKS = re.compile(r"\r\n|\r|\n|\u2028|\u2029|\x85|\x0b|\x0c")
+_BIDI_OVERRIDES = frozenset({
+    "\u202a", "\u202b", "\u202c", "\u202d", "\u202e",
+    "\u2066", "\u2067", "\u2068", "\u2069",
+})
 
-    NFKC turns fullwidth lookalikes into ASCII; stripping category Cf removes
-    zero-width joiners/spaces, bidi overrides and tag characters that could split
-    a keyword to dodge the label.
+
+def _is_stripped_for_detection(ch):
+    cat = unicodedata.category(ch)
+    if cat in ("Cf", "Mn", "Cs"):
+        return True
+    if cat == "Cc" and ch not in ("\t", "\n", "\r"):
+        return True
+    return False
+
+
+def _normalize_with_map(text):
+    """(normalized, idx_map): ANSI-stripped, NFKC-folded copy with Unicode categories Cf, Mn,
+    Cs, and non-whitespace Cc removed before and after folding, paired with the original index
+    each normalized character came from."""
+    skip = [False] * len(text)
+    for m in _ANSI_ESCAPE.finditer(text):
+        for pos in range(m.start(), m.end()):
+            skip[pos] = True
+    chars, idx_map = [], []
+    for idx, ch in enumerate(text):
+        if skip[idx] or _is_stripped_for_detection(ch):
+            continue
+        for folded in unicodedata.normalize("NFKC", ch):
+            if not _is_stripped_for_detection(folded):
+                chars.append(folded)
+                idx_map.append(idx)
+    return "".join(chars), idx_map
+
+
+def normalize_for_detection(text):
+    """NFKC-fold and strip invisible/combining/control evasion characters. Matched, never emitted.
+
+    NFKC turns fullwidth lookalikes into ASCII; stripping ANSI escapes and Unicode categories
+    Cf, Mn, Cs and non-whitespace Cc removes zero-width joiners/spaces, combining joiners
+    (U+034F), variation selectors (U+FE0F), bidi overrides, NUL/ESC controls and tag characters
+    (U+E0000..U+E007F) that could split a keyword to dodge the label.
     """
-    folded = unicodedata.normalize("NFKC", text)
-    return "".join(ch for ch in folded if unicodedata.category(ch) != "Cf")
+    return _normalize_with_map(text)[0]
 
 
 def line_labels(line):
@@ -189,11 +234,45 @@ def splice(text):
 
 
 def defuse_banners(content):
-    return FORGED_BANNER.sub(lambda m: splice(m.group(0)), content)
+    """Defuse raw AND normalized (fullwidth, Cf-split, Mn-split, ANSI-split) forged banners."""
+    norm, idx_map = _normalize_with_map(content)
+    matches = list(FORGED_BANNER.finditer(norm))
+    if not matches:
+        return content
+    out, pos = [], 0
+    for m in matches:
+        o_start = idx_map[m.start()]
+        o_end = idx_map[m.end() - 1] + 1
+        if o_start < pos:
+            continue
+        out.append(content[pos:o_start])
+        raw_seg = content[o_start:o_end]
+        if FORGED_BANNER.fullmatch(raw_seg):
+            out.append(splice(raw_seg))
+        else:
+            split_at = idx_map[m.start() + 1] if m.start() + 1 < len(idx_map) else o_start + 1
+            if split_at <= o_start or split_at >= o_end:
+                split_at = min(o_end, o_start + 1)
+            out.append(content[o_start:split_at] + " " + ZWSP + " " + content[split_at:o_end])
+        pos = o_end
+    out.append(content[pos:])
+    return "".join(out)
+
+
+def _strip_emit_controls(text):
+    """Strip ANSI escape sequences, Unicode Tag characters (U+E0000..U+E007F), and bidi
+    overrides before emitting untrusted text inside the trust envelope."""
+    cleaned = _ANSI_ESCAPE.sub("", text)
+    return "".join(
+        ch for ch in cleaned
+        if ch not in _BIDI_OVERRIDES and not (0xE0000 <= ord(ch) <= 0xE007F)
+    )
 
 
 def sanitize_label(label):
-    flat = re.sub(r"[\r\n\t]+", " ", label)
+    cleaned = _ANSI_ESCAPE.sub("", str(label))
+    flat = re.sub(r"[\r\n\t\x0b\x0c\x85\u2028\u2029]+", " ", cleaned)
+    flat = "".join(ch for ch in flat if unicodedata.category(ch) not in ("Cc", "Cf", "Zl", "Zp", "Cs"))
     return defuse_banners(flat)[:64]
 
 
@@ -206,9 +285,25 @@ def envelope(content, source, label=None):
     if content.strip() == "":
         body = "(empty body -- the fetch SUCCEEDED and returned nothing)"
     else:
+        safe = defuse_banners(_strip_emit_controls(content))
+        lines = _LINE_BREAKS.split(safe)
+        single = [line_labels(line) for line in lines]
+        effective = [list(names) for names in single]
+        covered_pairs = {}
+        for idx in range(len(lines) - 1):
+            pair_labels = line_labels(lines[idx] + " " + lines[idx + 1])
+            covered_pairs[idx] = set(pair_labels)
+            for name in pair_labels:
+                if name not in single[idx] and name not in single[idx + 1] and name not in effective[idx]:
+                    effective[idx].append(name)
+        for idx in range(len(lines) - 2):
+            tri_labels = line_labels(lines[idx] + " " + lines[idx + 1] + " " + lines[idx + 2])
+            already = covered_pairs.get(idx, set()) | covered_pairs.get(idx + 1, set())
+            for name in tri_labels:
+                if name not in already and name not in effective[idx]:
+                    effective[idx].append(name)
         rendered = []
-        for line in defuse_banners(content).split("\n"):
-            names = line_labels(line)
+        for line, names in zip(lines, effective, strict=True):
             if names:
                 rendered.append(f"[INJECTION-PATTERN:{','.join(names)}] {line}")
             else:
@@ -226,10 +321,233 @@ def envelope(content, source, label=None):
     ])
 
 
+_GH_RO_SUBCOMMANDS = {
+    "issue": frozenset({"view", "list"}),
+    "pr": frozenset({"view", "list", "diff", "checks", "status"}),
+    "run": frozenset({"view", "list"}),
+    "release": frozenset({"view", "list"}),
+    "repo": frozenset({"view"}),
+    "search": frozenset({"code", "commits", "issues", "prs", "repos"}),
+}
+_GH_OP_FLAGS = frozenset({"-R", "--repo", "--hostname"})
+_GH_API_RO_LONG_VAL = frozenset({"--header", "--jq", "--template", "--preview", "--cache", "--hostname", "--repo"})
+_GH_API_RO_SHORT_VAL = "HqtpR"
+_ORCA_RO_SERVICES = frozenset({"linear", "jira"})
+_ORCA_RO_ACTIONS = frozenset({"list", "search", "issue", "view", "get"})
+_RO_HTTP_METHODS = frozenset({"GET", "HEAD"})
+_CURL_MUTATING_LONG_PREFIXES = (
+    "--data", "--json", "--form", "--upload-file", "--output", "--remote-name",
+    "--remote-header-name", "--dump-header", "--cookie-jar", "--config", "--trace",
+)
+_CURL_RO_LONG_VAL = frozenset({
+    "--header", "--user-agent", "--referer", "--max-time", "--connect-timeout",
+    "--cookie", "--proxy", "--user", "--url", "--resolve", "--retry", "--retry-delay",
+    "--cacert", "--cert", "--key", "--interface", "--range", "--write-out", "--url-query",
+})
+_WGET_MUTATING_LONG_PREFIXES = (
+    "--output", "--append-output", "--directory-prefix", "--post-data", "--post-file",
+    "--body-data", "--body-file", "--save-cookies", "--config", "--data", "--form",
+    "--upload-file", "--request",
+)
+_WGET_RO_LONG_VAL = frozenset({
+    "--header", "--user-agent", "--referer", "--timeout", "--tries", "--wait",
+    "--load-cookies", "--ca-certificate", "--certificate", "--private-key",
+    "--user", "--password", "--http-user", "--http-password",
+})
+
+
+def _validate_gh_fetch(rest):
+    i = 0
+    while i < len(rest) and rest[i].startswith("-"):
+        w = rest[i]
+        if w in _GH_OP_FLAGS:
+            i += 2
+        elif w.startswith(("--repo=", "--hostname=")) or (w.startswith("-R") and len(w) > 2):
+            i += 1
+        else:
+            raise RuntimeError(f"fetch refused: unexpected gh global flag {w!r}")
+    if i >= len(rest):
+        raise RuntimeError("fetch refused: gh needs a read-only subcommand")
+    group, tail = rest[i], rest[i + 1:]
+    if group == "api":
+        j = 0
+        while j < len(tail):
+            w = tail[j]
+            if w == "--":
+                break
+            if w.startswith("--"):
+                opt, eq, val = w.partition("=")
+                if opt == "--method":
+                    method = val if eq else (tail[j + 1] if j + 1 < len(tail) else "")
+                    if method.upper() not in _RO_HTTP_METHODS:
+                        raise RuntimeError(f"fetch refused: gh api method {method!r} is not read-only")
+                    j += 1 if eq else 2
+                    continue
+                if opt in ("--field", "--raw-field", "--input"):
+                    raise RuntimeError(f"fetch refused: gh api flag {opt!r} is not read-only")
+                if opt in _GH_API_RO_LONG_VAL and not eq:
+                    j += 2
+                    continue
+                j += 1
+                continue
+            if w.startswith("-") and len(w) > 1:
+                cluster = w[1:]
+                step = 1
+                for k, ch in enumerate(cluster):
+                    if ch in ("f", "F"):
+                        raise RuntimeError(f"fetch refused: gh api flag -{ch} is not read-only")
+                    if ch == "X":
+                        rem = cluster[k + 1:]
+                        method = rem if rem else (tail[j + 1] if j + 1 < len(tail) else "")
+                        if method.upper() not in _RO_HTTP_METHODS:
+                            raise RuntimeError(f"fetch refused: gh api method {method!r} is not read-only")
+                        if not rem:
+                            step = 2
+                        break
+                    if ch in _GH_API_RO_SHORT_VAL:
+                        if k == len(cluster) - 1:
+                            step = 2
+                        break
+                j += step
+                continue
+            j += 1
+        return
+    allowed_verbs = _GH_RO_SUBCOMMANDS.get(group)
+    if not allowed_verbs:
+        raise RuntimeError(f"fetch refused: gh {group!r} is not in the read-only allowlist")
+    verb, j = None, 0
+    while j < len(tail):
+        w = tail[j]
+        if w in _GH_OP_FLAGS:
+            j += 2
+            continue
+        if w.startswith("-"):
+            j += 1
+            continue
+        verb = w
+        break
+    if verb not in allowed_verbs:
+        raise RuntimeError(f"fetch refused: gh {group} {verb!r} is not in the read-only allowlist")
+
+
+def _validate_orca_fetch(rest):
+    ops, i = [], 0
+    while i < len(rest) and len(ops) < 2:
+        w = rest[i]
+        if w in ("--runtime", "--provider", "--workspace", "--format"):
+            i += 2
+            continue
+        if w.startswith("-"):
+            i += 1
+            continue
+        ops.append(w)
+        i += 1
+    if len(ops) < 2 or ops[0] not in _ORCA_RO_SERVICES or ops[1] not in _ORCA_RO_ACTIONS:
+        raise RuntimeError("fetch refused: only read-only orca linear/jira subcommands are allowed")
+
+
+def _validate_http_fetch(tool, rest):
+    mut_prefixes = _CURL_MUTATING_LONG_PREFIXES if tool == "curl" else _WGET_MUTATING_LONG_PREFIXES
+    ro_long_val = _CURL_RO_LONG_VAL if tool == "curl" else _WGET_RO_LONG_VAL
+    mut_shorts = "dFToODcKJ" if tool == "curl" else "oOPadFT"
+    ro_short_val = "HAeumbxUrwEzYyC" if tool == "curl" else "UtTw"
+    i = 0
+    while i < len(rest):
+        w = rest[i]
+        if w == "--":
+            break
+        if w.startswith("--"):
+            opt, eq, val = w.partition("=")
+            if opt in ("--request", "--method"):
+                method = val if eq else (rest[i + 1] if i + 1 < len(rest) else "")
+                if method.upper() not in _RO_HTTP_METHODS:
+                    raise RuntimeError(f"fetch refused: {tool} {opt} {method!r} is not read-only")
+                i += 1 if eq else 2
+                continue
+            if any(opt == p or opt.startswith(p + "-") for p in mut_prefixes):
+                raise RuntimeError(f"fetch refused: {tool} flag {opt!r} is not read-only")
+            if opt in ro_long_val and not eq:
+                i += 2
+                continue
+            i += 1
+            continue
+        if w.startswith("-") and len(w) > 1:
+            cluster = w[1:]
+            step = 1
+            for k, ch in enumerate(cluster):
+                if ch in mut_shorts:
+                    raise RuntimeError(f"fetch refused: {tool} flag -{ch} is not read-only")
+                if ch == "X":
+                    rem = cluster[k + 1:]
+                    method = rem if rem else (rest[i + 1] if i + 1 < len(rest) else "")
+                    if method.upper() not in _RO_HTTP_METHODS:
+                        raise RuntimeError(f"fetch refused: {tool} -X {method!r} is not read-only")
+                    if not rem:
+                        step = 2
+                    break
+                if ch in ro_short_val:
+                    if k == len(cluster) - 1:
+                        step = 2
+                    break
+            i += step
+            continue
+        i += 1
+
+
+def _validate_fetch_argv(argv):
+    """Fail-closed allowlist for `--fetch`: only read-only fetch tools and subcommands (#780)."""
+    head = os.path.basename(argv[0])
+    rest = list(argv[1:])
+    if re.fullmatch(r"python(3(\.\d+)?)?", head):
+        i = 0
+        while i < len(rest) and rest[i].startswith("-") and rest[i] != "--":
+            w = rest[i]
+            if re.fullmatch(r"-[IusSEB]+", w):
+                i += 1
+            else:
+                raise RuntimeError(f"fetch refused: python interpreter invocation {argv[0]!r} is not allowed")
+        if i >= len(rest) or os.path.basename(rest[i]) != "orca_cli.py":
+            raise RuntimeError("fetch refused: python may only invoke sibling orca_cli.py read-only subcommands")
+        sibling = os.path.realpath(os.path.join(os.path.dirname(os.path.realpath(__file__)), "orca_cli.py"))
+        if os.path.isfile(sibling) and os.path.exists(rest[i]) and os.path.realpath(rest[i]) != sibling:
+            raise RuntimeError("fetch refused: orca_cli.py path does not match the fleet sibling script")
+        _validate_orca_fetch(rest[i + 1:])
+        return
+    if head == "gh":
+        _validate_gh_fetch(rest)
+        return
+    if head in ("orca", "orca-ide", "orca_cli.py"):
+        _validate_orca_fetch(rest)
+        return
+    if head in ("curl", "wget"):
+        _validate_http_fetch(head, rest)
+        return
+    if head == "cat":
+        paths = rest[1:] if rest[:1] == ["--"] else rest
+        if not paths or any(not p or (rest[:1] != ["--"] and p.startswith("-")) for p in paths):
+            raise RuntimeError("fetch refused: cat requires explicit file path argument(s)")
+        return
+    raise RuntimeError(f"fetch refused: command {argv[0]!r} is not in the read-only fetch allowlist")
+
+
+def _sanitize_stderr(stderr_text):
+    cleaned = _ANSI_ESCAPE.sub("", stderr_text or "")
+    detail = [ln.strip() for ln in _LINE_BREAKS.split(cleaned) if ln.strip()]
+    if not detail:
+        return "no stderr"
+    tail = detail[-1]
+    return "".join(
+        ch if ch == " " or unicodedata.category(ch) not in ("Cc", "Cf", "Zl", "Zp", "Cs")
+        else (f"\\x{ord(ch):02x}" if ord(ch) < 0x100 else f"\\u{ord(ch):04x}")
+        for ch in tail
+    )
+
+
 def fetch(argv, timeout):
-    """Run the fetch command with argv only. Returns stdout, or raises RuntimeError."""
+    """Run an allowlisted read-only fetch command with argv only. Returns stdout, or raises RuntimeError."""
     if not argv:
         raise ValueError("--fetch needs a command")
+    _validate_fetch_argv(argv)
     try:
         r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as err:
@@ -237,8 +555,7 @@ def fetch(argv, timeout):
     except (OSError, subprocess.SubprocessError) as err:
         raise RuntimeError(f"fetch could not be launched: {err}") from err
     if r.returncode != 0:
-        detail = (r.stderr or "").strip().splitlines()
-        tail = detail[-1] if detail else "no stderr"
+        tail = _sanitize_stderr(r.stderr)
         raise RuntimeError(f"fetch exited {r.returncode}: {tail}")
     return r.stdout
 
