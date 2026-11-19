@@ -1148,7 +1148,11 @@ class TestAnchorAndAbbrevHardening(EgressBase):
 
     def test_entrypoint_carries_w3_01_guard_and_blocks_stdlib_shadow(self):
         import ast
-        from tests import test_entrypoint_guard as eg
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "test_entrypoint_guard", ROOT / "tests" / "test_entrypoint_guard.py")
+        eg = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(eg)
         body = eg._statements("runtime/scripts/egress.py")
         self.assertGreaterEqual(len(body), 2)
         self.assertTrue(isinstance(body[0], ast.Import) and [a.name for a in body[0].names] == ["sys"])

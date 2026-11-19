@@ -92,8 +92,8 @@ REFUSE-IF-QUARANTINED (runtime/scripts/preflight.py --mode readonly --mission sh
    → REFLECT (`compound-learn` + readiness/backlog/OPS queue — ledger-contract.md)
 ```
 
-Each phase runs its playbook; workers emit evidence manifests verified against authoritative state
-(evidence-manifest.md) before advancing. Unit flags advance only in the ledger (`BUILD_DONE`…`WT_CLEAN`).
+Each phase runs its playbook; each worker emits a manifest; the coordinator verifies each against
+authoritative state (evidence-manifest.md) before advancing. Unit flags advance only in the ledger (`BUILD_DONE`…`WT_CLEAN`).
 
 ## Convergence proof (this mission's definition of done)
 

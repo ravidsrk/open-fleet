@@ -226,8 +226,13 @@ _GUARD_STEERING_PREFIXES = ("ORCA_", "OPEN_FLEET_")
 # kept `PATH` naming a planted `sh` ran it instead of deny-hook.sh (#707 review). The same keys
 # deny-hook.sh --verify-settings refuses as STEERING; a test keeps the two lists in step.
 _SHELL_STEERING_KEYS = frozenset((
-    "PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP",
-    "ENV", "BASH_ENV", "SHELLOPTS", "CDPATH", "IFS", "SHELL",
+    "PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "GLIBC_TUNABLES",
+    "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH",
+    "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP",
+    "ENV", "BASH_ENV", "SHELLOPTS", "BASHOPTS", "CDPATH", "IFS", "SHELL",
+    "NODE_OPTIONS", "PERL5OPT", "RUBYOPT",
+    "ANTHROPIC_BASE_URL", "HTTP_PROXY", "HTTPS_PROXY",
+    "GIT_SSH_COMMAND", "GIT_EXTERNAL_DIFF",
 ))
 
 
