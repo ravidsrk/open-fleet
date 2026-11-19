@@ -728,6 +728,72 @@ class TestWorktrunkProvider(_Base):
         # The worker WAS killed: the row must not claim it is still active.
         self.assertEqual(prov.worker_show(dispatch_id=did)["worker"]["terminalState"], "stopped")
 
+    def test_775_env_scrubbing_identity_injection_bridge_dir_arg_validation_and_bound_merge(self) -> None:
+        main, wt = make_linked_worktree(self.tmp, branch="wt-feat")
+        subprocess.run(["git", "-C", str(main), "branch", "-m", "main"], check=True, env=GIT_ENV)
+        captured_envs: list[dict[str, str] | None] = []
+        base_runner = self.scripted(str(wt))
+
+        def spy_runner(argv: list[str], **kwargs: Any) -> Any:
+            if argv[:2] == ["tmux", "new-session"]:
+                captured_envs.append(kwargs.get("env"))
+            return base_runner(argv, **kwargs)
+
+        posix = importlib.import_module("runtime.providers.posix")
+        prov = worktrunk.WorktrunkProvider(
+            state=self.state,
+            runner=spy_runner,
+            env={
+                "OPEN_FLEET_SIGNING_SEED": "top-secret-seed",
+                "ORCA_CLOUD_AUTH_TOKEN": "cloud-secret",
+                "OPEN_FLEET_MAX_BUDGET_USD": "6.50",
+                "OPEN_FLEET_REQUIRE_BUDGET": "1",
+            },
+            install_hooks=posix.install_worktree_hooks,
+        )
+        tid = prov.task_create(spec=SPEC, run="run-wt")["task"]["id"]
+        res = prov.worker_start(task_id=tid, name="wt-feat", agent="claude", profile="rw", run="run-wt")
+        shell_cmd = res["launch"]["effective"]["shell"]
+        eff_env = res["launch"]["effective"]["env"]
+        # Denied secrets are unset inside the tmux shell AND stripped from the subprocess env:
+        self.assertIn("-u OPEN_FLEET_SIGNING_SEED", shell_cmd)
+        self.assertIn("-u ORCA_CLOUD_AUTH_TOKEN", shell_cmd)
+        self.assertEqual(len(captured_envs), 1)
+        self.assertNotIn("OPEN_FLEET_SIGNING_SEED", captured_envs[0] or {})
+        self.assertNotIn("ORCA_CLOUD_AUTH_TOKEN", captured_envs[0] or {})
+        # Worker identity + state DB + deny hook are injected:
+        for k in (
+            "OPEN_FLEET_DISPATCH_ID", "ORCA_DISPATCH_ID", "OPEN_FLEET_RUN_ID", "ORCA_RUN_ID",
+            "OPEN_FLEET_TERMINAL_HANDLE", "OPEN_FLEET_DENY_HOOK", "OPEN_FLEET_STATE_DB",
+        ):
+            self.assertIn(k, eff_env, k)
+            self.assertIn(f"{k}=", shell_cmd, k)
+        # Budget from self.env reached build_harness_command:
+        self.assertIn("--max-budget-usd", res["launch"]["effective"]["argv"])
+        # bridge_dir points inside worktree .open-fleet/bridges (verify on omp):
+        res_omp = prov.worker_start(task_id="", worktree=str(wt), prompt=SPEC, agent="omp", profile="rw", run="run-wt")
+        self.assertIn(str(wt / ".open-fleet" / "bridges" / "omp_pi_deny_bridge.ts"), res_omp["launch"]["effective"]["argv"])
+
+        # Dash-prefixed / whitespace / NUL args refused on wt subcommands:
+        for bad in ("--yes", "-y", "a b", "bad\x00name"):
+            with self.assertRaises(ProviderError):
+                prov.worktree_create(name=bad)
+            with self.assertRaises(ProviderError):
+                prov.worktree_rm(selector=bad)
+            with self.assertRaises(ProviderError):
+                prov.predict_and_merge(bad)
+            with self.assertRaises(ProviderError):
+                prov.predict_and_merge("wt-feat", target=bad)
+
+        # Bound worker in run-wt can predict_and_merge its own run's branch via effective_json['branch']:
+        bound_state = local_state.LocalStateStore(
+            db_path=self.state.db_path,
+            env={"OPEN_FLEET_DISPATCH_ID": res["dispatchId"]},
+        )
+        bound_prov = worktrunk.WorktrunkProvider(state=bound_state, runner=base_runner, env={}, install_hooks=self.fake_hooks)
+        merged = bound_prov.predict_and_merge("wt-feat", target="main")
+        self.assertTrue(merged["merged"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -56,17 +56,32 @@ ENTRY_POINTS = (
     "runtime/scripts/orca_cli.py",
     # spawn_worker.sh's identity reader (W4-04): it decides a spawn's cap.
     "runtime/scripts/spawn_identity.py",
+    "runtime/scripts/certification.py",
+    "runtime/scripts/merge_queue.py",
+    "runtime/scripts/egress.py",
+    "runtime/scripts/guard_text.py",
+    "runtime/scripts/sandbox_doctor.py",
+    "runtime/scripts/events.py",
+    "runtime/scripts/watchdog.py",
     "scripts/bind_check.py",
     "scripts/validate.py",
     "scripts/hint_replay.py",
     "scripts/shard-tests.py",
     "scripts/check_trailers.py",
     "scripts/changelog.py",
+    "scripts/check.py",
+    "scripts/run_index.py",
     "scripts/gen-badges.py",
     "scripts/eval.py",
     "scripts/bundle.py",
     "scripts/verdict_check.py",
     "scripts/release_check.py",
+    "scripts/live_broker.py",
+    "scripts/live_container.py",
+    "bench/vf-bench/gate.py",
+    "bench/vf-bench/replay.py",
+    "bench/vf-bench/heldout.py",
+    "bench/vf-bench/vfbench.py",
 )
 
 # The guard, as code (comments are free; the logic is not). `os` comes from sys.modules — it is
@@ -82,7 +97,7 @@ PLANT = ("import os as _o\n"
          "open(_o.path.join(_o.path.dirname(__file__), 'PLANT-' + __name__), 'w').close()\n"
          "raise ImportError('a planted stdlib shadow loaded: ' + __name__)\n")
 
-SCRIPT_DIRS = ("runtime/scripts", "scripts")
+SCRIPT_DIRS = ("runtime/scripts", "scripts", "bench/vf-bench")
 # Plants also go at the copied repo ROOT: a script that puts ROOT on sys.path (to import the
 # `runtime` package) would let a root-level file named like a stdlib module answer.
 PLANT_DIRS = ("", *SCRIPT_DIRS)
@@ -151,7 +166,7 @@ class NoPlantedStdlibNameLoads(unittest.TestCase):
     def setUpClass(cls):
         cls._td = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         cls.tree = Path(cls._td.name).resolve()
-        for top in ("runtime", "scripts"):
+        for top in ("runtime", "scripts", "bench"):
             shutil.copytree(ROOT / top, cls.tree / top,
                             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         cls.names = sorted(n for n in sys.stdlib_module_names if n.isidentifier())

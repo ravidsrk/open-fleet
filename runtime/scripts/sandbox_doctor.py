@@ -35,12 +35,19 @@ Exit codes
     1  it is not clear: a fail/warn, or a transcript for another recipe (reason on stderr)
     2  a credential or isolation finding — the sandbox would expose the host — or usage
 """
-from __future__ import annotations
+import sys
+
+# W3-01: drop the script's own directory from sys.path before any non-builtin import so a
+# planted sibling named like a stdlib module cannot shadow the stdlib when run without -I.
+if (__name__ == "__main__" and not getattr(sys.flags, "safe_path", False) and sys.path
+        and ("os" not in sys.modules or sys.modules["os"].path.realpath(sys.path[0])
+             == sys.modules["os"].path.dirname(sys.modules["os"].path.realpath(__file__)))):
+    del sys.path[0]
 
 import json
 import os
+import posixpath
 import re
-import sys
 
 # Status/level values that are a doctor telling you something is wrong.
 BAD_STATUS = {"fail", "failed", "failing", "failure", "error", "errored", "warn", "warning"}
@@ -49,11 +56,11 @@ FINDING_KEYS = ("failures", "warnings", "errors", "problems", "issues")
 # Keys whose VALUE is a verdict word.
 STATUS_KEYS = ("status", "level", "severity", "state", "result")
 # Portable sandbox backends (#585).
-DOCKER_FAMILY = {"docker", "devcontainer", "hermes-docker"}
-PORTABLE_BACKENDS = DOCKER_FAMILY | {"bwrap", "gondolin", "superset-cloud", "openhands-docker",
-                                     "apptainer"}
+DOCKER_FAMILY = {"docker", "devcontainer", "hermes-docker", "openhands-docker"}
+PORTABLE_BACKENDS = DOCKER_FAMILY | {"bwrap", "gondolin", "superset-cloud", "apptainer"}
 FORBIDDEN_MOUNT_TOKENS = (".ssh", ".config/gh", ".git/config", "$home", "${home}", ".aws",
-                          ".gnupg", ".netrc", ".docker/config.json", ".kube")
+                          ".gnupg", ".netrc", ".docker/config.json", ".kube",
+                          ".config/gcloud", ".azure", ".git-credentials", ".gitconfig")
 # Runtime control sockets: a container holding one can start a privileged sibling.
 FORBIDDEN_SOCKETS = ("docker.sock", "podman.sock", "containerd.sock", "crio.sock", "buildkitd.sock")
 # Where those sockets live. Mounting the socket OR any directory above it hands it over, so a
@@ -119,49 +126,80 @@ def _dict_get(mount_item: dict, keys) -> str:
     return ""
 
 
-def _mount_fields(spec: str) -> dict | None:
-    """`[--mount[=| ]]type=bind,source=/x,target=/y[,readonly]` as a dict, else None.
+def _strip_quotes(val: str) -> str:
+    v = val.strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+        return v[1:-1].strip()
+    return v
 
-    A long-form mount string is comma-separated key=value pairs; reading it as `src:dst` took
-    `type=bind,source=/home,…` for a (relative, harmless) source and passed the real home (#592).
+
+def _is_long_mount(spec: str) -> bool:
+    s = spec.strip()
+    return s == "--mount" or s.startswith(("--mount=", "--mount "))
+
+
+def _strip_vol_prefix(spec: str) -> str:
+    s = spec.strip()
+    for flag in ("--volume=", "--volume ", "-v "):
+        if s.startswith(flag):
+            return _strip_quotes(s[len(flag):])
+    if s.startswith("-v") and len(s) > 2:
+        return _strip_quotes(s[2:])
+    return _strip_quotes(s)
+
+
+def _mount_fields(spec: str) -> dict | None:
+    """`[--mount[=| ]][readonly,]type=bind,source=/x,target=/y[,readonly]` as a dict, else None.
+
+    A long-form mount string is comma-separated key=value pairs (with optional bare boolean tokens
+    like `readonly` in any position, including first); reading it as `src:dst` took
+    `type=bind,source=/home,…` or `readonly,type=bind,source=/home,…` for a harmless source (#592, #777).
     """
     s = spec.strip()
-    for flag in ("--mount=", "--mount ", "--volume=", "--volume ", "-v "):
-        if s.startswith(flag):
-            s = s[len(flag):].strip()
-            break
-    if "=" not in s.split(",", 1)[0]:
+    is_mount = _is_long_mount(s)
+    if is_mount:
+        s = _strip_quotes(s[len("--mount"):].lstrip("= "))
+    else:
+        for flag in ("--volume=", "--volume ", "-v "):
+            if s.startswith(flag):
+                s = _strip_quotes(s[len(flag):])
+                break
+        else:
+            if s.startswith("-v") and len(s) > 2:
+                s = _strip_quotes(s[2:])
+            else:
+                s = _strip_quotes(s)
+    parts = [p.strip() for p in s.split(",") if p.strip()]
+    has_kv = any("=" in part for part in parts)
+    if not is_mount and (not has_kv or s.startswith(("/", ".", "~", "$"))):
         return None
     out = {}
-    for part in s.split(","):
+    for part in parts:
         key, eq, value = part.partition("=")
-        out[key.strip().lower()] = value.strip() if eq else "true"
+        k = _strip_quotes(key).lower()
+        if k:
+            out[k] = _strip_quotes(value) if eq else "true"
     return out
 
 
 def _mount_source(mount_item) -> str:
     """The HOST side of a mount: `source`/`src`/`host`, or the first field of `src:dst[:mode]`."""
     if isinstance(mount_item, dict):
-        return _dict_get(mount_item, _SOURCE_KEYS)
+        return _strip_quotes(_dict_get(mount_item, _SOURCE_KEYS))
     fields = _mount_fields(str(mount_item))
     if fields is not None:
-        return _dict_get(fields, _SOURCE_KEYS)
-    s = str(mount_item).strip()
-    for flag in ("--volume=", "--volume ", "-v "):
-        if s.startswith(flag):
-            s = s[len(flag):].strip()
-            break
-    return s.split(":", 1)[0]
+        return _strip_quotes(_dict_get(fields, _SOURCE_KEYS))
+    return _strip_quotes(_strip_vol_prefix(str(mount_item)).split(":", 1)[0])
 
 
 def _mount_target(mount_item) -> str:
     if isinstance(mount_item, dict):
-        return _dict_get(mount_item, _TARGET_KEYS)
+        return _strip_quotes(_dict_get(mount_item, _TARGET_KEYS))
     fields = _mount_fields(str(mount_item))
     if fields is not None:
-        return _dict_get(fields, _TARGET_KEYS)
-    parts = str(mount_item).split(":")
-    return parts[1] if len(parts) > 1 else parts[0]
+        return _strip_quotes(_dict_get(fields, _TARGET_KEYS))
+    parts = _strip_vol_prefix(str(mount_item)).split(":")
+    return _strip_quotes(parts[1] if len(parts) > 1 else parts[0])
 
 
 def _covers(real: str, path: str) -> bool:
@@ -193,6 +231,8 @@ def _mount_exposes_host(mount_item) -> str | None:
     """
     source = _mount_source(mount_item).strip()
     if not source:
+        if isinstance(mount_item, str) and (_is_long_mount(mount_item) or _mount_fields(mount_item) is not None):
+            return f"mount specification has no extractable host source (fail-closed): {mount_item!r}"
         return None
     low = source.lower()
     for sock in FORBIDDEN_SOCKETS:
@@ -221,7 +261,8 @@ def _mount_exposes_host(mount_item) -> str | None:
             if _covers(path, guarded_home):
                 return f"mount exposes {label}: {source!r}"
             for cred in HOME_CREDENTIALS:
-                if _covers(path, os.path.join(guarded_home, cred)):
+                cred_path = os.path.join(guarded_home, cred)
+                if _covers(path, cred_path) or _covers(cred_path, path):
                     return f"mount exposes {label}/{cred}: {source!r}"
     return None
 
@@ -242,22 +283,57 @@ def _field(doc: dict, *names):
 
 def _all_mounts(doc: dict) -> list:
     out = []
-    for mount_key in ("mounts", "volumes", "bind_mounts", "binds"):
-        for scope in (doc, _isolation(doc)):
-            mounts = scope.get(mount_key)
-            if isinstance(mounts, list):
-                out.extend(mounts)
+    for scope in _dicts(doc):
+        for key, value in scope.items():
+            if _norm(key) in ("mounts", "volumes", "bindmounts", "binds") and isinstance(value, list):
+                out.extend(value)
     return out
+
+
+def _is_truthy_flag(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() not in ("", "false", "0", "no", "none")
+    return bool(value)
+
+
+def _is_nonempty_collection_or_str(value) -> bool:
+    if value is None or value is False:
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() not in ("", "none", "false", "0")
+    if isinstance(value, (list, tuple, dict, set)):
+        return len(value) > 0
+    return bool(value)
+
+
+_DISABLING_SECURITY_OPTS = frozenset({
+    "seccomp=unconfined", "seccomp:unconfined",
+    "apparmor=unconfined", "apparmor:unconfined",
+    "label=disable", "label:disable",
+    "systempaths=unconfined", "systempaths:unconfined",
+    "no-new-privileges=false", "no-new-privileges:false",
+    "no-new-privileges=0", "no-new-privileges:0",
+})
 
 
 def _backend_findings(backend: str, doc: dict) -> list[str]:
     """The flags a backend must carry to be a disposable sandbox rather than a host shell."""
     issues = []
-    if _field(doc, "privileged") is True:
-        issues.append("privileged=true (a privileged container is the host)")
-    network = str(_field(doc, "network", "networkMode", "network_mode", "networkScope") or "").lower()
-    if network == "host":
-        issues.append("network=host shares the host network namespace")
+    # Scan every nested dict in doc so an `isolation` dict can never shadow a top-level or
+    # nested `privileged` or host/container `network*` setting (#777).
+    for d in _dicts(doc):
+        for key, value in d.items():
+            nk = _norm(key)
+            if nk == "privileged" and _is_truthy_flag(value):
+                issues.append("privileged=true (a privileged container is the host)")
+            elif nk in ("network", "networkmode", "networkscope"):
+                net = str(value or "").strip().lower()
+                if net == "host" or net.startswith("container:"):
+                    issues.append(f"network={net!r} shares the host or another container network namespace")
     if backend in DOCKER_FAMILY:
         cap_drop = _field(doc, "capDrop", "cap_drop", "capabilitiesDrop")
         caps = [str(c).upper() for c in cap_drop] if isinstance(cap_drop, list) else (
@@ -269,20 +345,38 @@ def _backend_findings(backend: str, doc: dict) -> list[str]:
         pids = _field(doc, "pidsLimit", "pids_limit")
         if isinstance(pids, bool) or not isinstance(pids, int) or pids <= 0:
             issues.append(f"{backend}: a positive pidsLimit is required (--pids-limit)")
+        for d in _dicts(doc):
+            for key, value in d.items():
+                nk = _norm(key)
+                if nk in ("capadd", "capabilitiesadd") and _is_nonempty_collection_or_str(value):
+                    issues.append(f"{backend}: {key} must be empty (adding capabilities breaks --cap-drop ALL)")
+                elif nk in ("pidmode", "ipcmode", "utsmode"):
+                    mode = str(value or "").strip().lower()
+                    if mode == "host" or mode.startswith("container:"):
+                        issues.append(f"{backend}: {key}={mode!r} shares the host or another container namespace")
+                elif nk == "devices" and _is_nonempty_collection_or_str(value):
+                    issues.append(f"{backend}: devices must be empty (host device passthrough)")
+                elif nk in ("securityopt", "securityopts"):
+                    opts = value if isinstance(value, (list, tuple)) else ([value] if value is not None else [])
+                    for opt in opts:
+                        folded = re.sub(r"\s+", "", str(opt).strip().lower())
+                        if folded in _DISABLING_SECURITY_OPTS:
+                            issues.append(f"{backend}: disabling securityOpt {opt!r} is forbidden")
     elif backend == "bwrap":
-        scope = str(_field(doc, "networkScope", "network_scope") or "").lower()
-        if not scope or scope == "host":
+        scope = str(_field(doc, "networkScope", "network_scope") or "").strip().lower()
+        if not scope or scope == "host" or scope.startswith("container:"):
             issues.append("bwrap: networkScope must be set and must not be host (--unshare-net)")
-        if str(_field(doc, "filesystemScope", "filesystem_scope") or "").lower() != "workspace":
+        if str(_field(doc, "filesystemScope", "filesystem_scope") or "").strip().lower() != "workspace":
             issues.append("bwrap: filesystemScope=workspace required (read-only root, tmpfs home)")
     elif backend == "gondolin":
         mounts = _all_mounts(doc)
         if not mounts:
             issues.append("gondolin: the unit worktree must be the one mount, at /workspace")
         for m in mounts:
-            target = _mount_target(m).rstrip("/") or "/"
+            raw_target = _mount_target(m).strip()
+            target = posixpath.normpath(raw_target) if raw_target else ""
             if target != "/workspace" and not target.startswith("/workspace/"):
-                issues.append(f"gondolin: mounts only /workspace, found {target!r}")
+                issues.append(f"gondolin: mounts only /workspace, found {raw_target!r}")
     return issues
 
 

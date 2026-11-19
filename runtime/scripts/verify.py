@@ -775,7 +775,7 @@ class _Authority:
     # GIT_DIR/GIT_ALTERNATE_*): none passes. LC_* passes as a prefix. No identity variable is
     # needed: revert --no-commit, apply --index, worktree add/remove, diff, rev-list and
     # merge-base commit nothing; an identity, if a leg ever needs one, is HOME's gitconfig.
-    AMBIENT_KEEP = ("PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG")
+    AMBIENT_KEEP = ("PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "NO_COLOR")
     AMBIENT_KEEP_PREFIX = ("LC_",)
     # h409 N-2: named in the fetch-failure fatal so a proxied or XDG-configured host reads the
     # cause as the scrub, not as a network fault.
@@ -995,6 +995,28 @@ class _Authority:
             return True
         return os.access(node, os.W_OK)
 
+    @staticmethod
+    def _fs_git_toplevel(start):
+        """Walk ancestors of `start` for `.git` without spawning git (#768): classify() must
+        never execute an unclassified `cls.git` binary to discover repository roots."""
+        if not start:
+            return None
+        try:
+            cur = Path(start).resolve()
+        except OSError:
+            return None
+        anchor = Path(cur.anchor)
+        while cur != anchor:
+            try:
+                if os.path.lexists(cur / ".git"):
+                    return str(cur)
+            except OSError:
+                return None
+            if cur.parent == cur:
+                return None
+            cur = cur.parent
+        return None
+
     @classmethod
     def classify(cls, path):
         """"worker-writable" when the binary, ANY directory on the way to it, or ANY symlink hop
@@ -1004,13 +1026,27 @@ class _Authority:
         system bin dir names, two of which are user-writable on every Homebrew host (h409 R1).
         Round 3 probed only the RESOLVED parent by W_OK, so a worker-planted symlink in a
         writable dir pointing at /bin/sh (C-1) and a worker-OWNED 0555 dir (C-2) both classed
-        system. A genuinely root-owned /usr/bin still classes system: root owns every hop."""
+        system. A genuinely root-owned /usr/bin still classes system: root owns every hop.
+        Checks ownership/mode and non-git roots (plus a pure filesystem `.git` ancestor walk)
+        without ever spawning `cls.git` (#768)."""
         try:
             nodes = list(cls._nodes(os.path.abspath(path)))
             p = Path(path).resolve(strict=True)
         except (OSError, RuntimeError):
             return "worker-writable"
-        for root in (tempfile.gettempdir(), os.getcwd(), _toplevel(), _evidence_toplevel()):
+        if any(cls._worker_controls(n, st) for n, st in nodes):
+            return "worker-writable"
+        cwd = os.getcwd()
+        roots = (
+            tempfile.gettempdir(),
+            cwd,
+            _ROOTS["git"],
+            _ROOTS["evidence"],
+            cls._fs_git_toplevel(cwd),
+            cls._fs_git_toplevel(_ROOTS["git"]),
+            cls._fs_git_toplevel(_ROOTS["evidence"]),
+        )
+        for root in roots:
             if root:
                 try:
                     r = Path(root).resolve()
@@ -1020,8 +1056,6 @@ class _Authority:
                     continue
                 if p == r or r in p.parents or any(n == r or r in n.parents for n, _ in nodes):
                     return "worker-writable"
-        if any(cls._worker_controls(n, st) for n, st in nodes):
-            return "worker-writable"
         return "system"
 
     @classmethod
@@ -1042,12 +1076,14 @@ class _Authority:
     def nc_env(cls):
         """The scrubbed environment the EXECUTED CONTROL runs under (h409 F-6): the ambient
         floor only — no GH_*/GITHUB_*, no ORCA_*, no GIT_*, nothing else the verifier holds.
-        Relative and empty PATH entries are dropped so worktree/cwd binaries cannot shadow PATH."""
+        Relative and empty PATH entries are dropped so worktree/cwd binaries cannot shadow PATH.
+        NO_COLOR=1 discourages ANSI color sequences in runner output (#768)."""
         env = {k: v for k, v in os.environ.items()
                if k in cls.AMBIENT_KEEP or k.startswith(cls.AMBIENT_KEEP_PREFIX)}
         if "PATH" in env:
             env["PATH"] = os.pathsep.join(
                 p for p in env["PATH"].split(os.pathsep) if p and os.path.isabs(p))
+        env["NO_COLOR"] = "1"
         return env
 
     @classmethod
@@ -2017,14 +2053,45 @@ class _Authority:
         write on the native lane and in every worktree layout docs/verify-gate.md describes. A
         hook could stage a failing test into the control commit. `core.hooksPath=/dev/null` at
         `-c` precedence points every hook lookup at a path with no hooks under it."""
-        return {**cls.nc_env(), "GIT_TERMINAL_PROMPT": "0",
-                "GIT_NO_REPLACE_OBJECTS": "1", "GIT_GRAFT_FILE": os.devnull,
-                "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
-                "GIT_CONFIG_COUNT": "4",
-                "GIT_CONFIG_KEY_0": "core.fsmonitor", "GIT_CONFIG_VALUE_0": "false",
-                "GIT_CONFIG_KEY_1": "protocol.ext.allow", "GIT_CONFIG_VALUE_1": "never",
-                "GIT_CONFIG_KEY_2": "safe.directory", "GIT_CONFIG_VALUE_2": "*",
-                "GIT_CONFIG_KEY_3": "core.hooksPath", "GIT_CONFIG_VALUE_3": os.devnull}
+        try:
+            custody_floor = cls.gitexec().CUSTODY_FLOOR
+        except (OSError, ImportError, AttributeError):
+            custody_floor = (
+                ("core.alternateRefsCommand", "exit 0"),
+                ("submodule.recurse", "false"),
+                ("fetch.recurseSubmodules", "false"),
+                ("status.submoduleSummary", "false"),
+                ("log.showSignature", "false"),
+                ("gpg.program", os.devnull),
+                ("gpg.openpgp.program", os.devnull),
+                ("gpg.x509.program", os.devnull),
+                ("gpg.ssh.program", os.devnull),
+                ("maintenance.auto", "false"),
+                ("gc.auto", "0"),
+            )
+        pairs = (
+            ("core.fsmonitor", "false"),
+            ("protocol.ext.allow", "never"),
+            ("safe.directory", "*"),
+            ("core.hooksPath", os.devnull),
+            ("diff.external", ""),
+            *custody_floor,
+        )
+        env = {
+            **cls.nc_env(),
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_GRAFT_FILE": os.devnull,
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_NO_LAZY_FETCH": "1",
+            "GIT_ALLOW_PROTOCOL": "file",
+            "GIT_ATTR_NOSYSTEM": "1",
+            "GIT_CONFIG_COUNT": str(len(pairs)),
+        }
+        for i, (k, v) in enumerate(pairs):
+            env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"] = k, v
+        return env
 
     # gitexec.driver_blanks, mirrored rather than called: gitexec.py is in the toolchain since
     # #608 (via inventory.py), but its copy runs gitexec's GIT under the caller's whole env, and
@@ -2131,6 +2198,8 @@ class _Authority:
         `info/attributes` and the content of its own `core.attributesFile` ride as data. Raises
         OSError (GitCustodyRefused for an unreadable or non-regular `info/exclude`/`shallow`/
         `info/attributes`, or a `core.attributesFile` that is not a bounded regular file)."""
+        gx = cls.gitexec()
+        gx.refuse_blocking_files(top)
         git, env = cls.git_bin(), cls.git_env()
         code, common, gerr = _run([git, "-C", top, "rev-parse", "--path-format=absolute",
                                    "--git-common-dir"], timeout=30, env=env)
@@ -2139,7 +2208,7 @@ class _Authority:
         if code != 0 or code2 != 0 or not common.strip():
             raise OSError(f"cannot locate the source repository's object store: {(gerr or gerr2).strip()}")
 
-        def run(args):  # the source's own core.attributesFile, read under git_env (data only)
+        def run(args):  # the source's own settings/core.attributesFile, read under git_env (data only)
             # Not _run_bytes: it reports a timeout as exit 1, which `config --get` means "unset", so
             # a timed-out query read as "no attributes file" (Codex on PR #724, round 6). A timeout
             # here is an OSError: the "could not create the control worktree" refusal.
@@ -2148,9 +2217,10 @@ class _Authority:
                                       stdin=subprocess.DEVNULL)
             except subprocess.TimeoutExpired as exc:
                 raise OSError(f"git {' '.join(args[:2])} timed out after {exc.timeout}s") from exc
-        attributes = cls.gitexec().custody_attributes(run, top)
-        return cls.gitexec().custody_git_dir(common.rstrip("\n"), fmt.strip(), str(head), None,
-                                             objects="shared", bare=False, attributes=attributes)
+        gx.custody_settings(run)
+        attributes = gx.custody_attributes(run, top)
+        return gx.custody_git_dir(common.rstrip("\n"), fmt.strip(), str(head), None,
+                                  objects="shared", bare=False, attributes=attributes)
 
     @classmethod
     def api(cls, repo, endpoint, *flags, timeout=20):
@@ -2657,7 +2727,8 @@ def _is_oracle_path(path, nc_command=None, head=None):
     outside this bounded grammar, as before: a conftest collection hook, a JS config file
     (jest.config.js, vitest.config.ts) and transitive imports — the coordinator chooses the
     command, and a broad one is its risk to take."""
-    if Path(path).name.lower() in {"conftest.py", "pytest.ini", "tox.ini", "setup.cfg",
+    if Path(path).name.lower() in {"conftest.py", "pytest.ini", ".pytest.ini",
+                                   "pytest.toml", ".pytest.toml", "tox.ini", "setup.cfg",
                                    "pyproject.toml", "package.json", ".coveragerc",
                                    "makefile", "gnumakefile"}:
         return True
@@ -2725,9 +2796,10 @@ def _is_oracle_path(path, nc_command=None, head=None):
                 i += 1
         return out
 
-    def toml_pytest(text):
-        """The pytest tables of a pyproject.toml: [tool.pytest.ini_options] and pytest 9's
-        [tool.pytest]. tomllib where the interpreter has it (3.11+). Without it — verify-gate.sh
+    def toml_pytest(text, dedicated=False):
+        """The pytest tables of a pyproject.toml ([tool.pytest.ini_options] and pytest 9's
+        [tool.pytest]) or a dedicated pytest.toml / .pytest.toml (top-level [pytest], #768).
+        tomllib where the interpreter has it (3.11+). Without it — verify-gate.sh
         runs whatever python3 is first on PATH, the system 3.9 on macOS — a scan of the two keys
         this reads, and a key it cannot read there is a refusal, never a silent miss."""
         try:
@@ -2735,13 +2807,20 @@ def _is_oracle_path(path, nc_command=None, head=None):
         except ImportError:
             tomllib = None
         if tomllib is not None:
-            tool = tomllib.loads(text).get("tool", {}).get("pytest", {})
-            return [tool.get("ini_options", {}), tool]
+            doc = tomllib.loads(text)
+            tool = doc.get("tool", {}).get("pytest", {})
+            sections = [tool.get("ini_options", {}), tool]
+            if dedicated:
+                sections.append(doc.get("pytest", {}))
+            return sections
+        headers = {"[tool.pytest.ini_options]", "[tool.pytest]"}
+        if dedicated:
+            headers.add("[pytest]")
         found, inside, lines, i = {}, False, text.splitlines(), 0
         while i < len(lines):
             line = lines[i].split("#", 1)[0].strip()
             if line.startswith("["):
-                inside = line.replace(" ", "") in ("[tool.pytest.ini_options]", "[tool.pytest]")
+                inside = line.replace(" ", "") in headers
             hit = re.match(r"(python_files|testpaths)\s*=\s*(.*)", line) if inside else None
             if hit:
                 value = hit.group(2)
@@ -2793,6 +2872,8 @@ def _is_oracle_path(path, nc_command=None, head=None):
                 opt.setdefault(valued[long_key], []).append(long_val)
             elif runner == "pytest" and tok[:2] in ("-c", "-o") and len(tok) > 2:
                 opt.setdefault(tok[1], []).append(tok[2:])
+            elif runner == "unittest" and tok[:2] in ("-p", "-s") and len(tok) > 2:
+                opt.setdefault(tok[1], []).append(tok[2:])
             i += 1
         configs = opt.get("c", [])
         for pair in opt.get("o", []):
@@ -2827,8 +2908,9 @@ def _is_oracle_path(path, nc_command=None, head=None):
                 if p:
                     exact.add(p)
                     parts = p.split("/")
-                    dirs.update("/".join(parts[:k]) for k in range(len(parts)))
-        names = ("pytest.ini", "pyproject.toml", "tox.ini", "setup.cfg")
+                    dirs.update("/".join(parts[:k]) for k in range(len(parts) + 1))
+        names = ("pytest.ini", ".pytest.ini", "pytest.toml", ".pytest.toml",
+                 "pyproject.toml", "tox.ini", "setup.cfg")
         wanted = {f"{d}/{n}".lstrip("/") for d in dirs for n in names} | {"package.json"}
         wanted |= set(filter(None, map(rel, configs)))
         code, listing = _git(["--literal-pathspecs", "ls-tree", "--full-tree", "-r", "-z",
@@ -2853,7 +2935,7 @@ def _is_oracle_path(path, nc_command=None, head=None):
                                 for g in words(jest.get("testMatch") or []) if not g.startswith("!")]
                     continue
                 if cfg.endswith(".toml"):
-                    sections = toml_pytest(text)
+                    sections = toml_pytest(text, dedicated=Path(cfg).name.lower() != "pyproject.toml")
                 else:
                     parser = configparser.RawConfigParser(strict=False, allow_no_value=True)
                     parser.read_string(text)
@@ -3202,6 +3284,7 @@ def _extract_diff(text):
         if (ln.startswith(("diff --git ", "index ", "--- ", "+++ ", "@@", "+", "-", " ",
                            "new file mode", "deleted file mode", "similarity index",
                            "rename from", "rename to", "old mode", "new mode"))
+                or ln == r"\ No newline at end of file"
                 or ln == ""):
             end = i
         else:
@@ -3342,15 +3425,33 @@ def execute_negative_control(m, nc_command=None):
 
     Fail-closed everywhere: an unknown tool, a missing command/paths, a git error, a worktree that
     cannot be made, or a control that applies no change at all."""
-    def _seal_control(wt, head):
-        """Commit the control applied in `wt` as a SIBLING of head_sha. Returns (mutant_sha, err).
+    def _unsigned_commit(raw):
+        """Strip gpgsig / gpgsig-sha256 headers and their space-indented continuation lines so
+        neither clean nor control phases carry a commit signature (`git verify-commit HEAD` must
+        not distinguish phases; #768)."""
+        header, sep, body = raw.partition(b"\n\n")
+        kept, skipping = [], False
+        for line in header.split(b"\n"):
+            if line.startswith((b"gpgsig ", b"gpgsig-sha256 ")):
+                skipping = True
+                continue
+            if skipping and line.startswith(b" "):
+                continue
+            skipping = False
+            kept.append(line)
+        return b"\n".join(kept) + sep + body
 
-        The mutant commit is head_sha's own commit object with only its `tree` line swapped for the
-        applied control's tree: same parents, author, committer and message. A control phase run from
-        it sees a CLEAN work tree (`git status --porcelain` empty) and the same `HEAD~1`, log and
-        identity a clean phase sees — the phase is not distinguishable by git state, only by the
-        content under test (review P1). Only the index is read, so untracked residue of the apply
-        never reaches the control run.
+    def _seal_control(wt, head):
+        """Commit the control applied in `wt` as a SIBLING of head_sha. Returns (clean_sha, mutant_sha, err).
+
+        The mutant commit is head_sha's own commit object (with any gpgsig / gpgsig-sha256 header
+        stripped) with its `tree` line swapped for the applied control's tree: same parents,
+        author, committer and message. When head_sha carries a signature header, an unsigned twin
+        is sealed for the clean phases too so `git verify-commit HEAD` sees identical unsigned
+        commits in every phase (#768). A control phase run from it sees a CLEAN work tree (`git
+        status --porcelain` empty) and the same `HEAD~1`, log and identity a clean phase sees —
+        the phase is not distinguishable by git state, only by the content under test (review P1).
+        Only the index is read, so untracked residue of the apply never reaches the control run.
 
         The stillborn check lives here and compares TREES: a control whose applied tree equals
         head_sha's tree changed NOTHING and cannot make any proof go RED (#255).
@@ -3369,35 +3470,43 @@ def execute_negative_control(m, nc_command=None):
                                    env=_Authority.blanked_env(_Authority.driver_blanks(wt)))
         tree = tree.strip()
         if code != 0 or not HEX40_RE.match(tree):
-            return None, f"cannot record the applied control's tree: {gerr.strip()}"
+            return None, None, f"cannot record the applied control's tree: {gerr.strip()}"
         head_tree = _tree(head)
         if tree == head_tree:
-            return None, ("the negative control changed NOTHING at head_sha — a no-op mutant cannot "
-                          "make any proof go RED (#255)")
+            return None, None, ("the negative control changed NOTHING at head_sha — a no-op mutant cannot "
+                                "make any proof go RED (#255)")
         code, sealed, gerr = _run_at(wt, [git, "diff-tree", "-r", "-z", "--name-only", "--no-renames",
                                           str(head_tree), tree], env=env)
         if code != 0:
-            return None, f"cannot list what the sealed control changes: {gerr.strip()}"
+            return None, None, f"cannot list what the sealed control changes: {gerr.strip()}"
         bind_err = _bind_paths_to_change([p for p in sealed.split("\0") if p], m,
                                          "the sealed control", nc_command)
         if bind_err:
-            return None, bind_err
+            return None, None, bind_err
         code, raw, gerr = _git_bytes(["cat-file", "commit", str(head)])
         if code != 0 or not raw.startswith(b"tree ") or b"\n" not in raw:
-            return None, f"cannot read head_sha's commit object to seal the control: {gerr.strip()}"
-        sibling = b"tree " + tree.encode("ascii") + raw[raw.index(b"\n"):]
+            return None, None, f"cannot read head_sha's commit object to seal the control: {gerr.strip()}"
+        unsigned_raw = _unsigned_commit(raw)
+        clean = head
+        if unsigned_raw != raw:
+            code, clean, gerr = _run_at(wt, [git, "hash-object", "-t", "commit", "-w", "--stdin"],
+                                        stdin_bytes=unsigned_raw, env=env)
+            clean = clean.strip()
+            if code != 0 or not HEX40_RE.match(clean):
+                return None, None, f"cannot seal unsigned clean commit: {gerr.strip()}"
+        sibling = b"tree " + tree.encode("ascii") + unsigned_raw[unsigned_raw.index(b"\n"):]
         code, mutant, gerr = _run_at(wt, [git, "hash-object", "-t", "commit", "-w", "--stdin"],
                                      stdin_bytes=sibling, env=env)
         mutant = mutant.strip()
         if code != 0 or not HEX40_RE.match(mutant):
-            return None, f"cannot commit the applied control as a throwaway commit: {gerr.strip()}"
-        return mutant, None
+            return None, None, f"cannot commit the applied control as a throwaway commit: {gerr.strip()}"
+        return clean, mutant, None
 
     def _prepare_control(top, head, m, nc, tool, nc_command):
         """Apply the control in a scratch worktree and seal it (_seal_control) BEFORE any worker code
-        runs. Returns (mutant_sha, err). The scratch worktree is removed before the first phase
-        executes, so no run can reach it, and the sealed commit is content-addressed, so no run can
-        alter what the control phase checks out."""
+        runs. Returns (clean_sha, mutant_sha, err). The scratch worktree is removed before the first
+        phase executes, so no run can reach it, and the sealed commits are content-addressed, so no
+        run can alter what any phase checks out."""
         holder = tempfile.mkdtemp(prefix="orca-nc-")
         wt = Path(holder) / "wt"
         # #629: populating the worktree from head_sha, restoring base paths, reverting and applying
@@ -3417,16 +3526,16 @@ def execute_negative_control(m, nc_command=None):
                 wt.mkdir()
                 (wt / ".git").write_bytes(b"gitdir: " + os.fsencode(gd) + b"\n")
             except OSError as err:
-                return None, f"could not create the control worktree at head_sha: {err}"
+                return None, None, f"could not create the control worktree at head_sha: {err}"
             wt = str(wt)
             code, _, gerr = _run_at(wt, [_Authority.git_bin(), "checkout", "-q", "--detach",
                                          str(head)], timeout=120,
                                     env=_Authority.blanked_env(_Authority.driver_blanks(wt)))
             if code != 0:
-                return None, f"could not populate the control worktree at head_sha: {gerr.strip()}"
+                return None, None, f"could not populate the control worktree at head_sha: {gerr.strip()}"
             apply_err = _apply_control(wt, m, nc, tool, nc_command)
             if apply_err:
-                return None, apply_err
+                return None, None, apply_err
             return _seal_control(wt, head)
         finally:
             if custody is not None:
@@ -3456,7 +3565,7 @@ def execute_negative_control(m, nc_command=None):
         header, sep, body = raw.partition(b"\n\n")
         kept, skipping = [], False
         for line in header.split(b"\n"):
-            if line.startswith(b"gpgsig "):
+            if line.startswith((b"gpgsig ", b"gpgsig-sha256 ")):
                 skipping = True
                 continue
             if skipping and line.startswith(b" "):
@@ -3708,7 +3817,7 @@ def execute_negative_control(m, nc_command=None):
             return False, [f"--execute-nc: proof input {st_op!r} is not a tracked "
                            "regular file in head_sha; fail-closed (#750 C19)"]
     try:
-        mutant, err = _prepare_control(top, head, m, nc, tool, nc_command)
+        clean, mutant, err = _prepare_control(top, head, m, nc, tool, nc_command)
     except _Authority.DriverQueryFailed as fail:
         # Every driver-reading leg (populate, checkout, revert, apply, seal) runs inside
         # _prepare_control; an unreadable driver list stops the control there (PR #649 review).
@@ -3717,7 +3826,7 @@ def execute_negative_control(m, nc_command=None):
     if err:
         return False, [f"--execute-nc: {err}"]
     msgs = []
-    for phase, commit in (("clean", head), ("control", mutant), ("clean", head)):
+    for phase, commit in (("clean", clean), ("control", mutant), ("clean", clean)):
         rc, out, errout = _phase_run(
             top, head, commit, phase, argv, pinned_exec, extra_staged_ops, absent_mod_paths
         )
@@ -3798,13 +3907,25 @@ def check_negative_control(m, is_mutation, execute=False, nc_command=None):
         errs.append("negative_control.artifact reports the pinned mutant SURVIVED / was not killed")
     if mutant and mutant not in content:
         errs.append("negative_control.artifact does not reference the pinned mutant")
+    pinned = all(HEX40_RE.match(str(m.get(k) or "")) for k in ("base_sha", "head_sha"))
     if tool == "hand":
         # `hand` is exempt from a pinned mutant id, so the diff it applied is the ONLY thing binding
-        # the RED to a mutation — the artifact must quote it (evidence-manifest §1).
-        has_diff = re.search(r"(?m)^(diff --git|@@ )", content) or (
-            re.search(r"(?m)^-[^-]", content) and re.search(r"(?m)^\+[^+]", content))
-        if not has_diff:
-            errs.append("negative_control.artifact for tool 'hand' must quote the hand-written diff")
+        # the RED to a mutation — the artifact must quote a unified diff with file headers and
+        # parseable target paths (evidence-manifest §1; #768): a headerless diff cannot bypass
+        # `_bind_paths_to_change` / `_bind_hunks_to_change`.
+        quoted_hand = _extract_diff(content)
+        hand_targets, hand_parse_err = set(), None
+        if quoted_hand:
+            try:
+                hand_targets.update(_iter_diff_target_paths(quoted_hand))
+            except ValueError as exc:
+                hand_parse_err = str(exc)
+        if not quoted_hand or (not hand_targets and not hand_parse_err):
+            errs.append("negative_control.artifact for tool 'hand' must quote the hand-written diff "
+                        "with unified file headers and parseable target paths")
+        elif hand_parse_err and not pinned:
+            errs.append(f"negative_control.artifact for tool 'hand' quotes an unparseable "
+                        f"hand-written diff: {hand_parse_err}")
     # Binding the control's paths to the change is a STATIC check — the declared paths against
     # base_sha..head_sha — so it belongs here, on every mutation unit, not only on the executed
     # leg. It lived solely in _apply_control, which meant a NARRATED manifest could nominate a
@@ -3821,7 +3942,7 @@ def check_negative_control(m, is_mutation, execute=False, nc_command=None):
             bind_err = _bind_paths_to_change(declared, m, "negative_control.paths", nc_command)
             if bind_err:
                 errs.append(bind_err)
-        elif all(HEX40_RE.match(str(m.get(k) or "")) for k in ("base_sha", "head_sha")):
+        elif pinned:
             _prod, oracle, bind_err = _changed_paths(m["base_sha"], m["head_sha"], nc_command)
             if bind_err:
                 errs.append(bind_err)
@@ -3839,7 +3960,6 @@ def check_negative_control(m, is_mutation, execute=False, nc_command=None):
         # Only when the manifest actually pins its SHAs. A mutation manifest that does not is
         # already refused by check_real_commits, which owns that fact; repeating the refusal here
         # would couple a structural check to git state and say the same thing twice.
-        pinned = all(HEX40_RE.match(str(m.get(k) or "")) for k in ("base_sha", "head_sha"))
         if quoted and pinned:
             targets, parse_err = set(), None
             try:
@@ -3899,8 +4019,12 @@ def check_commands(m, is_mutation, nc_command=None):
     for rec in records:
         line = rec.get("cmd")
         digest = rec.get("cmd_sha256")
-        if not (isinstance(line, str) and isinstance(digest, str)):
-            continue
+        if not (isinstance(line, str) and line):
+            return ["commands ledger: a commands[] record omits a valid command string (`cmd`) "
+                    "— the record describes nothing, so it binds nothing; fail-closed (#768)"]
+        if not isinstance(digest, str):
+            return [f"commands ledger: record for {line!r} omits a valid cmd_sha256 string "
+                    "— a record without its command digest binds nothing; fail-closed (#768)"]
         actual = hashlib.sha256(line.encode("utf-8")).hexdigest()
         if digest != actual:
             return [f"commands ledger: record for {line!r} carries cmd_sha256 {digest} but the "
@@ -4915,7 +5039,21 @@ def main(argv=None):
                          "worker: a worker holding the seed would just self-sign")
     args = ap.parse_args(argv)
 
-    if shutil.which("git") is None:  # the pin proper is _Authority.resolve() below (h409 R2)
+    def _safe_dir(value):
+        if not value:
+            return None
+        try:
+            p = Path(value)
+            return str(p.resolve()) if p.is_dir() else None
+        except OSError:
+            return None
+
+    # #768: pin and custody-classify git BEFORE any preflight helper (_Transcript.seed, _root_arg,
+    # key_source) can execute it, and abort immediately on a sound lane when git is not system.
+    _Authority.reset()
+    _ROOTS.update(git=_safe_dir(args.git_dir), evidence=_safe_dir(args.evidence_root))
+    _Authority.pin_git()
+    if _Authority.git is None:
         print("dependency: git not on PATH", file=sys.stderr)
         return 1
     seed = None
@@ -4932,6 +5070,23 @@ def main(argv=None):
                   "dispatch-sign.py sign-transcript; or a second verify.py invocation without "
                   "--execute-nc", file=sys.stderr)
             return 1
+    early_lane = None
+    if args.provenance in _Authority.SOUND_PROVENANCE:
+        early_lane = f"provenance={args.provenance}"
+    elif args.dispatch_record and args.dispatch_pubkey:
+        _, sep, ref = args.dispatch_pubkey.partition("@")
+        if sep and ref and (ref.startswith("refs/remotes/")
+                            or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", ref.lower())):
+            early_lane = "enforcement (signed dispatch record + pubkey)"
+    if early_lane and _Authority.git_custody != "system":
+        _Authority.lane = early_lane
+        msg = (f"authority: git at {_Authority.git} is {_Authority.git_custody} — a lane claiming "
+               f"soundness ({early_lane}) cannot take its commit, tree and ancestry facts from a "
+               "binary the graded worker could have replaced; fail-closed (h409 R2)")
+        print(f"FAIL: {msg}", file=sys.stderr)
+        print("verify: 1 invariant(s) failed — unit is NOT done", file=sys.stderr)
+        return 2
+    if args.transcript_key is not None:
         seed, err = _Transcript.seed(args.transcript_key)
         if err:
             print(f"usage: {err}", file=sys.stderr)

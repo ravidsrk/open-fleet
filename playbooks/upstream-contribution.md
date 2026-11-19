@@ -18,7 +18,7 @@ build-change and acceptance-review are unchanged.
 ## Overlap discovery (the enumeration step clean-sweep lacks)
 
 REDUNDANCY for `source=tracker` on an upstream repo is TWO queries, not one. Codebase search AND
-`gh pr list --repo <upstream> --search "<issue#> in:body OR <issue#> in:title" --state open` PER ISSUE,
+`runtime/scripts/guard_text.py --source pr --fetch gh pr list --repo <upstream> --search "<issue#> in:body OR <issue#> in:title" --state open` PER ISSUE,
 before FREEZE. Re-run the PR query before opening each unit's PR — a competitor PR can appear mid-run.
 An issue with an in-flight PR is `already-has-PR` class, never `skip`.
 

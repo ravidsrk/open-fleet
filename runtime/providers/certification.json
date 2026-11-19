@@ -1,8 +1,8 @@
 {
   "_about": "Versioned certification record for every advertised Runtime Provider Interface route (#596). Provider cells are capabilities.json's supported_profiles x supported_harnesses per provider; harness cells are base.py's launch table x {ro, rw}. Each route group names its tier, evidence paths, explicit limitations and, for a refusal, the typed refusal. An upstream version or commit that was never recorded stays null (rendered `unknown`) and is never guessed. A provider bound to a pin (`upstream.pin`) goes STALE — every one of its cells reads `stale`, never its recorded tier — as soon as the pin's commit, version or live_receipts.version differs from `certified_against`; recheck the cells, bump record_version, re-record. runtime/scripts/certification.py validates and renders this file; docs/certification.md explains it and carries the first-run guide.",
   "schema_version": "open-fleet-certification/v1",
-  "record_version": 6,
-  "recorded": "2026-10-26",
+  "record_version": 7,
+  "recorded": "2026-11-19",
   "tiers": {
     "live-witnessed": "A real upstream build and a real harness ran this route end to end; the evidence is a docs/runs/ report whose RUN: header binds (verifier=GREEN, cited as a mission's proof_evidence) and whose own inventoried artifacts name this exact route, quoted in witnessed.route. Exact upstream and harness versions are recorded.",
     "fixture-tested": "The fleet's own code for this route runs in CI against an in-repo fixture — a scripted upstream transport or the first_run.py inert worker. Proves the fleet's side of the route; proves nothing about the upstream build or the harness.",
@@ -56,37 +56,14 @@
         {
           "profiles": ["rw"],
           "harnesses": ["claude"],
-          "tier": "live-witnessed",
-          "witnessed": {
-            "upstream_version": "orca-ide 1.4.224",
-            "harness_version": "Claude Code 2.1.296",
-            "host": "Ubuntu 24.04.5 LTS arm64 (OrbStack VM)",
-            "date": "2026-10-13",
-            "route": [
-              {
-                "path": "docs/runs/2026-10-13-ship-it-mdtoc/stage-build.py",
-                "lines": [
-                  "env = dict(os.environ, SP=\"/home/ravindra/ship527-scratch\", PROFILE=\"rw\",",
-                  "ORCA_COORD_ALLOW_AUTONOMOUS_WRITE=\"1\", ORCA_COORD_ALLOW_CMD_OVERRIDE=\"1\",",
-                  "WORKER_CMD=\"claude --dangerously-skip-permissions\","
-                ]
-              },
-              {
-                "path": "docs/runs/2026-10-13-ship-it-mdtoc/ledger.md",
-                "lines": [
-                  "Substrate: Linux witness VM (Ubuntu 24.04.5 arm64, orca-ide 1.4.224 serve,",
-                  "Claude Code 2.1.296 workers). Lane: offline (no gh in VM) — local merges to"
-                ]
-              }
-            ]
-          },
+          "tier": "source-only",
           "evidence": [
             "docs/runs/2026-10-13-ship-it-mdtoc.md",
             "tests/test_spawn_worker.py::test_a_launch_that_lacks_the_profiles_flag_is_refused"
           ],
           "limitations": [
             "Witnessed only on the override lane (WORKER_CMD='claude --dangerously-skip-permissions' with ORCA_COORD_ALLOW_CMD_OVERRIDE=1): the supervised worker-start lane read LAUNCHED_UNUSABLE on the witness host because its agentDefaultArgs lacked the bypass flag.",
-            "Witnessed on Linux only, at Orca 1.4.224. The v1.4.239 pin's live receipts are 1.4.239's own and include no rw run; this route was re-checked by source delta (the worker-start launch receipt and the wrapper's exit 5 are unchanged).",
+            "The 2026-10-13 Linux run witnessed Orca 1.4.224 with Claude Code 2.1.296, not pinned v1.4.239. Source-delta review cannot carry a live witness across pins; this route stays source-only until a matching v1.4.239 run.",
             "From v1.4.239 a host's stored permission choice (own, ask, accept-edits, auto or full-access) sets the launch flag; anything but full-access launches claude without the rw flag, and the wrapper refuses that start as LAUNCHED_UNUSABLE (exit 5), pinned by tests/test_spawn_worker.py. No live start under a stored choice was witnessed."
           ]
         },

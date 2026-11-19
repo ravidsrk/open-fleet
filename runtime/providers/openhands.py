@@ -50,7 +50,7 @@ from .base import (
 from .local_state import LocalStateStore
 from ._external import release_claim_on_failure
 from ._external import insert_dispatch, load_dispatch, local_worker_list, record_fence, resolve_worker_list_run, show_from_row
-from ._external import credentialed_request, origin
+from ._external import credentialed_request, origin, quote_url_segment
 
 RO_ALLOWED_TOOLS = ["glob", "grep", "planning_file_editor"]
 RO_DISABLED_TOOLS = ["terminal", "file_editor", "apply_patch", "task_tracker", "browser_tool_set"]
@@ -409,7 +409,8 @@ class OpenHandsProvider(RuntimeProvider):
             # A server-cut worktree: $OPENHANDS_PROJECT_DIR is known only now. The conversation was
             # created with run=False, so no agent has started; verify before /run starts it (W4-06).
             verify_conversation_guard(hook_config, profile, actual_dir, conversation_id=conv_id)
-        run_resp = self._request("POST", f"/api/conversations/{urllib.parse.quote(conv_id)}/run")
+        q_conv = quote_url_segment(conv_id, provider=self.name, label="conversation_id")
+        run_resp = self._request("POST", f"/api/conversations/{q_conv}/run")
         real_worktree = str(actual_dir or working_dir)
 
         handle = f"openhands:{conv_id}"
@@ -469,7 +470,8 @@ class OpenHandsProvider(RuntimeProvider):
 
     def worker_show(self, *, dispatch_id: str = "", **kwargs: Any) -> dict[str, Any]:
         row = load_dispatch(self.state, dispatch_id, self.name)
-        raw = self._request("GET", f"/api/conversations/{urllib.parse.quote(dispatch_id)}")
+        q_id = quote_url_segment(dispatch_id, provider=self.name, label="dispatch_id")
+        raw = self._request("GET", f"/api/conversations/{q_id}")
         require_id(raw, "id", provider=self.name, what="conversation id")
         stage = str(raw.get("execution_status") or "unknown")
         ws = raw.get("workspace") if isinstance(raw.get("workspace"), dict) else {}
@@ -485,11 +487,12 @@ class OpenHandsProvider(RuntimeProvider):
         **kwargs: Any,
     ) -> dict[str, Any]:
         load_dispatch(self.state, dispatch_id, self.name)
+        q_id = quote_url_segment(dispatch_id, provider=self.name, label="dispatch_id")
         lim = max(1, min(int(limit), 100))
         query = {"limit": str(lim), "sort_order": "TIMESTAMP"}
         if cursor:
             query["page_id"] = str(cursor)
-        path = f"/api/conversations/{urllib.parse.quote(dispatch_id)}/events/search?{urllib.parse.urlencode(query)}"
+        path = f"/api/conversations/{q_id}/events/search?{urllib.parse.urlencode(query)}"
         raw = self._request("GET", path)
         items = raw.get("items")
         if not isinstance(items, list):
@@ -517,7 +520,8 @@ class OpenHandsProvider(RuntimeProvider):
         else:
             # Interrupt cancels the in-flight call and pauses; the conversation and its workspace
             # are kept (DELETE would be the destructive step, and it is never issued here).
-            out["upstream"] = self._request("POST", f"/api/conversations/{urllib.parse.quote(dispatch_id)}/interrupt")
+            q_id = quote_url_segment(dispatch_id, provider=self.name, label="dispatch_id")
+            out["upstream"] = self._request("POST", f"/api/conversations/{q_id}/interrupt")
         new_state, term_state = record_fence(self.state, dispatch_id, verb)
         out.update({"state": new_state, "terminalState": term_state})
         return out

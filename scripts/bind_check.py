@@ -48,6 +48,12 @@ _ps_spec = importlib.util.spec_from_file_location(
 proof_status = importlib.util.module_from_spec(_ps_spec)
 _ps_spec.loader.exec_module(proof_status)
 
+_gx_spec = importlib.util.spec_from_file_location(
+    "gitexec", ROOT / "runtime" / "scripts" / "gitexec.py"
+)
+gitexec = importlib.util.module_from_spec(_gx_spec)
+_gx_spec.loader.exec_module(gitexec)
+
 # The exact frontmatter spelling a RUN: header must use. A run-together
 # `tier=selfrun` would route fine here and then fail the promotion gate,
 # where validate.py compares it against `proof: self-run` — so the bot
@@ -80,31 +86,82 @@ def changed_entries(root, base):
     `base` is the merge-base ref (CI passes origin/<base_ref>); the diff is
     merge-base..HEAD, i.e. exactly what the PR adds. Raises ValueError when
     the base does not resolve, or is option-shaped: `merge-base HEAD --fork-point`
-    answered HEAD itself and made the PR range empty (W2-04).
+    answered HEAD itself and made the PR range empty (W2-04). Runs git through
+    gitexec's custody floor (#766) and parses `-z --no-ext-diff` NUL-delimited
+    output so non-ASCII filenames are never C-quoted and skipped (#784).
     """
     if not base or base.startswith("-"):
         raise ValueError(f"base ref {base!r} must name a git ref, not an option")
-    mb = subprocess.run(
-        ["git", "merge-base", "HEAD", "--", base],
-        cwd=str(root), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-    )
+    env = gitexec.custody_env()
+    try:
+        mb = subprocess.run(
+            gitexec.argv("merge-base", "HEAD", "--", base),
+            cwd=str(root), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            env=env, stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError) as err:
+        raise ValueError(f"git merge-base failed for {base!r}: {err}") from err
     if mb.returncode != 0 or not mb.stdout.strip():
         raise ValueError(f"base ref {base!r} does not resolve to a merge-base with HEAD")
-    proc = subprocess.run(
-        ["git", "diff", "--name-status", "--diff-filter=AMR",
-         mb.stdout.strip(), "HEAD", "--", "docs/runs", "docs/reports"],
-        cwd=str(root), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-    )
+    try:
+        proc = subprocess.run(
+            gitexec.argv("diff", "--name-status", "-z", "--no-ext-diff", "--diff-filter=AMR",
+                         mb.stdout.strip(), "HEAD", "--", "docs/runs", "docs/reports"),
+            cwd=str(root), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            env=env, stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError) as err:
+        raise ValueError(f"git diff of the PR range failed: {err}") from err
     if proc.returncode != 0:
         raise ValueError("git diff of the PR range failed")
+    tokens = proc.stdout.decode("utf-8", "surrogateescape").split("\0")
     entries = []
-    for line in proc.stdout.splitlines():
-        parts = line.split("\t")
-        if parts[0].startswith("R"):
-            entries.append(("A", parts[-1]))  # a rename is new content at its new path
-        elif len(parts) == 2:
-            entries.append((parts[0], parts[1]))
+    i = 0
+    while i < len(tokens):
+        status = tokens[i]
+        if not status:
+            i += 1
+            continue
+        if status.startswith(("R", "C")):
+            if i + 2 >= len(tokens):
+                raise ValueError("git diff printed a truncated rename/copy record")
+            entries.append(("A", tokens[i + 2]))  # a rename is new content at its new path
+            i += 3
+        else:
+            if i + 1 >= len(tokens):
+                raise ValueError("git diff printed a truncated name-status record")
+            entries.append((status, tokens[i + 1]))
+            i += 2
     return entries
+
+
+def _report_base(root, base):
+    """Map `--base` for `run_report.check_report(..., base=...)` (#784).
+
+    CI passes short remote-tracking names like `origin/main`; `run_report.trusted_base` requires
+    a full `refs/remotes/…` ref or commit id on sound lanes, so expand `<remote>/<branch>` to
+    `refs/remotes/<base>` when that exact remote-tracking ref exists in `root`.
+    """
+    if not base or gitexec.COMMIT_ID.fullmatch(base.lower()) or base.startswith("refs/"):
+        return base
+    if "/" in base:
+        candidate = gitexec.REMOTE_TRACKING + base
+        env = gitexec.custody_env()
+
+        def run(*args):
+            proc = subprocess.run(
+                gitexec.argv(*args), cwd=str(root), stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, env=env, stdin=subprocess.DEVNULL,
+            )
+            return proc.returncode, proc.stdout.decode("utf-8", "surrogateescape")
+
+        try:
+            commit, _target, _why = gitexec.remote_tracking_commit(run, candidate)
+        except (OSError, subprocess.SubprocessError):
+            commit = None
+        if commit is not None:
+            return candidate
+    return base
 
 
 def is_core_path(path_text):
@@ -206,7 +263,7 @@ def submission_shape(path_text, missions):
     return None
 
 
-def fail_shaped(root, path_text, shape):
+def fail_shaped(root, path_text, shape, base=None):
     """Route a malformed submission-shaped report to the binder and fail.
 
     The claim is the path's own (mission, tier): a missing RUN: header
@@ -215,7 +272,7 @@ def fail_shaped(root, path_text, shape):
     mismatch is structural, so the binder cannot come back clean).
     """
     mission, tier = shape
-    errors = run_report.check_report(path_text, mission, tier, root=root)
+    errors = run_report.check_report(path_text, mission, tier, root=root, base=base)
     print(f"FAIL {mission} ({tier}) — {path_text}")
     for error in errors:
         print(f"   - {error}")
@@ -268,6 +325,7 @@ def main(argv=None):
         return 2
 
     missions = known_missions(root)
+    report_base = _report_base(root, args.base)
     failures = 0
     candidates = []  # (path, mission, tier) routed to the binder
     cores = []  # (mission, tier_norm, path) for envelope cross-checks
@@ -300,7 +358,7 @@ def main(argv=None):
             shape = submission_shape(path_text, missions)
             if shape is None:
                 continue
-            failures += fail_shaped(root, path_text, shape)
+            failures += fail_shaped(root, path_text, shape, base=report_base)
             continue
         mission, tier = fields["mission"], fields["tier"]
         if mission not in missions:
@@ -308,7 +366,7 @@ def main(argv=None):
             if shape is None:
                 print(f"skip {path_text} — RUN: mission={mission} names no catalog mission")
                 continue
-            failures += fail_shaped(root, path_text, shape)
+            failures += fail_shaped(root, path_text, shape, base=report_base)
             continue
         if tier == "doctrine-only":
             # Recorded history, explicitly allowed: the binder's own default
@@ -347,7 +405,7 @@ def main(argv=None):
             print(f"envelope {Path(path_text).parent.as_posix()} — core {match}")
 
     for path_text, mission, tier in candidates:
-        errors = run_report.check_report(path_text, mission, tier, root=root)
+        errors = run_report.check_report(path_text, mission, tier, root=root, base=report_base)
         if errors:
             failures += 1
             print(f"FAIL {mission} ({tier}) — {path_text}")

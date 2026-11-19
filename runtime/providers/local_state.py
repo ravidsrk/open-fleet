@@ -1018,6 +1018,11 @@ class LocalStateStore:
                     "cross_run_access",
                     f"task {task_id!r} belongs to run {r_pre['run_id']!r}, not {eff_run!r}",
                 )
+        if self._own_worker_identity():
+            raise ProviderError(
+                "worker_forbidden",
+                f"launched worker cannot update task {task_id!r}; only the coordinator may",
+            )
         payload_sha = request_payload_sha256(
             {"task_id": task_id, "status": status, "result": result, "run": eff_run}
         )
@@ -1030,7 +1035,7 @@ class LocalStateStore:
             now = time.time()
             with self._connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
-                row = conn.execute("SELECT id, run_id FROM tasks WHERE id = ?", (task_id,)).fetchone()
+                row = conn.execute("SELECT id, run_id, status FROM tasks WHERE id = ?", (task_id,)).fetchone()
                 if not row:
                     conn.execute("ROLLBACK")
                     raise ProviderError("task_not_found", f"task {task_id!r} not found")
@@ -1039,6 +1044,15 @@ class LocalStateStore:
                     raise ProviderError(
                         "cross_run_access",
                         f"task {task_id!r} belongs to run {row['run_id']!r}, not {eff_run!r}",
+                    )
+                if self._gate_holds(conn, task_id) and (
+                    status in ("ready", "dispatched", "completed")
+                    or (row["status"] == "blocked" and status != "blocked")
+                ):
+                    conn.execute("ROLLBACK")
+                    raise ProviderError(
+                        "gate_held",
+                        f"task {task_id!r} is held by a pending gate; resolve the gate via gate-resolve first",
                     )
                 conn.execute(
                     "UPDATE tasks SET status = ?, result_json = COALESCE(?, result_json), updated_at = ? WHERE id = ?",
@@ -1249,7 +1263,7 @@ class LocalStateStore:
                     "consumer_fenced",
                     f"run {run_id!r} inbox is already fenced to coordinator {bound!r} (rejected {terminal!r})",
                 )
-            if run_id != "default" or (env_coord and terminal == env_coord):
+            if not bound and (run_id != "default" or (env_coord and terminal == env_coord)):
                 self._claim_coordinator(conn, run_id, terminal)
             return [terminal, COORDINATOR_ALIAS]
         # No handle at all (operator shell) or the literal alias: the coordinator mailbox. A
@@ -1653,9 +1667,9 @@ class LocalStateStore:
         try:
             extra_check = upstream_fn() if upstream_fn is not None else {}
             with self._connect() as conn:
-                conn.execute("BEGIN IMMEDIATE")
-                allowed_recipients = self._mailbox_scope(conn, run_id, terminal)
                 if ack_ids:
+                    conn.execute("BEGIN IMMEDIATE")
+                    allowed_recipients = self._mailbox_scope(conn, run_id, terminal)
                     now = time.time()
                     placeholders = ",".join("?" for _ in allowed_recipients)
                     for aid in ack_ids:
@@ -1666,11 +1680,9 @@ class LocalStateStore:
                             f"WHERE (delivery_id = ? OR message_id = ?) AND run_id = ? AND recipient IN ({placeholders})",
                             [now, aid, aid, run_id, *allowed_recipients],
                         )
-                conn.execute("COMMIT")
+                    conn.execute("COMMIT")
 
-            while True:
-                with self._connect() as conn:
-                    conn.execute("BEGIN IMMEDIATE")
+                while True:
                     allowed_recipients = self._mailbox_scope(conn, run_id, terminal)
                     placeholders = ",".join("?" for _ in allowed_recipients)
                     query = f"""
@@ -1718,15 +1730,16 @@ class LocalStateStore:
                             "timedOut": bool(wait and not items),
                             **extra_check,
                         }
-                        self._save_request_in_tx(conn, retry_request, "check", "completed", res, payload_sha)
-                        conn.execute("COMMIT")
+                        if retry_request:
+                            conn.execute("BEGIN IMMEDIATE")
+                            self._save_request_in_tx(conn, retry_request, "check", "completed", res, payload_sha)
+                            conn.execute("COMMIT")
                         return res
-                    conn.execute("COMMIT")
-                now = time.time()
-                if now - last_keepalive >= 15.0:
-                    print('{"_keepalive": true}', file=sys.stderr, flush=True)
-                    last_keepalive = now
-                time.sleep(min(0.1, max(0.01, deadline - now)))
+                    now = time.time()
+                    if now - last_keepalive >= 15.0:
+                        print('{"_keepalive": true}', file=sys.stderr, flush=True)
+                        last_keepalive = now
+                    time.sleep(min(0.1, max(0.01, deadline - now)))
         except BaseException:
             self.settle_failed_request(retry_request)
             raise
@@ -1993,6 +2006,11 @@ class LocalStateStore:
                     "cross_run_access",
                     f"task {task_id!r} belongs to run {t_pre['run_id']!r}, not {eff_run!r}",
                 )
+        if self._own_worker_identity():
+            raise ProviderError(
+                "worker_forbidden",
+                f"launched worker cannot create DAG gates on task {task_id!r}; only the coordinator may",
+            )
         payload_sha = request_payload_sha256(
             {"task_id": task_id, "question": question, "options": options, "run": eff_run, "sender": sender}
         )

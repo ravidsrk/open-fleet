@@ -1456,5 +1456,82 @@ class CiRunsMeansARunStep(unittest.TestCase):
             check = rc.check_workflows_mention(ctx_for(ROOT), "live", patterns, "landed")
             self.assertEqual(check[1], rc.PASS, check)
 
+
+class SecurityHardening788(unittest.TestCase):
+    """Regression tests for #770 + #788 hardening in release_check.py."""
+
+    def test_ctx_py_runs_python_isolated(self):
+        ctx = rc.Context(repo=ROOT)
+        seen = []
+
+        def spy(argv, timeout=rc.TIMEOUT_TOOL, memo=True):
+            seen.append(list(argv))
+            return rc.Result(0, "ok", "")
+
+        ctx.run = spy
+        res = ctx.py("scripts/validate.py", "--help")
+        self.assertTrue(res.ok)
+        self.assertEqual(seen, [[sys.executable, "-I", str(ROOT / "scripts/validate.py"), "--help"]])
+
+    def test_workflows_mention_ignores_non_yaml_files(self):
+        wf_body = ("on:\n  pull_request:\n\njobs:\n  gate:\n    steps:\n"
+                   "      - run: python3 bench/vf-bench/gate.py\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_fixture(tmp)
+            wf = root / ".github" / "workflows"
+            wf.mkdir(parents=True)
+            for decoy in ("README.md", "notes.txt", "ci.yml.bak"):
+                (wf / decoy).write_text(wf_body, encoding="utf-8")
+            check = rc.check_workflows_mention(ctx_for(root), "g", VF_BENCH, "#412")
+            self.assertEqual(check[1], rc.FAIL, check)
+            (wf / "ci.yaml").write_text(wf_body, encoding="utf-8")
+            check = rc.check_workflows_mention(ctx_for(root), "g", VF_BENCH, "#412")
+            self.assertEqual(check[1], rc.PASS, check)
+
+    def test_orca_pin_rejects_invalid_and_impossible_dates(self):
+        bad_dates = ("9999-99-99", "2026-02-30", "2026-13-01", "2026-9-20", "TBD", "", 20261026)
+        for bad in bad_dates:
+            with self.subTest(mode="live", bad=bad), tempfile.TemporaryDirectory() as tmp:
+                root = make_fixture(tmp, witness="live", witnessed="2026-09-20")
+                pins = root / "runtime" / "pins.json"
+                data = json.loads(pins.read_text(encoding="utf-8"))
+                data["orca"]["witnessed"] = bad
+                pins.write_text(json.dumps(data), encoding="utf-8")
+                self.assertEqual(rc.check_orca_pin(ctx_for(root))[1], rc.FAIL)
+            with self.subTest(mode="source-live-on", bad=bad), tempfile.TemporaryDirectory() as tmp:
+                root = make_fixture(tmp, witness="source", witnessed="2026-09-28")
+                run = "docs/runs/2026-09-20-pin-it-x.md"
+                (root / run).parent.mkdir(parents=True, exist_ok=True)
+                (root / run).write_text("# pin-it\n", encoding="utf-8")
+                pins = root / "runtime" / "pins.json"
+                data = json.loads(pins.read_text(encoding="utf-8"))
+                data["orca"]["live_receipts"] = {"version": "v1.0.0", "witnessed": bad, "run": run}
+                pins.write_text(json.dumps(data), encoding="utf-8")
+                self.assertEqual(rc.check_orca_pin(ctx_for(root))[1], rc.FAIL)
+
+    def test_orca_pin_rejects_non_report_live_receipt_paths(self):
+        bad_runs = (
+            "docs/runs/README.md",
+            "docs/runs/TEMPLATE.md",
+            "docs/runs/.ignore",
+            "docs/runs/.hidden.md",
+            "docs/runs/sub/README.md",
+            "docs/runs/index/row.json",
+        )
+        for bad_run in bad_runs:
+            with self.subTest(run=bad_run), tempfile.TemporaryDirectory() as tmp:
+                root = make_fixture(tmp, witness="source", witnessed="2026-09-28")
+                target = root / bad_run
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("not a run report\n", encoding="utf-8")
+                pins = root / "runtime" / "pins.json"
+                data = json.loads(pins.read_text(encoding="utf-8"))
+                data["orca"]["live_receipts"] = {
+                    "version": "v1.0.0", "witnessed": "2026-09-20", "run": bad_run,
+                }
+                pins.write_text(json.dumps(data), encoding="utf-8")
+                self.assertEqual(rc.check_orca_pin(ctx_for(root))[1], rc.FAIL)
+
+
 if __name__ == "__main__":
     unittest.main()

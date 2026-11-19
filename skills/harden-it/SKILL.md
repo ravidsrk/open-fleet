@@ -54,10 +54,11 @@ revocation parks), `compound-learn`; rides `sandbox-policy`, `gate-classificatio
 ## Pipeline
 
 ```
-THREAT-MODEL (STRIDE per trust boundary; Always/Ask-First/Never boundary per sandbox-policy.md
-→ one-way gates; commit artifact to ledger/repo)
-  → BOOTSTRAP integration BASE (runtime/scripts/preflight.py --mission harden-it --base <BASE> --fork-point <sha
-    recorded in the ledger header at BASE creation>; BASE ≠ default — dispatch-lifecycle.md)
+REFUSE-IF-QUARANTINED (runtime/scripts/preflight.py --mode readonly --mission harden-it)
+  → BOOTSTRAP integration BASE (runtime/scripts/preflight.py --mission harden-it --base <BASE> --fork-point <sha>;
+    BASE ≠ default — dispatch-lifecycle.md)
+  → THREAT-MODEL (STRIDE per boundary; Always/Ask-First/Never per sandbox-policy.md
+    → one-way gates; commit to ledger/BASE after BASE bootstrap)
   → AUDIT waves (risk-review security lens applied TREE-WIDE: the audit's fixed point is the whole
     codebase at the BASE head — valid because BASE was just bootstrapped; the lens's scope-gating
     is bypassed for a full audit; per axis, a PoC SCENARIO for every P0/P1 — written, NOT executed)

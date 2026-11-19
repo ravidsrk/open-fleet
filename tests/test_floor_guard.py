@@ -2006,5 +2006,70 @@ class TestTheBaseIsResolvedByExactNameW307(FloorGuardBase):
         self.assertIn("LOCAL branch", err)
 
 
+class TestSecurityHardening769(unittest.TestCase):
+    """Regression tests for #769 + #772 hardening in floor_guard.py."""
+
+    def test_coveragerc_colon_delimiters_and_section_headers(self):
+        for line in ("fail_under: 50", "omit: tests/*", "branch: false",
+                     "[report]", "[paths]", "[custom]"):
+            with self.subTest(line=line):
+                self.assertIsNotNone(floor_guard.guard_surface_hit(".coveragerc", line))
+        # Adding or removing a [run] section header in a diff must still flag via scan().
+        diff = (
+            "diff --git a/.coveragerc b/.coveragerc\n"
+            "--- a/.coveragerc\n"
+            "+++ b/.coveragerc\n"
+            "@@ -1,2 +1,3 @@\n"
+            " [report]\n"
+            "+[run]\n"
+            " fail_under = 80\n"
+        )
+        added, removed = floor_guard.parse_diff(diff)
+        findings = floor_guard.scan(added, removed, "CONSTRAINTS.md", Path("."))
+        self.assertTrue(any(f["rule"] == "guard-surface" and f["path"] == ".coveragerc"
+                            for f in findings), findings)
+
+    def test_ruff_config_shadowing_and_expanded_keys(self):
+        for path in (".ruff.toml", "sub/ruff.toml", "sub/.ruff.toml", "a/b/.ruff.toml"):
+            with self.subTest(path=path):
+                self.assertIsNotNone(floor_guard.guard_surface_hit(path, 'ignore = ["E501"]'))
+        for line in ("[tool.ruff]", "[tool.ruff.lint]", "[tool.coverage.report]",
+                     'tool.ruff.ignore = ["F401"]', "tool.coverage.report.fail_under = 50"):
+            with self.subTest(pyproject=line):
+                self.assertIsNotNone(floor_guard.guard_surface_hit("pyproject.toml", line))
+        self.assertIsNone(floor_guard.guard_surface_hit("pyproject.toml", "[project]"))
+        for cfg in ("setup.cfg", "tox.ini"):
+            for line in ("[tool.ruff]", "[tool.coverage]", "[coverage:report]", "[coverage:run]"):
+                with self.subTest(cfg=cfg, line=line):
+                    self.assertIsNotNone(floor_guard.guard_surface_hit(cfg, line))
+            self.assertIsNone(floor_guard.guard_surface_hit(cfg, "[metadata]"))
+        for line in ('include = ["only_one.py"]', 'extend = "other.toml"',
+                     'extend-include = ["x.py"]',
+                     'per-file-ignores = { "a.py" = ["E501"] }',
+                     'extend-per-file-ignores = { "a.py" = ["F401"] }',
+                     'lint.select = ["E"]', 'lint.ignore = ["F401"]'):
+            with self.subTest(ruff_key=line):
+                self.assertIsNotNone(floor_guard.guard_surface_hit("ruff.toml", line))
+
+    def test_human_grant_pubkey_is_guard_surface(self):
+        self.assertIn(".orca/human-grant-pubkey", floor_guard.GUARD_SURFACE_FILES)
+        self.assertIsNotNone(floor_guard.guard_surface_hit(".orca/human-grant-pubkey", "00" * 32))
+
+    def test_lowering_catches_comparator_flips_removals_and_retained_old_numbers(self):
+        cases = (
+            ("| cov | >= 80% |", "| cov | <= 80% |"),
+            ("| cov | > 5 |", "| cov | < 5 |"),
+            ("| cov | ≥ 90% |", "| cov | ≤ 90% |"),
+            ("| cov | >= 80% |", "| cov | 80% |"),
+            ("| cov | >= 80% |", "| cov | >= 10% (was 80%) |"),
+            ("coverage >= 80%", "coverage <= 80%"),
+            ("coverage >= 80%", "coverage 80%"),
+            ("coverage >= 80%", "coverage >= 10% (was 80%)"),
+        )
+        for before, after in cases:
+            with self.subTest(before=before, after=after):
+                self.assertIsNotNone(floor_guard.lowering(before, after))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

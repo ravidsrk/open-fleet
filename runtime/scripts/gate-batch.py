@@ -37,21 +37,40 @@ if (__name__ == "__main__" and not getattr(sys.flags, "safe_path", False) and sy
     del sys.path[0]
 
 import argparse
+import contextlib
 import datetime
+import fcntl
 import importlib.util
 import json
 import os
 import re
 import stat
 import subprocess
+import tempfile
 from pathlib import Path
 
 SCHEMA_TAG = "gate-batch/1"
 STATUSES = ("owed", "answered", "waived", "overtaken")
-# Who answered or waived, as decisions.py records a human grant: `human:<name>`. An answer with no
-# recorded human is prose anyone could have typed (2026-10-26 review); records written before the
-# field existed carry none and stay valid history.
-HUMAN_SOURCE = re.compile(r"^human:\S+$")
+# Who answered or waived, as decisions.py records a human grant: `human:<name>` where `<name>`
+# is person-shaped (HUMAN_NAME) and never a reserved agent role (RESERVED_HUMAN_NAMES) (#788).
+# Records written before the field existed carry none (`source is None`) and stay valid history.
+HUMAN_SOURCE = re.compile(r"^human:([A-Za-z][A-Za-z0-9._-]*)$")
+HUMAN_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9._-]*$")
+RESERVED_HUMAN_NAMES = frozenset({
+    "agent", "ai", "anonymous", "auto", "automatic", "bot", "coordinator",
+    "fleet", "human", "model", "nobody", "none", "orca", "system",
+    "unknown", "worker",
+})
+
+
+def _valid_human_source(source):
+    if not isinstance(source, str):
+        return False
+    match = HUMAN_SOURCE.fullmatch(source)
+    if not match:
+        return False
+    name = match.group(1)
+    return bool(HUMAN_NAME.fullmatch(name)) and name.lower() not in RESERVED_HUMAN_NAMES
 TERMINAL = ("answered", "waived", "overtaken")
 GATE_ID_RE = re.compile(r"^G[0-9]+$")
 DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
@@ -468,8 +487,11 @@ def validate_gate(gate):
                             "answer/waiver text recorded (overtaken alone may "
                             "leave it null when the question body says why)")
     source = gate.get("source")
-    if source is not None and not (isinstance(source, str) and HUMAN_SOURCE.match(source)):
-        raise GateError(f"gate {gate['id']}: source must be human:<name>, got {source!r}")
+    if source is not None and not _valid_human_source(source):
+        raise GateError(
+            f"gate {gate['id']}: source must be human:<name> naming a person "
+            f"(not an agent role), got {source!r}"
+        )
     if gate["status"] == "owed" and source is not None:
         raise GateError(f"gate {gate['id']} is owed but carries a source")
     sig = gate.get("grant_sig")
@@ -519,16 +541,40 @@ def load_batch(path):
 
 
 def _atomic_write_text(path, text):
-    """Crash-safe write: the bytes land in a tmp sibling first, and os.replace
-    commits them — an interrupt leaves the old file (or nothing), never half
-    a write."""
+    """Crash-safe write: bytes land in a unique tmp sibling via NamedTemporaryFile,
+    fsynced before os.replace commits them (#788)."""
     path = Path(path)
-    tmp = path.with_name(path.name + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as handle:
-        handle.write(text)
-        handle.flush()
-        os.fsync(handle.fileno())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=str(path.parent),
+            prefix=f"{path.name}.", suffix=".tmp", delete=False,
+        ) as handle:
+            tmp = Path(handle.name)
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        if tmp is not None:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+        raise
     os.replace(tmp, path)
+
+
+@contextlib.contextmanager
+def _batch_lock(path):
+    """Exclusive flock on a sibling lockfile around load-modify-save cycles (#788)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(path.name + ".lock")
+    with open(lock_path, "a+", encoding="utf-8") as lock_fh:
+        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
 
 
 def save_batch(path, data):
@@ -592,8 +638,11 @@ def transition(data, gid, status, text, answered=None, source=None):
         need = "the human's answer" if status == "answered" \
             else "the waiver reason"
         raise GateError(f"{status} gate {gid} needs {need} recorded")
-    if source is not None and not HUMAN_SOURCE.match(source):
-        raise GateError(f"gate {gid}: --source must be shaped human:<name>, got {source!r}")
+    if source is not None and not _valid_human_source(source):
+        raise GateError(
+            f"gate {gid}: --source must be shaped human:<name> naming a person "
+            f"(not an agent role), got {source!r}"
+        )
     if status in ("answered", "waived") and not source:
         raise GateError(f"{status} gate {gid} needs --source human:<name>: who answered is "
                         "part of the record, or the answer is prose anyone could have typed")
@@ -1007,30 +1056,32 @@ def main(argv=None):
                                    stdin_text, "--resolved") \
                 if (args.resolved is not None or args.resolved_file) else ""
             sibling = Path(path).parent / "gate-batch.md"
-            if sibling.exists() and not getattr(args, "force_init_over_md",
-                                                False):
-                raise GateError(
-                    f"{sibling} already exists (a pre-tooling view holding "
-                    "the only gate record): transcribe its gates via "
-                    "add/answer/waive/overtake after backing it up first, "
-                    "or re-run with --force-init-over-md to destroy it")
-            data = init_batch(path, run_id=run_id, run_title=args.title,
-                               intro=intro.rstrip("\n"),
-                               resolved=resolved.rstrip("\n"))
-            refresh_view(path, data)
+            with _batch_lock(path):
+                if sibling.exists() and not getattr(args, "force_init_over_md",
+                                                    False):
+                    raise GateError(
+                        f"{sibling} already exists (a pre-tooling view holding "
+                        "the only gate record): transcribe its gates via "
+                        "add/answer/waive/overtake after backing it up first, "
+                        "or re-run with --force-init-over-md to destroy it")
+                data = init_batch(path, run_id=run_id, run_title=args.title,
+                                   intro=intro.rstrip("\n"),
+                                   resolved=resolved.rstrip("\n"))
+                refresh_view(path, data)
             print(f"initialized {path}")
             return 0
-        data = load_batch(path)
         if args.command == "add":
             question = _read_prose(args.question, args.question_file,
                                    stdin_text, "--question")
-            gate = add_gate(data, title=args.title,
-                            question=question.rstrip("\n"), gid=args.id,
-                            asked=args.asked,
-                            related=_split_refs(args.related),
-                            blocking=_split_refs(args.blocking))
-            save_batch(path, data)
-            refresh_view(path, data)
+            with _batch_lock(path):
+                data = load_batch(path)
+                gate = add_gate(data, title=args.title,
+                                question=question.rstrip("\n"), gid=args.id,
+                                asked=args.asked,
+                                related=_split_refs(args.related),
+                                blocking=_split_refs(args.blocking))
+                save_batch(path, data)
+                refresh_view(path, data)
             print(f"added {gate['id']} (owed)")
             return 0
         if args.command in ("answer", "waive", "overtake"):
@@ -1039,28 +1090,51 @@ def main(argv=None):
             field = {"answer": "answer", "waive": "reason",
                      "overtake": "note"}[args.command]
             text = getattr(args, field)
-            pub = read_trust(path, args.pin_ref)[0]
-            gate = transition(data, args.gid, status, text,
-                              answered=args.date, source=args.source)
-            if pub is None and args.grant_sig:
-                raise GateError("--grant-sig given but no human grant key is pinned "
-                                "(.orca/human-grant-pubkey): a signature nothing can verify "
-                                "fails closed (W3-06)")
-            if pub is not None:
-                if not args.grant_sig:
-                    raise GateError(f"a human grant key is pinned, so {status} {args.gid} needs "
-                                    "--grant-sig (gate-batch.py sign-answer, with the human's "
-                                    "seed): an unsigned answer is one anyone could have typed "
-                                    "(W3-06)")
-                gate["grant_sig"] = args.grant_sig.strip().lower()
-                if not answer_verified(data, gate, pub):
-                    raise GateError(f"--grant-sig does not verify for {args.gid} as it would be "
-                                    "recorded (run, gate, status, text, date and source are all "
-                                    "signed) — not the pinned human's answer (W3-06)")
-            save_batch(path, data)
-            refresh_view(path, data)
+            with _batch_lock(path):
+                data = load_batch(path)
+                pub = read_trust(path, args.pin_ref)[0]
+                gate = transition(data, args.gid, status, text,
+                                  answered=args.date, source=args.source)
+                if pub is None and args.grant_sig:
+                    raise GateError("--grant-sig given but no human grant key is pinned "
+                                    "(.orca/human-grant-pubkey): a signature nothing can verify "
+                                    "fails closed (W3-06)")
+                if pub is not None:
+                    if not args.grant_sig:
+                        raise GateError(f"a human grant key is pinned, so {status} {args.gid} needs "
+                                        "--grant-sig (gate-batch.py sign-answer, with the human's "
+                                        "seed): an unsigned answer is one anyone could have typed "
+                                        "(W3-06)")
+                    gate["grant_sig"] = args.grant_sig.strip().lower()
+                    if not answer_verified(data, gate, pub):
+                        raise GateError(f"--grant-sig does not verify for {args.gid} as it would be "
+                                        "recorded (run, gate, status, text, date and source are all "
+                                        "signed) — not the pinned human's answer (W3-06)")
+                save_batch(path, data)
+                refresh_view(path, data)
             print(f"{gate['id']} -> {status}")
             return 0
+        if args.command == "render":
+            out = args.out or str(path.parent / "gate-batch.md")
+            if args.out == "-":
+                sys.stdout.write(render_batch(load_batch(path)))
+                return 0
+            if args.check:
+                rendered = render_batch(load_batch(path))
+                current = Path(out).read_text(encoding="utf-8") \
+                    if Path(out).is_file() else None
+                if current != rendered:
+                    print(f"{out} is not what the store renders",
+                          file=sys.stderr)
+                    return 1
+                print(f"{out} matches the store")
+                return 0
+            with _batch_lock(path):
+                rendered = render_batch(load_batch(path))
+                _atomic_write_text(out, rendered)
+            print(f"rendered {out}")
+            return 0
+        data = load_batch(path)
         if args.command == "sign-answer":
             dec = _decisions()
             if dec is None:
@@ -1109,24 +1183,6 @@ def main(argv=None):
                     print(_fmt_show(gate, shown, note))
                     return 0
             find_gate(data, args.gid)  # raises, naming the ids this batch does carry
-        if args.command == "render":
-            out = args.out or str(path.parent / "gate-batch.md")
-            rendered = render_batch(data)
-            if args.out == "-":
-                sys.stdout.write(rendered)
-                return 0
-            if args.check:
-                current = Path(out).read_text(encoding="utf-8") \
-                    if Path(out).is_file() else None
-                if current != rendered:
-                    print(f"{out} is not what the store renders",
-                          file=sys.stderr)
-                    return 1
-                print(f"{out} matches the store")
-                return 0
-            _atomic_write_text(out, rendered)
-            print(f"rendered {out}")
-            return 0
     except GateError as e:
         print(f"gate-batch.py: error: {e}", file=sys.stderr)
         return 2

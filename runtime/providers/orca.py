@@ -85,4 +85,8 @@ class OrcaProvider(RuntimeProvider):
             msg = err.get("message", str(code)) if isinstance(err, dict) else str(code)
             data = err.get("data") if isinstance(err, dict) and isinstance(err.get("data"), dict) else {}
             raise ProviderError(str(code), msg, data)
+        if doc.get("ok") is False or proc.returncode != 0:
+            detail = (proc.stderr or "").strip()[:300]
+            msg = detail or f"orca command failed (exit {proc.returncode}, ok={doc.get('ok')!r})"
+            raise ProviderError("runtime_error", msg, {"returncode": proc.returncode, "ok": doc.get("ok")})
         return result

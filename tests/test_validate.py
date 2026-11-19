@@ -1601,3 +1601,22 @@ class PinVersionClaims(unittest.TestCase):
                 failures = validate.check_pin_version_claims()
         self.assertEqual(len(failures), 1)
         self.assertIn("pins.json", failures[0])
+
+
+class LowerLayerFrontmatter783(unittest.TestCase):
+    """Regression test for #783: malformed frontmatter on playbooks/runtime must still fail."""
+
+    def test_malformed_frontmatter_in_playbook_or_runtime_is_flagged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "playbooks").mkdir()
+            (root / "runtime").mkdir()
+            (root / "playbooks" / "dup.md").write_text(
+                "---\nname: a\nname: b\n---\n# body\n", encoding="utf-8")
+            (root / "runtime" / "bad.md").write_text(
+                "---\n: broken\n---\n# body\n", encoding="utf-8")
+            with mock.patch.object(validate, "ROOT", root):
+                errors = validate.check_lower_layer_frontmatter()
+            self.assertEqual(len(errors), 2, errors)
+            self.assertTrue(any("playbooks/dup.md" in e for e in errors), errors)
+            self.assertTrue(any("runtime/bad.md" in e for e in errors), errors)

@@ -385,6 +385,16 @@ class _SilentParser(argparse.ArgumentParser):
         raise ValueError(message or f"exit {status}")
 
 
+_FORBIDDEN_ENV_EXACT = frozenset({
+    "PATH", "PYTHONPATH", "HOME", "SHELL", "BASH_ENV", "ENV", "IFS", "CDPATH",
+})
+_FORBIDDEN_ENV_PREFIX = ("PYTHON", "LD_", "DYLD_")
+
+
+def _is_forbidden_env_var(name):
+    return name in _FORBIDDEN_ENV_EXACT or name.startswith(_FORBIDDEN_ENV_PREFIX)
+
+
 def _parsed_manifest(rest):
     """The `--manifest` value argparse would see in `rest`, or None if it would refuse the line.
 
@@ -396,12 +406,23 @@ def _parsed_manifest(rest):
 
     `parse_known_args` because a recorded command legitimately carries flags this function does not
     model (--contract-source, --lighting, --execute-nc): an unrecognised flag is no reason to
-    disbelieve the run, while a malformed one is.
+    disbelieve the run, while a malformed one is. `allow_abbrev=False` and refusing `-h`/`--help`/
+    `--h*` before `--` ensure an abbreviated flag or help-exit invocation cannot pass as a run
+    (#784).
     """
-    parser = _SilentParser(add_help=False)
+    rest_list = list(rest)
+    for tok in rest_list:
+        if tok == "--":
+            break
+        opt = tok.partition("=")[0]
+        if opt == "-h" or opt.startswith("--h") or (
+            opt.startswith("-") and not opt.startswith("--") and "h" in opt[1:]
+        ):
+            return None
+    parser = _SilentParser(add_help=False, allow_abbrev=False)
     parser.add_argument("--manifest")
     try:
-        known, _unknown = parser.parse_known_args(list(rest))
+        known, _unknown = parser.parse_known_args(rest_list)
     except (ValueError, SystemExit):
         return None
     return known.manifest
@@ -433,6 +454,10 @@ def executes_verifier(cmd, manifest_path, root=None):
         return False
     i = 0
     while i < len(argv) and (argv[i] == "env" or _ENV_ASSIGN_RE.match(argv[i])):
+        if _ENV_ASSIGN_RE.match(argv[i]):
+            var_name = argv[i].split("=", 1)[0]
+            if _is_forbidden_env_var(var_name):
+                return False
         i += 1
     if i >= len(argv):
         return False
@@ -470,7 +495,7 @@ def tree_of(rev, root):
     return out if proc.returncode == 0 and out else None
 
 
-def verifier_ran(manifest_path, rev, root):
+def verifier_ran(manifest_path, rev, root, verifier_verdict=None):
     """Errors that stop this report proving the verifier was RUN. [] means a run is recorded.
 
     Until #286 the only evidence a tier had that `verify.py` ever executed was PROSE: the report
@@ -480,8 +505,9 @@ def verifier_ran(manifest_path, rev, root):
 
     So the tier now costs a command EXECUTION: the graded manifest's own `commands[]` ledger must
     carry a record of the verifier running, with a `wtree` that resolves to a real tree object
-    in this repository. `evidence-run.py` writes those records; a hand-written one has to name a
-    tree that really exists here and hash its own command line.
+    in this repository and an integer exit code matching `RUN: verifier=` (0 for GREEN, 2 for
+    RED; #784). `evidence-run.py` writes those records; a hand-written one has to name a tree
+    that really exists here and hash its own command line.
 
     Said plainly, because it bounds what this buys: the ledger is still written on the worker, so
     this raises the floor from "wrote a sentence" to "ran a command and recorded it against real
@@ -507,6 +533,7 @@ def verifier_ran(manifest_path, rev, root):
                 f"verify.py against itself — a tier costs a RUN, not a sentence about one. Wrap the "
                 f"verifier in evidence-run.py so the ledger carries it (#286). Recorded there: {seen}"]
 
+    want_exit = {"GREEN": 0, "RED": 2}.get(verifier_verdict)
     # Every candidate must bind to content, or the record describes nothing. The bound is
     # tree-shaped existence in THIS repo: evidence-run records DURING the run, before the
     # closing commit exists, so equality with the pinned commit's tree would refuse every real
@@ -534,6 +561,12 @@ def verifier_ran(manifest_path, rev, root):
             problems.append(f"its wtree {wtree[:12]}… is git's built-in EMPTY tree, which "
                             "resolves in any repository and binds the record to no content")
             continue
+        if want_exit is not None:
+            exit_code = rec.get("exit")
+            if type(exit_code) is not int or exit_code != want_exit:
+                problems.append(f"its exit code {exit_code!r} does not match "
+                                f"RUN: verifier={verifier_verdict} (expected {want_exit})")
+                continue
         return []  # one sound record is enough
     return [f"the graded manifest {manifest_path} records a verify.py run that binds to nothing: "
             + "; ".join(problems)]
@@ -1261,7 +1294,7 @@ def check_report(report_path, mission, tier, root=None, base=None):
         )
 
     # #286: the tier must cost a command execution, not a sentence describing one.
-    for problem in verifier_ran(manifest, rev, root):
+    for problem in verifier_ran(manifest, rev, root, fields.get("verifier")):
         errors.append(f"{report_path}: {problem}")
     # #281: with the coordinator's key committed where the switch is read, it must be SIGNED.
     for problem in signed_transcript(fields, rev, run_dir, root, base, text):

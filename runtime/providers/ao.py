@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ._external import release_claim_on_failure
-from ._external import ExternalDispatchMixin, http_json, preserve_worker_head, real_worktree, run_cli
+from ._external import ExternalDispatchMixin, http_json, preserve_worker_head, quote_url_segment, real_worktree, run_cli
 from .base import (
     ProviderError,
     RuntimeProvider,
@@ -138,8 +138,9 @@ class ComposioAOProvider(ExternalDispatchMixin, RuntimeProvider):
                     wt = real_worktree(src.get(key))
                     if wt:
                         return wt
+        q_sid = quote_url_segment(session_id, provider="ao", label="session_id")
         try:
-            ws = self._invoke({"method": "GET", "path": f"/api/v1/desktop/sessions/{session_id}/workspace", "body": None})
+            ws = self._invoke({"method": "GET", "path": f"/api/v1/desktop/sessions/{q_sid}/workspace", "body": None})
         except ProviderError:
             return None
         return real_worktree(ws.get("workspacePath"))
@@ -318,9 +319,17 @@ class ComposioAOProvider(ExternalDispatchMixin, RuntimeProvider):
                     "cross_run_access",
                     f"ao session {session_id!r} is not owned by run {bound!r}",
                 )
+        if self.state._own_worker_identity():
+            own_ids = set(self.state._bound_worker_identities())
+            if session_id not in own_ids and f"ao:{session_id}" not in own_ids:
+                raise ProviderError(
+                    "worker_forbidden",
+                    f"launched worker cannot send input to peer ao session {session_id!r}; only the coordinator may",
+                )
+        q_sid = quote_url_segment(session_id, provider="ao", label="session_id")
         if not text or len(text) > AO_SEND_MAX_CHARS:
             raise ProviderError("invalid_message", f"ao: send message must be 1..{AO_SEND_MAX_CHARS} characters")
-        raw = self._invoke({"method": "POST", "path": f"/api/v1/sessions/{session_id}/send", "body": {"message": text}})
+        raw = self._invoke({"method": "POST", "path": f"/api/v1/sessions/{q_sid}/send", "body": {"message": text}})
         if raw.get("ok") is False:
             raise ProviderError("ao_send_failed", f"ao: send to {session_id!r} was not accepted", {"response": raw})
         return {"terminal": terminal, "sessionId": session_id, "sent": True, "upstream": raw}
@@ -329,7 +338,7 @@ class ComposioAOProvider(ExternalDispatchMixin, RuntimeProvider):
         row = self._dispatch_row(dispatch_id)
         if source != "transcript":
             raise ProviderError("unsupported_operation", "ao: terminal bytes are WebSocket-only; read --source transcript")
-        sid = self._session_id(row)
+        sid = quote_url_segment(self._session_id(row), provider="ao", label="session_id")
         raw = self._invoke({"method": "GET", "path": f"/api/v1/sessions/{sid}/conversation?limit={int(limit)}", "body": None})
         msgs = raw.get("messages")
         if not isinstance(msgs, list):
@@ -350,7 +359,8 @@ class ComposioAOProvider(ExternalDispatchMixin, RuntimeProvider):
 
     def worker_show(self, *, dispatch_id: str = "", **kwargs: Any) -> dict[str, Any]:
         row = self._dispatch_row(dispatch_id)
-        raw = self._invoke({"method": "GET", "path": f"/api/v1/sessions/{self._session_id(row)}", "body": None})
+        q_sid = quote_url_segment(self._session_id(row), provider="ao", label="session_id")
+        raw = self._invoke({"method": "GET", "path": f"/api/v1/sessions/{q_sid}", "body": None})
         sess = raw.get("session") if isinstance(raw.get("session"), dict) else raw
         return normalize_show(
             row["dispatch_id"],
@@ -387,7 +397,8 @@ class ComposioAOProvider(ExternalDispatchMixin, RuntimeProvider):
             if verb == "release":
                 raise
             preserve_error = exc.to_envelope()["error"]
-        raw = self._invoke({"method": "POST", "path": f"/api/v1/sessions/{sid}/kill", "body": {}})
+        q_sid = quote_url_segment(sid, provider="ao", label="session_id")
+        raw = self._invoke({"method": "POST", "path": f"/api/v1/sessions/{q_sid}/kill", "body": {}})
         new_state, term_state = self._fence_local(dispatch_id, verb)
         return {
             "dispatchId": dispatch_id,

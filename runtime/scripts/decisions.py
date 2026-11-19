@@ -104,12 +104,14 @@ if (__name__ == "__main__" and not getattr(sys.flags, "safe_path", False) and sy
     del sys.path[0]
 
 import argparse
+from collections import Counter
 import importlib.util
 import json
 import os
 import re
 import stat
 import subprocess
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -234,13 +236,50 @@ for _base, _forms in {
     "delete": ("deletes", "deleted", "deleting"), "drop": ("drops", "dropped", "dropping"),
     "rotate": ("rotates", "rotated", "rotating"), "revoke": ("revokes", "revoked", "revoking"),
     "erase": ("erases", "erased", "erasing"), "remove": ("removes", "removed", "removing"),
-    "freeze": ("freezes", "froze", "freezing"), "land": ("lands", "landed", "landing"),
+    "destroy": ("destroys", "destroyed", "destroying"), "wipe": ("wipes", "wiped", "wiping"),
+    "purge": ("purges", "purged", "purging"), "nuke": ("nukes", "nuked", "nuking"),
+    "freeze": ("freezes", "froze", "freezing"), "unfreeze": ("unfreezes", "unfroze", "unfrozen", "unfreezing"),
+    "lift": ("lifts", "lifted", "lifting"), "land": ("lands", "landed", "landing"),
     "charge": ("charges", "charged", "charging"), "grant": ("grants", "granted", "granting"),
     "create": ("creates", "created", "creating"), "provision": ("provisions", "provisioned", "provisioning"),
     "revert": ("reverts", "reverted", "reverting"), "restore": ("restores", "restored", "restoring"),
+    "approve": ("approves", "approved", "approving"), "close": ("closes", "closed", "closing"),
+    "truncate": ("truncates", "truncated", "truncating"), "buy": ("buys", "bought", "buying"),
+    "purchase": ("purchases", "purchased", "purchasing"), "upgrade": ("upgrades", "upgraded", "upgrading"),
+    "increase": ("increases", "increased", "increasing"), "enable": ("enables", "enabled", "enabling"),
+    "raise": ("raises", "raised", "raising"), "widen": ("widens", "widened", "widening"),
+    "expand": ("expands", "expanded", "expanding"), "amend": ("amends", "amended", "amending"),
+    "regenerate": ("regenerates", "regenerated", "regenerating"), "reset": ("resets", "resetting"),
+    "paste": ("pastes", "pasted", "pasting"), "commit": ("commits", "committed", "committing"),
+    "bypass": ("bypasses", "bypassed", "bypassing"), "push": ("pushes", "pushed", "pushing"),
+    "cut": ("cuts", "cutting"), "apply": ("applies", "applied", "applying"),
+    "roll": ("rolls", "rolled", "rolling"), "take": ("takes", "took", "taken", "taking"),
+    "go": ("goes", "went", "gone", "going"), "back": ("backs", "backed", "backing"),
+    "empty": ("empties", "emptied", "emptying"), "tear": ("tears", "tore", "torn", "tearing"),
+    "change": ("changes", "changed", "changing"), "add": ("adds", "added", "adding"),
+    "use": ("uses", "used", "using"), "declare": ("declares", "declared", "declaring"),
+    "sign": ("signs", "signed", "signing"), "reject": ("rejects", "rejected", "rejecting"),
+    "decline": ("declines", "declined", "declining"), "post": ("posts", "posted", "posting"),
+    "submit": ("submits", "submitted", "submitting"), "request": ("requests", "requested", "requesting"),
+    "mark": ("marks", "marked", "marking"), "force": ("forces", "forced", "forcing"),
+    "launch": ("launches", "launched", "launching"), "rollout": ("rollouts",),
 }.items():
     for _form in _forms:
         _FORMS[_form] = _base
+
+
+def _normalize_text(text):
+    """NFKD-decompose, strip invisible format/combining marks (Cf, Mn), then NFKC-fold (#772)."""
+    stripped = "".join(
+        ch for ch in unicodedata.normalize("NFKD", text or "")
+        if unicodedata.category(ch) not in ("Cf", "Mn")
+    )
+    return unicodedata.normalize("NFKC", stripped)
+
+
+def _has_invisible_cf(text):
+    """True when `text` contains any Unicode Cf (format/bidi control) character."""
+    return any(unicodedata.category(ch) == "Cf" for ch in (text or ""))
 
 
 def _canon(token):
@@ -252,7 +291,8 @@ def _canon(token):
 
 
 def fold(text):
-    tokens = re.findall(r"[a-z0-9]+", text.lower().replace("-", " ").replace("_", " "))
+    normalized = _normalize_text(text)
+    tokens = re.findall(r"[a-z0-9]+", normalized.lower().replace("-", " ").replace("_", " "))
     return " ".join(_canon(t) for t in tokens if t not in _FILLER)
 
 
@@ -275,12 +315,18 @@ def human_source_of(record):
     return human_grant_of(record)[0]
 
 
-def grant_payload(ident, answer, why_core, task_id="", *, ts, klass="one-way"):
-    """Canonical bytes a human grant signature binds (domain-separated, v2).
+def grant_payload(ident, answer, why_core, task_id="", *, ts, klass="one-way", source=None):
+    """Canonical bytes a human grant signature binds (domain-separated, v2/v3).
 
     v2 binds the line's exact ``ts`` and its class beside id/answer/why/task: active() ranks
     by ts, so a signature that did not cover it let a signed `approved` be replayed under a
-    later stamp to out-rank a later signed `superseded` (2026-10-23 review, P2-3)."""
+    later stamp to out-rank a later signed `superseded` (2026-10-23 review, P2-3).
+    v3 (when ``source`` is supplied, #772) also binds ``source`` (``human:<name>``) so a
+    recorded grant's signer name cannot be rewritten after signing."""
+    if source is not None:
+        canonical = source if source.startswith("human:") else f"human:{source}"
+        return ("open-fleet human grant v3\n" + "\n".join(
+            [ts, ident, klass, answer, why_core, task_id or "", canonical])).encode("utf-8")
     return ("open-fleet human grant v2\n" + "\n".join(
         [ts, ident, klass, answer, why_core, task_id or ""])).encode("utf-8")
 
@@ -468,9 +514,102 @@ def parse_grant_pubkey(text, where):
     return pub
 
 
+# Bounded-window and CLI-flag matchers (#772): catch destructive phrasing when intermediate
+# modifiers or reordered flags break contiguous substring matching (e.g. `delete production
+# database`, `git push --force origin main`, `rm -fr /`, `deploy service to prod`,
+# `rotate production api key`, `merge branch to main`). Each fires only when its door id is
+# present in the loaded door registry `net`.
+_DOOR_FOLDED_PATTERNS = (
+    ("merge-to-default", re.compile(
+        r"\b(?:merge|promote|land)\b(?:\s+[a-z0-9]+){1,4}\s+(?:to|into|on)\s+(?:main|master|default\s+branch)\b"
+    )),
+    ("merge-to-default", re.compile(
+        r"\bforce\s+push\b(?:\s+[a-z0-9]+){0,4}\s+(?:main|master)\b"
+    )),
+    ("deploy", re.compile(
+        r"\b(?:deploy|ship|release|promote|push|roll\s+out)\b(?:\s+[a-z0-9]+){1,4}\s+to\s+(?:prod|production)\b"
+    )),
+    ("deploy", re.compile(
+        r"\bkubectl\s+apply\b(?:\s+[a-z0-9]+){0,4}\s+(?:prod|production)\b"
+    )),
+    ("rollback", re.compile(
+        r"\b(?:roll\s*back|revert|back\s+out|restore)\b(?:\s+[a-z0-9]+){1,4}\s+(?:deploy|deployment|release|prod|production)\b"
+    )),
+    ("deletion", re.compile(
+        r"\b(?:delete|drop|truncate|empty)\b(?:\s+[a-z0-9]+){1,3}\s+"
+        r"(?:database|db|table|bucket|repository|volume|environment|"
+        r"(?:default|main|master|base|protected|release|integration|unmerged)\s+branch|"
+        r"(?:dirty|coordinator)\s+worktree)\b"
+    )),
+    ("secret-rotation", re.compile(
+        r"\b(?:rotate|revoke|regenerate|reset)\b(?:\s+[a-z0-9]+){1,3}\s+(?:credential|secret|key|token)\b"
+    )),
+    ("live-credentials", re.compile(
+        r"\b(?:paste|commit|provision|create|use)\b(?:\s+[a-z0-9]+){0,3}\s+(?:live|prod|production)\s+(?:credential|secret|api\s+key|access\s+key|token)\b"
+    )),
+    ("live-credentials", re.compile(
+        r"\bgrant\b(?:\s+[a-z0-9]+){0,2}\s+(?:prod|production)\s+access\b"
+    )),
+    ("review-verdict", re.compile(
+        r"\b(?:approve|lgtm)\b(?:\s+[a-z0-9]+){1,3}\s+(?:pr|pull\s+request|merge\s+request)\b"
+    )),
+    ("close-without-landing", re.compile(
+        r"\bclose\b(?:\s+[a-z0-9]+){0,3}\s+(?:pr|pull\s+request|issue|contribution)\b"
+        r"(?:\s+[a-z0-9]+){0,3}\s+(?:without\s+(?:landing|merging)|as\s+(?:refuted|duplicate|not\s+planned|wontfix|won\s+t\s+fix|invalid|stale))\b"
+    )),
+    ("scope-change", re.compile(
+        r"\b(?:change|widen|expand|amend|drop|delete)\b(?:\s+[a-z0-9]+){0,3}\s+frozen\s+(?:scope|criterion|spec|denominator)\b"
+    )),
+    ("scope-change", re.compile(
+        r"\b(?:widen|expand)\b(?:\s+[a-z0-9]+){0,2}\s+scope\b"
+    )),
+    ("freeze", re.compile(
+        r"\b(?:unfreeze|lift)\b(?:\s+[a-z0-9]+){0,2}\s+(?:freeze|spec)\b"
+    )),
+    ("spend", re.compile(
+        r"\b(?:buy|purchase|upgrade|increase|enable|raise|charge)\b(?:\s+[a-z0-9]+){1,3}\s+(?:license|plan|quota|billing|spending\s+limit|card)\b"
+    )),
+)
+_DOOR_RAW_PATTERNS = (
+    ("merge-to-default", re.compile(
+        r"\bgit\s+push\b[^\n;]{0,50}(?:--force(?:-with-lease)?|(?<!\S)-[a-z]*f[a-z]*\b)[^\n;]{0,40}\b(?:main|master)\b"
+    )),
+    ("merge-to-default", re.compile(
+        r"\bgit\s+push\b[^\n;]{0,40}\b(?:main|master)\b[^\n;]{0,40}(?:--force(?:-with-lease)?|(?<!\S)-[a-z]*f[a-z]*\b)"
+    )),
+    ("deletion", re.compile(
+        r"\brm\s+(?:-[a-z]*r[a-z]*f[a-z]*|-[a-z]*f[a-z]*r[a-z]*|-r\s+-f|-f\s+-r|--recursive\s+--force|--force\s+--recursive)\b"
+    )),
+    ("deletion", re.compile(
+        r"\bgit\s+branch\b[^\n;]{0,40}(?:(?<!\S)-d\s+(?<!\S)-f|(?<!\S)-f\s+(?<!\S)-d|--delete\s+--force|--force\s+--delete)\b"
+    )),
+    ("deletion", re.compile(
+        r"\bgit\s+push\b[^\n;]{0,40}(?:--delete[^\n;]{0,20}\b(?:main|master)\b|:(?:main|master)\b)"
+    )),
+)
+_DOOR_CASE_PATTERNS = (
+    ("deletion", re.compile(r"\bgit\s+branch\b[^\n;]{0,40}(?<!\S)-D\b")),
+)
+
+
 def door_hits(text, net):
+    if not net:
+        return []
     probe = fold(text)
-    return sorted({door_id for door_id, kw in net if kw in probe})
+    norm = _normalize_text(text)
+    raw = norm.lower()
+    hits = {door_id for door_id, kw in net if kw in probe}
+    net_doors = {door_id for door_id, _ in net}
+    for door_id, pattern in _DOOR_FOLDED_PATTERNS:
+        if door_id in net_doors and pattern.search(probe):
+            hits.add(door_id)
+    for door_id, pattern in _DOOR_RAW_PATTERNS:
+        if door_id in net_doors and pattern.search(raw):
+            hits.add(door_id)
+    for door_id, pattern in _DOOR_CASE_PATTERNS:
+        if door_id in net_doors and pattern.search(norm):
+            hits.add(door_id)
+    return sorted(hits)
 
 
 def secret_hits(text):
@@ -522,6 +661,13 @@ def validate(record, net, grant_pub=None):
         problems.append("empty answer")
     if not record["why"]:
         problems.append("empty why (a decision nobody can reconstruct is not a record)")
+    if (_has_invisible_cf(record.get("raw", ""))
+            or any(_has_invisible_cf(record.get(k, ""))
+                   for k in ("ts", "id", "class", "answer", "why", "task_id"))):
+        problems.append(
+            "invisible format/bidi control character (Unicode Cf) in ledger record — "
+            "refusing hidden text (#772)"
+        )
     if _instant(record.get("ts", "")) == _UNDATED:
         problems.append(f"ts {record.get('ts')!r} is not a readable timestamp — a record whose time "
                         "cannot be read sorts before everything and would pass for history")
@@ -562,21 +708,28 @@ def validate(record, net, grant_pub=None):
                     "carries a grant signature but no human grant pubkey is pinned "
                     "(.orca/human-grant-pubkey) — a signature nothing can verify fails closed")
             else:
-                try:
-                    verified = _ed25519().checkvalid(
-                        bytes.fromhex(sig),
-                        grant_payload(record["id"], record["answer"], why_core,
-                                      record.get("task_id", ""), ts=record["ts"],
-                                      klass=record["class"]),
-                        grant_pub)
-                except Exception:
-                    verified = False
+                sig_bytes = bytes.fromhex(sig)
+                verified = False
+                for payload in (
+                    grant_payload(record["id"], record["answer"], why_core,
+                                  record.get("task_id", ""), ts=record["ts"],
+                                  klass=record["class"], source=f"human:{name}"),
+                    grant_payload(record["id"], record["answer"], why_core,
+                                  record.get("task_id", ""), ts=record["ts"],
+                                  klass=record["class"]),
+                ):
+                    try:
+                        if _ed25519().checkvalid(sig_bytes, payload, grant_pub):
+                            verified = True
+                            break
+                    except Exception:
+                        continue
                 if not verified:
                     problems.append(
                         "grant signature does not verify against the pinned human "
-                        "grant pubkey for this line's ts/id/class/answer/why/task "
-                        "(payload v2: a v1 signature, or one replayed under another ts, "
-                        "does not)")
+                        "grant pubkey for this line's ts/id/class/answer/why/task/source "
+                        "(payload v3/v2: a v1 signature, a spoofed source on v3, or one "
+                        "replayed under another ts does not)")
     return problems
 
 
@@ -584,26 +737,88 @@ def grant_problems(record, grant_pub=None):
     """Why `record` does not stand as a one-way human grant; [] when it does.
 
     Class `one-way`, a human source, every append-time rule, and -- with `grant_pub` pinned
-    -- a signature that verifies over payload v2. floor_guard.py requires this of every
+    -- a signature that verifies over payload v3/v2. floor_guard.py requires this of every
     floor waiver (2026-10-23 review, P1-7), so the rule lives here, once."""
     problems = [] if record.get("class") == "one-way" else [
         f"class {record.get('class')!r} is not one-way — a grant is a one-way human decision"]
     return problems + validate(record, (), grant_pub)
 
 
-def standing(records, grant_pub=None):
-    """`records` without the one-way lines a PINNED key does not verify.
+def _is_standing_malformed(record):
+    """True when `record` is structurally malformed or future-skewed so standing() must drop it."""
+    if not (record.get("id") and record.get("answer") and record.get("why")):
+        return True
+    if record.get("class") not in CLASSES:
+        return True
+    instant = _instant(record.get("ts", ""))
+    if instant == _UNDATED:
+        return True
+    if (instant - _now()).total_seconds() > MAX_FUTURE_SKEW_SECONDS:
+        return True
+    if (_has_invisible_cf(record.get("raw", ""))
+            or any(_has_invisible_cf(record.get(k, ""))
+                   for k in ("ts", "id", "class", "answer", "why", "task_id"))):
+        return True
+    suffix = HUMAN_SOURCE_SUFFIX.search(record.get("why", ""))
+    if record.get("class") != "one-way" and suffix and suffix.group(2):
+        return True
+    return False
 
-    With `.orca/human-grant-pubkey` pinned, a one-way line that is unsigned or whose signature
-    fails is not a decision: it must neither out-rank a real grant nor retire one, so it is
-    dropped BEFORE active() picks the newest line per id (2026-10-23 review, P1-8). Without a
-    pin the source marker is a record-format check, not authentication: `check` reports a
-    malformed line and `active` keeps listing it as it always has. Lines of other classes pass
-    untouched -- they never claimed a human's authority."""
-    if grant_pub is None:
-        return list(records)
-    return [r for r in records
-            if r.get("class") != "one-way" or not grant_problems(r, grant_pub)]
+
+def _is_waiver_retirement(record, prior_one_way):
+    """Retiring an active `floor-waiver:*` `allow` exemption with `superseded` only tightens
+    the floor back to default-deny; it never grants an exemption or erases a denial."""
+    return (
+        record.get("id", "").strip().startswith("floor-waiver:")
+        and record.get("answer", "").strip().lower() == "superseded"
+        and prior_one_way is not None
+        and prior_one_way.get("answer", "").strip().lower() == "allow"
+    )
+
+
+def _valid_one_way(record, grant_pub):
+    return record.get("class") == "one-way" and not grant_problems(record, grant_pub)
+
+
+def standing(records, grant_pub=None):
+    """`records` filtered to standing decisions (#621 P1-8, #772).
+
+    Drops:
+    - malformed records (empty id/answer/why, unknown class, unreadable timestamp, invisible Cf
+      control chars, or a grant signature on a non-one-way line);
+    - future-skewed records (beyond MAX_FUTURE_SKEW_SECONDS);
+    - one-way lines whose signature does not verify (with `.orca/human-grant-pubkey` pinned,
+      unsigned or bad-sig one-way lines; without a pin, signed-looking lines with no key);
+    - class-monotonicity downgrades: once a valid standing `one-way` record exists for an `id`,
+      any later non-`one-way` record for that `id` is ignored (except retiring a `floor-waiver:*`
+      `allow` grant via `superseded`, which only tightens the floor).
+    """
+    survivors = []
+    for pos, r in enumerate(records):
+        if _is_standing_malformed(r):
+            continue
+        if r.get("class") == "one-way":
+            if grant_pub is not None:
+                if grant_problems(r, grant_pub):
+                    continue
+            elif human_grant_of(r)[1] is not None:
+                continue
+        survivors.append((pos, r))
+    one_way_by_id = {}
+    for pos, r in survivors:
+        if _valid_one_way(r, grant_pub):
+            one_way_by_id.setdefault(r["id"], []).append((recency(r, pos), r))
+    for rows in one_way_by_id.values():
+        rows.sort(key=lambda pair: pair[0])
+    out = []
+    for pos, r in survivors:
+        if r.get("class") != "one-way":
+            prior = [pair for pair in one_way_by_id.get(r["id"], ())
+                     if pair[0] < recency(r, pos)]
+            if prior and not _is_waiver_retirement(r, prior[-1][1]):
+                continue
+        out.append(r)
+    return out
 
 
 def read_lines(path):
@@ -777,6 +992,19 @@ def cmd_append(args, net):
         return EXIT_VIOLATION
     record["lineno"] = 0
     problems = validate(record, net, pub)
+    if record["class"] != "one-way":
+        existing = read_lines(args.file)
+        prior_ow = sorted(
+            ((recency(r, i), r) for i, r in enumerate(existing)
+             if r["id"] == record["id"] and not _is_standing_malformed(r)
+             and _valid_one_way(r, pub)),
+            key=lambda pair: pair[0],
+        )
+        if prior_ow and not _is_waiver_retirement(record, prior_ow[-1][1]):
+            problems.append(
+                f"class monotonicity: id {record['id']!r} already has a standing one-way "
+                f"decision and cannot be downgraded to {record['class']!r} (#772)"
+            )
     if problems:
         print("decisions: refused:", file=sys.stderr)
         for p in problems:
@@ -822,29 +1050,109 @@ def cmd_tally(args, _net):
     return EXIT_OK
 
 
+def _base_record_counts(log_path, base_ref):
+    """Counter of raw record lines in `log_path` as committed at `base_ref` (#772)."""
+    if not base_ref or base_ref.startswith("-"):
+        raise DecisionsError(f"--base {base_ref!r} must name a git ref, not an option")
+    root = _repo_for_path(log_path, Path(__file__).resolve().parent.parent.parent)
+    lexical = Path(os.path.abspath(log_path))
+    real = lexical.resolve()
+    try:
+        rel = real.relative_to(root).as_posix()
+    except ValueError as err:
+        raise DecisionsError(
+            f"--base requires {log_path} to sit inside repository {root}"
+        ) from err
+    here = Path(__file__).resolve().parent
+    spec = importlib.util.spec_from_file_location("gitexec", here / "gitexec.py")
+    gitexec = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gitexec)
+
+    def git(*args):
+        try:
+            return subprocess.run(gitexec.argv("-C", str(root), *args), capture_output=True,
+                                  timeout=60, env=gitexec.custody_env(), stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.SubprocessError) as err:
+            raise DecisionsError(f"git {args[0]} failed to run: {err}") from err
+
+    def run(*args):
+        proc = git(*args)
+        return proc.returncode, proc.stdout.decode("utf-8", "surrogateescape")
+
+    commit, shown, local, why = gitexec.base_commit(run, base_ref)
+    if commit is None:
+        raise DecisionsError(f"--base {base_ref!r} {why} — cannot read base ledger in {root}")
+    if local:
+        lane = gitexec.sound_lane()
+        if lane:
+            raise DecisionsError(
+                f"{lane} claims a sound lane, but --base {shown!r} is {local} ({commit[:12]}), "
+                "not a remote-tracking ref or full commit id"
+            )
+    listing = git("ls-tree", "--name-only", "--full-tree", commit, "--", rel)
+    if listing.returncode != 0:
+        raise DecisionsError(f"cannot list {rel} at --base {base_ref} ({commit[:12]})")
+    if rel not in listing.stdout.decode("utf-8", "replace").splitlines():
+        return Counter()
+    blob = git("cat-file", "blob", f"{commit}:{rel}")
+    if blob.returncode != 0:
+        raise DecisionsError(f"{base_ref}:{rel} is listed but unreadable")
+    base_records = []
+    for line in blob.stdout.decode("utf-8", "replace").splitlines():
+        rec = parse_line(line)
+        if rec:
+            base_records.append(rec["raw"])
+    return Counter(base_records)
+
+
 def cmd_check(args, net):
     pub = grant_pubkey(args.file, args.pin_ref)
     records = read_lines(args.file)
     since = getattr(args, "since", None)
+    base_ref = getattr(args, "base", None)
     fence = None
     if since:
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", since):
             print(f"decisions: --since {since!r} is not a date (YYYY-MM-DD)", file=sys.stderr)
             return EXIT_CANNOT_RUN
         fence = _instant(since + "T00:00:00Z")
+    base_counts = _base_record_counts(args.file, base_ref) if base_ref else None
     checked, legacy = [], 0
-    for record in records:
+    for pos, record in enumerate(records):
         instant = _instant(record.get("ts", ""))
+        untouched = False
+        if base_counts is not None and base_counts[record["raw"]] > 0:
+            base_counts[record["raw"]] -= 1
+            untouched = True
         # An unreadable stamp sorts before everything (_UNDATED): judged, never skipped as
         # history, or `2026-10-26T99:99:99Z` would carry any line past the fence (PR #707 review).
-        if fence is not None and instant != _UNDATED and instant < fence:
+        # With --base, only lines UNTOUCHED since <base> may pass under --since (#772).
+        may_skip = untouched if base_counts is not None else True
+        if may_skip and fence is not None and instant != _UNDATED and instant < fence:
             legacy += 1  # history from before the rule it would fail: counted, never re-litigated
             continue
-        checked.append(record)
+        checked.append((pos, record))
+    # Standing valid one-way records across the full log anchor class monotonicity (#772).
+    ow_by_id = {}
+    for pos, r in enumerate(records):
+        if not _is_standing_malformed(r) and _valid_one_way(r, pub):
+            ow_by_id.setdefault(r["id"], []).append((recency(r, pos), pos, r))
+    for rows in ow_by_id.values():
+        rows.sort(key=lambda triple: triple[0])
     failures = []
-    for record in checked:
+    for pos, record in checked:
         for problem in validate(record, net, pub):
             failures.append(f"{args.file}:{record['lineno']}: {problem}")
+        if record["class"] != "one-way":
+            rec_key = recency(record, pos)
+            prior_ow = [t for t in ow_by_id.get(record["id"], ())
+                        if t[0] < rec_key or t[1] < pos]
+            if prior_ow and not _is_waiver_retirement(record, prior_ow[-1][2]):
+                failures.append(
+                    f"{args.file}:{record['lineno']}: class monotonicity: id {record['id']!r} "
+                    f"already has a standing one-way decision and cannot be downgraded to "
+                    f"{record['class']!r} (#772)"
+                )
     if failures:
         for f in failures:
             print(f, file=sys.stderr)
@@ -920,10 +1228,19 @@ def cmd_sign_grant(args, _net):
         print("decisions: refusing to sign a grant stamped in the future — it would "
               "out-rank every later decision on this id (P2-3)", file=sys.stderr)
         return EXIT_VIOLATION
+    source = getattr(args, "source", None)
+    if source is not None:
+        match = re.fullmatch(r"human:(\S+)", source)
+        name = match.group(1) if match else ""
+        if not HUMAN_NAME.match(name) or name.lower() in RESERVED_HUMAN_NAMES:
+            print("decisions: --source must be shaped human:<name> and name a person, "
+                  "not an agent role", file=sys.stderr)
+            return EXIT_VIOLATION
     ed = _ed25519()
     sig = ed.signature(
         grant_payload(args.id.strip(), args.answer.strip(), why.strip(),
-                      (args.task or "").strip(), ts=ts, klass="one-way"),
+                      (args.task or "").strip(), ts=ts, klass="one-way",
+                      source=source),
         seed, ed.publickey(seed))
     print(sig.hex())
     print(f"decisions: signed for ts={ts} — append this grant with --ts {ts}",
@@ -977,6 +1294,9 @@ def build_parser():
     s.add_argument("--since", default=None, metavar="YYYY-MM-DD",
                    help="check only records stamped on or after this date; earlier records are "
                         "history from before the rules they would fail and are counted, not judged")
+    s.add_argument("--base", default=None, metavar="REF",
+                   help="git ref to compare against; every record newly added or modified relative "
+                        "to this ref is checked regardless of --since (closes backdated records)")
 
     k = sub.add_parser("grant-keygen", help="generate the human grant keypair (seed off-repo)")
     k.add_argument("--out", required=True, help="seed path, e.g. ~/.open-fleet/human-grant-key")
@@ -989,9 +1309,12 @@ def build_parser():
     s.add_argument("--answer", required=True)
     s.add_argument("--why", required=True)
     s.add_argument("--task", default=None)
+    s.add_argument("--source", default=None, metavar="human:<name>",
+                   help="human:<name> bound into the signature (payload v3); prevents rewriting "
+                        "the recorded signer")
     s.add_argument("--ts", default=None,
                    help="the exact ts the appended line will carry (default: now, UTC; "
-                        "printed on stderr) — payload v2 binds it")
+                        "printed on stderr) — payload v3/v2 binds it")
     return p
 
 

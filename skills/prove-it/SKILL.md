@@ -51,7 +51,7 @@ OWN killer mutant per path (`PROFILE=rw`, scratch clones only, commits nothing),
 ## Pipeline
 
 ```
-MAP critical surface (coverage gaps × call-graph of money/auth/data/external-contract entry points;
+REFUSE-IF-QUARANTINED (runtime/scripts/preflight.py --mode readonly --mission prove-it) → MAP critical surface (coverage gaps × call-graph of money/auth/data/external-contract entry points;
   uncovered trivial getters are NOT the mission) → HUMAN scope confirm (bounds the mission)
   → BOOTSTRAP integration BASE (runtime/scripts/preflight.py --mission prove-it --base <BASE> --fork-point <sha
     recorded in the ledger header at BASE creation>; BASE ≠ default — dispatch-lifecycle.md)

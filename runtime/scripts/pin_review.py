@@ -47,9 +47,22 @@ if (__name__ == "__main__" and not getattr(sys.flags, "safe_path", False) and sy
 
 import argparse
 import datetime
+import importlib.util
 import re
 import subprocess
 from pathlib import Path
+
+
+def _load_gitexec():
+    spec = importlib.util.spec_from_file_location(
+        "gitexec", Path(__file__).resolve().parent / "gitexec.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+gitexec = _load_gitexec()
 
 # `.md.tmpl` is the source a pack renders SKILL.md and its sections from.
 INSTRUCTION_SUFFIXES = (".md", ".prompt", ".txt", ".md.tmpl")
@@ -63,15 +76,9 @@ PERMISSION_SUFFIXES = (".toml", ".yaml", ".yml")
 # `setup` is reviewed with the surface, not as code (gstack 47d639ab review).
 HOOK_TOKENS = {"hook", "hooks"}
 INSTALL_TOKENS = {"setup", "install", "preinstall", "postinstall"}
-TEST_DIRS = {"test", "tests", "__tests__", "spec", "fixtures"}
-# A SKILL.md frontmatter key that registers a hook or grants a tool.
-PERMISSION_KEYS = ("hooks", "allowed-tools")
+# Frontmatter keys that register hooks, grant tools, change permission mode, or declare MCP servers (#787).
+PERMISSION_KEYS = ("hooks", "allowed-tools", "tools", "permissionMode", "mcpServers")
 CLASSES = ("instruction", "permission-surface", "code")
-
-
-def _is_test(parts, name):
-    return bool(TEST_DIRS.intersection(parts[:-1])) or bool(
-        re.search(r"\.(test|spec)\.", name))
 
 
 def classify(path: str) -> str:
@@ -80,10 +87,11 @@ def classify(path: str) -> str:
     tokens = set(re.split(r"[-_.]", name))
     if name in PERMISSION_NAMES or "hooks" in parts or name.startswith("hook"):
         return "permission-surface"
-    if tokens & HOOK_TOKENS and not _is_test(parts, name):
+    # Never exempt HOOK_TOKENS / INSTALL_TOKENS under test/tests/fixtures paths (#787):
+    # an attacker could hide a hook or installer under a test-named directory.
+    if tokens & HOOK_TOKENS:
         return "permission-surface"
-    if (tokens & INSTALL_TOKENS and not _is_test(parts, name)
-            and not re.search(r"\.(md|txt|prompt)(\.tmpl)?$", name)):
+    if tokens & INSTALL_TOKENS and not re.search(r"\.(md|txt|prompt)(\.tmpl)?$", name):
         return "permission-surface"
     # Slash-command definitions are instructions an agent executes on
     # invocation (commands/*.toml, .gemini/commands/*, .claude/commands/*) —
@@ -103,15 +111,18 @@ def classify(path: str) -> str:
 
 def _git(repo: Path, *argv: str) -> str:
     try:
+        gitexec.refuse_blocking_files(repo)
         result = subprocess.run(
-            ["git", "-C", str(repo), *argv], capture_output=True, text=True,
-            timeout=120
+            gitexec.argv("-C", str(repo), *argv), capture_output=True, text=True,
+            timeout=120, env=gitexec.custody_env(), stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired as err:
         # A slow on-demand fetch (blobless clone) is a cannot-evaluate like
         # any other git failure — never a traceback with the wrong exit code.
         raise PinReviewError(
             f"git {' '.join(argv[:2])} timed out after {err.timeout}s") from err
+    except (OSError, gitexec.GitCustodyRefused) as err:
+        raise PinReviewError(f"git {' '.join(argv[:2])} refused: {err}") from err
     if result.returncode != 0:
         raise PinReviewError(f"git {' '.join(argv[:2])} failed: {result.stderr.strip()}")
     return result.stdout
@@ -159,13 +170,52 @@ def classify_changes(pairs):
     return {klass: sorted(items) for klass, items in grouped.items()}
 
 
+def _frontmatter_lines(text):
+    """Lines inside a YAML frontmatter block, or None.
+
+    Strips a leading UTF-8 BOM, tolerates trailing spaces/tabs on `---` fences, and ignores
+    `---` lines that occur inside a quoted multiline scalar (#787).
+    """
+    if text.startswith("\ufeff"):
+        text = text[1:]
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    if not lines or lines[0].rstrip(" \t") != "---":
+        return None
+    quote = None
+    for idx in range(1, len(lines)):
+        line = lines[idx]
+        if quote is None and line.rstrip(" \t") == "---":
+            return lines[1:idx]
+        i, n = 0, len(line)
+        while i < n:
+            ch = line[i]
+            if quote is None:
+                if ch == "#" and (i == 0 or line[i - 1] in " \t"):
+                    break
+                if ch in ('"', "'") and (i == 0 or line[i - 1] in " \t:[{,"):
+                    quote = ch
+            elif quote == "'":
+                if ch == "'":
+                    if i + 1 < n and line[i + 1] == "'":
+                        i += 1
+                    else:
+                        quote = None
+            elif quote == '"':
+                if ch == "\\" and i + 1 < n:
+                    i += 1
+                elif ch == '"':
+                    quote = None
+            i += 1
+    return None
+
+
 def permission_keys(text):
-    """Each PERMISSION_KEYS block of a SKILL.md's YAML frontmatter, raw."""
-    m = re.match(r"^---\r?\n(.*?)\r?\n---[ \t]*(\r?\n|$)", text, re.DOTALL)
-    if not m:
+    """Each PERMISSION_KEYS block of a Markdown file's YAML frontmatter, raw."""
+    fm_lines = _frontmatter_lines(text)
+    if fm_lines is None:
         return {}
     blocks, current = {}, None
-    for line in m.group(1).splitlines():
+    for line in fm_lines:
         # A quoted key ("hooks":) is the same YAML key — and the easy way to
         # slip a grant past an unquoted-only match (PR #573 review).
         top = re.match(r"^([\"']?)([A-Za-z0-9_-]+)\1[ \t]*:", line)
@@ -180,29 +230,48 @@ def permission_keys(text):
 
 def _show(repo: Path, commit: str, path: str) -> str:
     try:
+        gitexec.refuse_blocking_files(repo)
         result = subprocess.run(
-            ["git", "-C", str(repo), "show", f"{commit}:{path}"],
-            capture_output=True, timeout=120)
+            gitexec.argv("-C", str(repo), "show", f"{commit}:{path}"),
+            capture_output=True, timeout=120, env=gitexec.custody_env(),
+            stdin=subprocess.DEVNULL,
+        )
     except subprocess.TimeoutExpired as err:
         raise PinReviewError(f"git show timed out after {err.timeout}s") from err
+    except (OSError, gitexec.GitCustodyRefused) as err:
+        raise PinReviewError(f"git show refused: {err}") from err
     if result.returncode != 0:
         raise PinReviewError(f"git show {path} failed: "
                              f"{result.stderr.decode('utf-8', 'replace').strip()}")
     return result.stdout.decode("utf-8", "replace")
 
 
-def frontmatter_permission_changes(repo: Path, old: str | None, new: str, pairs):
-    """SKILL.md files whose frontmatter `hooks:` / `allowed-tools:` changed.
+def _is_frontmatter_surface_path(path: str) -> bool:
+    """SKILL.md, *.md.tmpl, .claude/commands/*.md, and .claude/agents/*.md (#787)."""
+    p = Path(path)
+    name = p.name.lower()
+    if name == "skill.md" or name.endswith(".md.tmpl"):
+        return True
+    parts = [part.lower() for part in p.parts]
+    if name.endswith(".md"):
+        for i in range(len(parts) - 2):
+            if parts[i] == ".claude" and parts[i + 1] in ("commands", "agents"):
+                return True
+    return False
 
-    A skill registers hooks and grants tools in its own frontmatter, so the
-    path classifier alone files that widening under `instruction` (gstack
-    47d639ab: autoplan's Read auto-approve hook). Each such file is listed on
-    the permission surface too, naming the keys that moved. A deletion only
-    narrows and is already listed by path.
+
+def frontmatter_permission_changes(repo: Path, old: str | None, new: str, pairs):
+    """Skill, command, agent, and template files whose frontmatter permission keys changed.
+
+    A skill, slash-command, subagent, or template registers hooks, grants tools, changes
+    permissionMode, or declares mcpServers in its own frontmatter, so the path classifier alone
+    files that widening under `instruction` (gstack 47d639ab, #787). Each such file is listed on
+    the permission surface too, naming the keys that moved. A deletion only narrows and is
+    already listed by path.
     """
     out = []
     for status, path in pairs:
-        if Path(path).name.lower() != "skill.md" or status == "D":
+        if not _is_frontmatter_surface_path(path) or status == "D":
             continue
         after = permission_keys(_show(repo, new, path))
         before = (permission_keys(_show(repo, old, path))

@@ -160,7 +160,8 @@ def _ref_matches(ref, commit):
         return True
     if not commit:
         return False
-    return commit.startswith(ref) or ref.startswith(commit)
+    ref_l, commit_l = str(ref).lower(), str(commit).lower()
+    return commit_l.startswith(ref_l) or ref_l.startswith(commit_l)
 
 
 def violations(entries, view):
@@ -266,6 +267,10 @@ def mission_view(root, mission):
     # references/ at the top). Refusing the second layout outright would make
     # every normal copied-bundle start fail; reading the wrong place silently
     # is the opposite error. Support both, refuse only when neither resolves.
+    if not isinstance(mission, str) or not _grammar.NAME_RE.fullmatch(mission):
+        raise QuarantineError(
+            f"invalid mission name {mission!r} — must match {_grammar.NAME_RE.pattern}"
+        )
     root = Path(root)
     candidates = [root / "skills" / mission / "SKILL.md", root / "SKILL.md"]
     skill = next((c for c in candidates if c.is_file()), None)
@@ -279,9 +284,27 @@ def mission_view(root, mission):
         text = skill.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as err:
         raise QuarantineError(f"{skill}: unreadable ({err})") from err
+    fm, fm_err = _grammar.parse_frontmatter(text)
+    if fm_err is not None and fm_err != "missing opening ---":
+        raise QuarantineError(
+            f"{skill}: malformed frontmatter ({fm_err}) — cannot verify mission identity"
+        )
+    missions = {mission}
+    if fm is not None:
+        declared = fm.get("name")
+        if not isinstance(declared, str) or not _grammar.NAME_RE.fullmatch(declared):
+            raise QuarantineError(
+                f"{skill}: frontmatter 'name' is missing or invalid ({declared!r})"
+            )
+        if declared != mission:
+            raise QuarantineError(
+                f"{skill}: frontmatter name {declared!r} does not match requested "
+                f"mission {mission!r} — refusing to clear an aliased or mismatched mission"
+            )
+        missions = {declared}
     pins, pins_error = pins_view(root)
     return {
-        "missions": {mission},
+        "missions": missions,
         "composes": {mission: _composed_playbooks(text, root, skill.parent)},
         "pins": pins,
         "pins_error": pins_error,

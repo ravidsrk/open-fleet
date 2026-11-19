@@ -9,17 +9,17 @@ clients:
   - url: http://loki:3100/loki/api/v1/push
 
 scrape_configs:
-  - job_name: docker
-    docker_sd_configs:
-      - host: unix:///var/run/docker.sock
-        refresh_interval: 5s
-    relabel_configs:
-      # This host runs foreign containers: scrape only our own stack.
-      - source_labels: [__meta_docker_container_label_com_docker_compose_project]
-        regex: "target-app"
-        action: keep
-      - source_labels: [__meta_docker_container_name]
-        regex: "/(.*)"
-        target_label: container
-      - source_labels: [__meta_docker_container_label_com_docker_compose_service]
-        target_label: service
+  - job_name: target-app
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: target-app
+          service: app
+          __path__: /var/log/target-app/app.log
+      - targets:
+          - localhost
+        labels:
+          job: target-app
+          service: staging
+          __path__: /var/log/target-app/staging.log

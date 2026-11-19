@@ -58,27 +58,26 @@ close — record RED with the unit short of `REVIEWED`, or re-dispatch on the ex
 
 ## Preflight
 
-`orca status --json` running · orchestration on · Orca CLI + orchestration skill available · git.
-**Repo state:** real code → foundation fills gaps, tests green at baseline (else you can't tell
-regressions) · empty/near-empty git repo → foundation scaffolds · no git repo → `git init` + minimal
-README/.gitignore commit on default, then a remote (an existing one, or `gh repo create` private after
-a human confirm — it is account-visible) so write preflight can run; a local-only host takes the
-offline lane below and stops at BASE.
+Run Pipeline step 0 first · `orca status --json` running · orchestration on · Orca CLI + orchestration skill available · git.
+**Repo state:** real code → foundation fills gaps, green baseline tests · empty/near-empty git repo →
+foundation scaffolds · no git repo → `git init` + minimal README/.gitignore commit on default, then a
+remote (existing, or private `gh repo create` after human confirm) for write preflight; local-only
+hosts take the offline lane and stop at BASE.
 
 Then `runtime/scripts/preflight.py --mission ship-it --base <BASE> --fork-point <ledger-header sha>` green (BASE ≠
 default — dispatch-lifecycle.md; requires `gh` + a visible remote, or `--offline --default <branch>`
-for the no-gh lane from unit one). If `gh` later dies mid-run, use merge-serialization no-gh local
-merge (`PR_OPEN=n/a`); either way the run stops at BASE with the promotion PR owed. Ledger: header +
-phase marker + unit boolean flags (ledger-contract.md).
+for the no-gh lane from unit one). If `gh` dies mid-run, use merge-serialization local merge
+(`PR_OPEN=n/a`); either way stop at BASE owing the promotion PR. Ledger: header + phase marker + unit
+boolean flags (ledger-contract.md).
 
 ## Pipeline (one canonical path after freeze)
 
 ```
-ENTRY ─┬─ frozen spec  → VALIDATE (decide-and-freeze: validate branch) → DECOMPOSE
-       ├─ intent/draft → GRILL + FREEZE (decide-and-freeze: grill branch, human gate #1) → DECOMPOSE
-       └─ map-it handoff (frozen spec + frozen prepared DAG) → VALIDATE the freeze, re-run
-          decompose-dag's VERIFY section on the prepared DAG, ADOPT its task ids — skip DECOMPOSE
-          (re-decomposing would duplicate or orphan the prepared tasks)
+REFUSE-IF-QUARANTINED (runtime/scripts/preflight.py --mode readonly --mission ship-it)
+   → ENTRY ─┬─ frozen spec  → VALIDATE (decide-and-freeze: validate branch) → DECOMPOSE
+            ├─ intent/draft → GRILL + FREEZE (decide-and-freeze: grill branch, human gate #1) → DECOMPOSE
+            └─ map-it handoff (frozen spec + frozen prepared DAG) → VALIDATE the freeze, re-run decompose-dag's
+               VERIFY section on the prepared DAG, ADOPT its task ids — skip DECOMPOSE (would duplicate/orphan tasks)
    → DECOMPOSE (decompose-dag: tracer-bullet slices → Orca DAG; read orca-dag-semantics.md here — it
      is the DAG phase's doc, not standing load) — first two routes only
    → BUILD waves (build-change per slice; foundation serializes, slices parallelize under
@@ -93,9 +92,8 @@ ENTRY ─┬─ frozen spec  → VALIDATE (decide-and-freeze: validate branch) �
    → REFLECT (`compound-learn` + readiness/backlog/OPS queue — ledger-contract.md)
 ```
 
-Each phase runs its playbook; each worker emits an evidence manifest; the coordinator verifies each
-against authoritative state (evidence-manifest.md) before advancing. Unit flags advance only in the
-ledger file (`BUILD_DONE`…`WT_CLEAN`).
+Each phase runs its playbook; each worker emits a manifest; the coordinator verifies each against
+authoritative state (evidence-manifest.md) before advancing. Unit flags advance only in the ledger (`BUILD_DONE`…`WT_CLEAN`).
 
 ## Convergence proof (this mission's definition of done)
 
@@ -110,7 +108,7 @@ ledger file (`BUILD_DONE`…`WT_CLEAN`).
   (revert-audited on a ≥10% sample by a fresh worker).
 - The manifest names the terminal release state with its evidence (merge SHA / deploy revision /
   canary window verdict). Reaching BASE with an open promotion PR is `PROMOTION_READY`, never RELEASED.
-- Noticed-but-not-touched adjacent work is a backlog file (scope discipline made visible).
+- Noticed adjacent work goes to a backlog file (visible scope discipline).
 - Every unit row: boolean flags true or an allowed park (`CODE_CLOSED` + `VERIFY_AT_SCALE` plan
   when acceptance is OPS-only — never a silent full close).
 

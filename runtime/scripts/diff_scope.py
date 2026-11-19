@@ -476,10 +476,17 @@ def _normalize_overlap_units(raw):
     return units
 
 
+def _strip_dot_slash(pattern):
+    p = pattern.strip()
+    while p.startswith("./"):
+        p = p[2:]
+    return p
+
+
 def _glob_intersects(pa, pb):
     """True when two glob/path patterns can match at least one common path."""
-    a = pa.strip().lstrip("./")
-    b = pb.strip().lstrip("./")
+    a = _strip_dot_slash(pa)
+    b = _strip_dot_slash(pb)
     if not a or not b:
         return False
     if a == b or fnmatch.fnmatchcase(a, b) or fnmatch.fnmatchcase(b, a):
@@ -494,6 +501,15 @@ def _glob_intersects(pa, pb):
         if i == la and j == lb:
             return True
         nxt = []
+        # Zero-segment globstar: `/**/` collapses to `/`, and leading `**/` collapses to `` (#781).
+        if a.startswith("/**/", i):
+            nxt.append((i + 3, j))
+        if i == 0 and a.startswith("**/", i):
+            nxt.append((i + 3, j))
+        if b.startswith("/**/", j):
+            nxt.append((i, j + 3))
+        if j == 0 and b.startswith("**/", j):
+            nxt.append((i, j + 3))
         if i < la and a[i] == "*":
             is_globstar = (i + 1 < la and a[i + 1] == "*") or (i > 0 and a[i - 1] == "*")
             nxt.append((i + 1, j))
@@ -664,6 +680,15 @@ def build_parser():
     return p
 
 
+_SHELL_COMMENT_CTRL_RE = re.compile(r"[\r\n\x00-\x1f\x7f]")
+
+
+def _shell_comment(text):
+    """Escape control bytes and line breaks so a `# ...` comment in shell output can never break
+    onto a new executable line (#781)."""
+    return _SHELL_COMMENT_CTRL_RE.sub(lambda m: f"\\x{ord(m.group(0)):02x}", str(text))
+
+
 def main(argv=None):
     args = build_parser().parse_args(argv)
     repo = Path(args.repo)
@@ -683,7 +708,7 @@ def main(argv=None):
                                   "error": err.kind, "detail": str(err)}))
             else:
                 print(f"SCOPE_ERROR={err.kind}")
-                print(f"# {err}")
+                print(f"# {_shell_comment(err)}")
             return EXIT_SCOPE_ERROR
         print(json.dumps(res))
         return EXIT_OK if res["clean"] else EXIT_PREDICTED_CONFLICT
@@ -697,21 +722,23 @@ def main(argv=None):
                 print(json.dumps({"overlaps": [], "deps": {}, "error": err.kind}, indent=2))
             else:
                 print(f"SCOPE_ERROR={err.kind}")
-                print(f"# {err}")
+                print(f"# {_shell_comment(err)}")
             return EXIT_SCOPE_ERROR
         except ScopeError as err:
             if args.json:
                 print(json.dumps({"overlaps": [], "deps": {}, "error": err.kind}, indent=2))
             else:
                 print(f"SCOPE_ERROR={err.kind}")
-                print(f"# {err}")
+                print(f"# {_shell_comment(err)}")
             return EXIT_SCOPE_ERROR
         if args.json:
             print(json.dumps({"overlaps": overlaps, "deps": deps, "error": None}, indent=2))
         else:
             print(f"OVERLAP_COUNT={len(overlaps)}")
             for item in overlaps:
-                print(f"# overlap: {item['blocker']} -> {item['blocked']} ({', '.join(item['shared'])})")
+                shared = ", ".join(item["shared"])
+                print(f"# overlap: {_shell_comment(item['blocker'])} -> "
+                      f"{_shell_comment(item['blocked'])} ({_shell_comment(shared)})")
         return EXIT_OK
 
     try:
@@ -727,9 +754,9 @@ def main(argv=None):
                 print(line)
             print(f"SCOPE_ERROR={err.kind}")
             if err.kind == "no_base":
-                print(f"# base ref '{err}' is not resolvable — shallow checkout or missing fetch. Run: git fetch origin")
+                print(f"# base ref '{_shell_comment(err)}' is not resolvable — shallow checkout or missing fetch. Run: git fetch origin")
             else:
-                print(f"# {err}; no scope verdict is available")
+                print(f"# {_shell_comment(err)}; no scope verdict is available")
         return EXIT_SCOPE_ERROR
 
     # #314: `unmatched` used to be an error only when NOTHING matched, and the paths printed only
@@ -750,7 +777,7 @@ def main(argv=None):
         if error:
             print("SCOPE_ERROR=unmatched")
         for path in unmatched[:50]:
-            print(f"# unmatched: {path}")
+            print(f"# unmatched: {_shell_comment(path)}")
     return EXIT_SCOPE_ERROR if error else EXIT_OK
 
 

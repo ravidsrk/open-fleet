@@ -1,17 +1,18 @@
 # Coverage measurement for the D9 (coverage) floor constraint (CONSTRAINTS.md).
 # The frozen gate is `coverage combine` over the per-shard parallel-mode
 # data files (each matrix job traces its own shard, then uploads it) followed
-# by `coverage report`: default line coverage over scripts/ + runtime/scripts/,
-# failing below 80 (fail_under). Collection fanned out; the bar did not move.
+# by `coverage report`: default line coverage over scripts/, runtime/scripts/ and
+# runtime/providers/, failing below 80 (fail_under). Collection fanned out; the bar did not move.
 # No excludes: the bar is the raw line number.
 # Both stanzas are load-bearing: [run] source scopes what future collections
 # track, [report] include scopes what the report counts (source alone does not
 # filter data collected without it — verified during the CONSTRAINTS prove-fires).
 [run]
-source = scripts,runtime/scripts
+source = scripts,runtime/scripts,runtime/providers
 
 [report]
 include =
     scripts/*
     runtime/scripts/*
+    runtime/providers/*
 fail_under = 80

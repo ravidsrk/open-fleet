@@ -491,5 +491,53 @@ class BindCheckPureHelpers(unittest.TestCase):
         self.assertEqual(bind_check.normalize_tier("ExternalRun"), "externalrun")
 
 
+class BindCheckCustodyAndNonAsciiAndBase(BindCheckPrRange):
+    """Regression pins for #766 (gitexec custody floor) and #784 (-z non-ASCII diff + base forwarding)."""
+
+    def test_non_ascii_report_path_is_not_c_quoted_or_skipped(self):
+        # core.quotePath=true is git's default; without -z, non-ASCII filenames were C-quoted and
+        # missed by is_core_path() / header_of().
+        _git(self.repo, "config", "core.quotePath", "true")
+        rel = f"docs/runs/{DATE}-{MISSION}-café-self-run.md"
+        (self.repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (self.repo / rel).write_text(
+            f"# Run report\n\nRUN: mission={MISSION} tier={TIER} inventory_at={self.base} "
+            f"manifest={MANIFEST} verifier=GREEN\n",
+            encoding="utf-8",
+        )
+        _commit(self.repo, "non-ascii report")
+        entries = bind_check.changed_entries(self.repo, self.base)
+        self.assertIn(("A", rel), entries)
+        code, out = self._run()
+        self.assertEqual(code, 1, out)
+        self.assertIn(rel, out)
+
+    def test_repo_local_fsmonitor_does_not_execute_during_changed_entries(self):
+        fired = self.repo / "fsmonitor-fired.txt"
+        _git(self.repo, "config", "core.fsmonitor", f"sh -c 'echo FIRED > {fired}; true'")
+        entries = bind_check.changed_entries(self.repo, self.base)
+        self.assertEqual(entries, [])
+        self.assertFalse(fired.exists(), "repo-local core.fsmonitor executed through bind_check")
+
+    def test_base_is_forwarded_to_run_report_check_report(self):
+        import os
+        from unittest import mock
+
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", self.base)
+        self._bound_core(with_envelope=True)
+        seen_bases = []
+        orig = bind_check.run_report.check_report
+
+        def spy(*args, **kwargs):
+            seen_bases.append(kwargs.get("base"))
+            return orig(*args, **kwargs)
+
+        with mock.patch.object(bind_check.run_report, "check_report", side_effect=spy), \
+             mock.patch.dict(os.environ, {"ORCA_PROVENANCE": "ci"}):
+            code, out = self._run(base="origin/main")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(seen_bases, ["refs/remotes/origin/main"])
+
+
 if __name__ == "__main__":
     unittest.main()

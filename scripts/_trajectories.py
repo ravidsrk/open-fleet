@@ -1625,14 +1625,14 @@ def _gitexec():
 
 def live_git(workspace):
     """A git reader for a live workspace the agent controlled: gitexec.py's absolute git and
-    hardened environment plus the replay's own overrides, no stdin, so a hook or command channel
-    the agent planted in its repository's config runs nothing. git(*args) -> stdout bytes."""
+    custody-hardened environment plus the replay's own overrides, no stdin, so a hook or command
+    channel the agent planted in its repository's config runs nothing. git(*args) -> stdout bytes."""
     gx = _gitexec()
     flags = [arg for pair in _GIT_OVERRIDES for arg in ("-c", pair)]
 
     def git(*args):
         result = subprocess.run(gx.argv("-C", str(workspace), *flags, *args), capture_output=True,
-                                stdin=subprocess.DEVNULL, env=gx.env(), timeout=60)
+                                stdin=subprocess.DEVNULL, env=gx.custody_env(), timeout=60)
         if result.returncode != 0:
             raise RuntimeError(f"git {args[0]} failed: {result.stderr.decode(errors='replace')}")
         return result.stdout

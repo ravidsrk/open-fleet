@@ -320,13 +320,9 @@ def measured_cost(stream):
 
 
 def model_flag(argv):
-    """The --model value an agent command already carries, or None."""
-    for i, token in enumerate(argv):
-        if token == "--model" and i + 1 < len(argv):
-            return argv[i + 1]
-        if token.startswith("--model="):
-            return token.split("=", 1)[1]
-    return None
+    """The first --model value an agent command carries, or None (delegates to _ablation_run.model_flags)."""
+    found = guard().model_flags(argv)
+    return found[0] if found else None
 
 
 def init_line(stream):
@@ -401,10 +397,24 @@ def preflight(args, eval_mod, data):
                                         ("--harness-version", args.harness_version)) if not value]
     if missing:
         raise refused(f"a live run records {', '.join(missing)}")
-    carried = model_flag(shlex.split(args.agent_cmd))
-    if carried is not None and carried != args.model:
+    g = guard()
+    try:
+        agent_argv = shlex.split(args.agent_cmd)
+    except ValueError as err:
+        raise refused(f"the agent command cannot be parsed: {err}") from err
+    if not agent_argv:
+        raise refused("a live run needs a non-empty --agent-cmd")
+    problem = g.terminator_problem(agent_argv)
+    if problem:
+        raise refused(f"the agent command {problem}")
+    wrong = sorted({named for named in g.model_flags(agent_argv) if named != args.model})
+    if wrong:
         raise refused(f"--model {args.model} disagrees with the agent command's --model "
-                      f"{carried}: the results would name a model the agent was not asked for")
+                      f"{', '.join(wrong)}: the results would name a model the agent was not asked for")
+    fallback = sorted({named for named in g.model_flags(agent_argv, "--fallback-model") if named != args.model})
+    if fallback:
+        raise refused(f"the agent command names --fallback-model {', '.join(fallback)}: the call "
+                      f"could switch off {args.model} mid-run, and the results name one model")
     if not args.agent_limit_flag:
         raise refused("a live run needs a per-call spend limit (--agent-limit-flag): without one "
                       "a call's worst case is unbounded, so no cap can be enforced before the spend")
@@ -501,7 +511,7 @@ def _run_holding(args, eval_mod, engine, data, cases, out, unrun, runnable, cell
     limit = call_limit(reserve, args.limit_fraction)
     agent = g.absolute_argv(shlex.split(args.agent_cmd))
     # The agent is told the model the results will name, unless its command already says so.
-    model_args = [] if model_flag(agent) else ["--model", args.model]
+    model_args = [] if g.model_flags(agent) else ["--model", args.model]
     ctx = {"run": run_dir, "data": data, "engine": engine, "eval": eval_mod, "contract": contract,
            "agent": agent, "model_args": model_args, "limit": limit, "args": args, "ledger": ledger, "reserve": reserve,
            "timeout": args.timeout or TIMEOUT_S, "active": None}

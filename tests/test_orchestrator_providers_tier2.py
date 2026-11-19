@@ -1022,7 +1022,7 @@ class TestMulticlaude(Base):
         settings = json.loads((Path(res["worktree"]) / ".claude" / "settings.json").read_text())
         self.assertEqual(settings["permissions"]["deny"][:4], ["Edit", "Write", "MultiEdit", "NotebookEdit"])
         self.assertIn("exit 2", settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"])
-        self.assertIn("Stop", settings["hooks"])  # the repo's own hooks survive
+        self.assertNotIn("Stop", settings["hooks"])  # untrusted repo hooks are stripped (#774)
         self.assertEqual(json.loads((self.repo_src / ".multiclaude" / "hooks.json").read_text()), user_hooks)  # restored
         self.fake.copy_hooks = False
         with self.assertRaises(ProviderError) as ctx:

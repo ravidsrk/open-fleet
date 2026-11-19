@@ -7,6 +7,10 @@ re-export, `_failure_signature`). Private module: import through
 import re
 
 
+# ANSI CSI/OSC escape sequences (color/cursor codes, hyperlinks) stripped before matching so
+# colored output cannot defeat line-anchored stillborn patterns or split markers (#768).
+_ANSI_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))")
+
 # A control run that dies before the oracle ever executes is a STILLBORN MUTANT, not a kill: the
 # non-zero exit is the module failing to load, so it would be non-zero for any command at all.
 # Vera-Pérez et al. 2018 and Niedermayr et al. 2016 are explicit that only a mutant the test suite
@@ -15,6 +19,7 @@ STILLBORN_MARKERS = (
     "importerror", "modulenotfounderror", "syntaxerror", "indentationerror",
     "cannot import name", "error collecting", "collection error", "unable to import",
     "no module named", "failed to load", "conftest.py", "attributeerror: module",
+    "cannot find module", "could not compile",
 )
 # What a real oracle failing looks like, across the runners the catalog's missions actually drive.
 ASSERTION_MARKERS = (
@@ -28,12 +33,13 @@ ASSERTION_MARKERS = (
 # never ran, so an unanchored "assert " let a stillborn mutant through (PR #308 review, round 3).
 # `AssertionError` at the head of a line is an exception that was RAISED; a failed import cannot
 # produce one. pytest prefixes the failing assertion with `E`, and never the source it quotes.
+# Unanchored `✗`/`✕` are NOT strong assertion evidence (Jest/Mocha print them on any failing test,
+# including import/load errors), so they stay in ASSERTION_MARKERS only (#768).
 STRONG_ASSERTION_RE = re.compile(
     r"^[ \t]*(?:e[ \t]+)?assertionerror\b"      # AssertionError raised (pytest prefixes E)
     r"|^[ \t]*e[ \t]+assert\b"                   # pytest's failing assertion line
     r"|^[ \t]*e[ \t]+failed: did not raise\b"    # pytest.raises evaluated and was not satisfied
-    r"|^[ \t]*thread .*panicked at"               # Rust
-    r"|✗|✕",
+    r"|^[ \t]*thread .*panicked at",             # Rust
     re.M,
 )
 # A load failure the runner actually REPORTED, as opposed to a stillborn word merely appearing.
@@ -103,7 +109,7 @@ def _failure_signature(out, err):
     AssertionError, and Jest marks a test whose require blew up `✕` like any other. The control
     must leave the code loadable; narrow the mutant or the bound command until only an assertion
     fails."""
-    text = f"{out}\n{err}".lower()
+    text = _ANSI_RE.sub("", f"{out}\n{err}").lower()
     if not text.strip():
         return False, ("the control run produced NO output at all. A silent non-zero exit is not a "
                        "failing test — it is what `grep` does when it finds nothing; fail-closed "

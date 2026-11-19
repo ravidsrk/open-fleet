@@ -1707,7 +1707,7 @@ class TestParentProfileNarrowing(unittest.TestCase):
                             ' *) echo \'{"result":{"state":"ready","dispatchId":"d1","launch":{"effective":"claude -p --dangerously-skip-permissions"}}}\' ;; esac\n')
             stub.chmod(0o755)
             env = {**UNVERIFIED_OK, "PATH": f"{tmp}:/usr/bin:/bin", "SP": tmp, "HOME": tmp, "SPAWN_ROOT_WAIT_SECS": "0", "OPEN_FLEET_RUNTIME": "posix",
-                   "ORCA_CLI_COMMAND": str(stub), "PROFILE": "rw",
+                   "OPEN_FLEET_CLI_COMMAND": str(stub), "PROFILE": "rw",
                    "ORCA_COORD_ALLOW_AUTONOMOUS_WRITE": "1", "OPEN_FLEET_SANDBOX_PROFILE": "rw",
                    "OPEN_FLEET_PARENT_PROFILE": "danger"}
             p = subprocess.run(["bash", str(SPAWN), "task_x", "new-child", "t", "claude"],
@@ -1940,7 +1940,7 @@ class TestTheCapReachesTheWorkerOnOrca(unittest.TestCase):
                             ' *) echo \'{"result":{"state":"ready","dispatchId":"d1","launch":{"effective":"claude -p --permission-mode plan"}}}\' ;; esac\n')
             stub.chmod(0o755)
             env = {**UNVERIFIED_OK, "PATH": f"{tmp}:/usr/bin:/bin", "SP": tmp, "HOME": tmp, "SPAWN_ROOT_WAIT_SECS": "0", "OPEN_FLEET_RUNTIME": "posix",
-                   "ORCA_CLI_COMMAND": str(stub), "PROFILE": "ro", "OPEN_FLEET_WORKER_ID": "w1"}
+                   "OPEN_FLEET_CLI_COMMAND": str(stub), "PROFILE": "ro", "OPEN_FLEET_WORKER_ID": "w1"}
             p = subprocess.run(["bash", str(SPAWN), "task_x", "path:/tmp/of-wt", "t", "claude"],
                                env=env, capture_output=True, text=True)
             ws = next((ln for ln in log.read_text().splitlines() if "worker-start" in ln), "")
@@ -3323,7 +3323,7 @@ esac
 """)
             stub.chmod(0o755)
             env = {**UNVERIFIED_OK, "PATH": f"{tmp}:/usr/bin:/bin", "SP": tmp, "HOME": os.environ["HOME"], "OPEN_FLEET_RUNTIME": "posix",
-                   "ORCA_CLI_COMMAND": str(stub), "PROFILE": "danger",
+                   "OPEN_FLEET_CLI_COMMAND": str(stub), "PROFILE": "danger",
                    "ORCA_COORD_ALLOW_AUTONOMOUS_WRITE": "1", "ORCA_COORD_ALLOW_DANGER": "1",
                    "ORCA_SANDBOX_RECIPE": "lane-7"}
             env.update(extra)
@@ -3447,8 +3447,8 @@ esac
             repo = _git_repo(tmp)
             created = str(Path(tmp) / "wts" / "unit-1")
             stub, log = self.stub(tmp, created)
-            env = {"PATH": f"{tmp}:/usr/bin:/bin", "HOME": tmp, "SP": tmp, "OPEN_FLEET_RUNTIME": "posix",
-                   "ORCA_CLI_COMMAND": str(stub), "PROFILE": "ro"}
+            env = {**UNVERIFIED_OK, "PATH": f"{tmp}:/usr/bin:/bin", "HOME": tmp, "SP": tmp, "OPEN_FLEET_RUNTIME": "posix",
+                   "OPEN_FLEET_CLI_COMMAND": str(stub), "PROFILE": "ro"}
             if print_launch:
                 env["SW_PRINT_LAUNCH"] = "1"
             env.update(extra or {})
@@ -3472,7 +3472,11 @@ esac
     def test_new_child_is_created_through_the_runtime_first(self):
         for selector in ("new-child", "new-top-level"):
             with self.subTest(selector=selector):
-                p, launch, calls, repo, created = self.run_spawn(selector)
+                p_dry, _dry_launch, dry_calls, _dry_repo, _dry_created = self.run_spawn(selector, print_launch=True)
+                self.assertEqual(p_dry.returncode, 0, p_dry.stderr)
+                self.assertNotIn("worktree create", dry_calls)
+                p, _unused, calls, repo, created = self.run_spawn(selector, print_launch=False)
+                launch = provider_base.build_harness_command("codex", "ro", created)["shell"]
                 self.assertEqual(p.returncode, 0, p.stderr)
                 self.assertIn(f"-C {created} ", launch)
                 self.assertNotIn(selector, launch)
@@ -3508,8 +3512,8 @@ esac
             (Path(tmp) / "ws.json").write_text(json.dumps({"result": {
                 "state": "ready", "dispatchId": "d1",
                 "launch": {"effective": {"args": "--dangerously-bypass-approvals-and-sandbox"}}}}))
-            env = {"PATH": f"{tmp}:/usr/bin:/bin", "HOME": tmp, "SP": tmp, "OPEN_FLEET_RUNTIME": "posix",
-                   "ORCA_CLI_COMMAND": str(stub), "PROFILE": "ro"}
+            env = {**UNVERIFIED_OK, "PATH": f"{tmp}:/usr/bin:/bin", "HOME": tmp, "SP": tmp, "OPEN_FLEET_RUNTIME": "posix",
+                   "OPEN_FLEET_CLI_COMMAND": str(stub), "PROFILE": "ro"}
             p = subprocess.run(["bash", str(SPAWN), "task_x", "current", "t", "codex", "high"],
                                env=env, capture_output=True, text=True, cwd=str(repo))
             self.assertEqual(p.returncode, 5, p.stdout + p.stderr)
@@ -3851,7 +3855,7 @@ class TestTheSpendCapReachesTheLaunch(unittest.TestCase):
             with self.subTest(profile=profile), \
                     mock.patch.dict(os.environ, {"OPEN_FLEET_MAX_BUDGET_USD": "2.50"}):
                 launch = provider_base.build_harness_command("claude", profile, "/tmp/w", "the task")
-                self.assertEqual(launch["argv"][-3:], ["--max-budget-usd", "2.50", "the task"])
+                self.assertEqual(launch["argv"][-4:], ["--max-budget-usd", "2.50", "--", "the task"])
                 self.assertIn("-p", launch["argv"])
                 # The label is an interactive command (gastown's alias, superset's record), where
                 # the flag does nothing: it must not claim a cap.
@@ -3957,6 +3961,102 @@ class TestTheSpendCapReachesTheLaunch(unittest.TestCase):
             "OPEN_FLEET_MAX_BUDGET_USD": "5"})
         self.assertNotIn("no spend cap", err)
         self.assertNotIn("not carried", err)
+
+
+class TestAdversarialReview775And788(unittest.TestCase):
+    """Regressions for #775 (split-brain CLI override, require-budget parsing, receipt budget check)
+    and #788 (deferred ro new-* worktree creation)."""
+
+    RW = {"ORCA_COORD_ALLOW_AUTONOMOUS_WRITE": "1"}
+
+    def test_775_external_cli_override_gets_no_provider_exemption_or_budget_reach(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = Path(tmp) / "fake-cli"
+            stub.write_text('#!/bin/sh\necho \'{"result": {"tasks": [{"id": "t1", "status": "ready"}]}}\'\n', encoding="utf-8")
+            stub.chmod(0o755)
+            # Without ORCA_DENY_HOOK_SETTINGS or ALLOW_UNVERIFIED, an external OPEN_FLEET_CLI_COMMAND
+            # under OPEN_FLEET_RUNTIME=posix must NOT receive posix's provider-deferred exemption:
+            env = {
+                "PATH": f"{tmp}:/usr/bin:/bin", "HOME": tmp, "SP": tmp,
+                "SPAWN_ROOT_WAIT_SECS": "0", "OPEN_FLEET_RUNTIME": "posix",
+                "OPEN_FLEET_CLI_COMMAND": str(stub), "PROFILE": "rw", **self.RW,
+            }
+            p = subprocess.run(["bash", str(SPAWN), "t1", "current", "t", "claude"],
+                               env=env, capture_output=True, text=True)
+            self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+            self.assertIn("SPAWN=REFUSED", p.stderr)
+            self.assertIn("deny-hook arming UNVERIFIED", p.stderr)
+
+            # Nor does an external CLI override get _cap_reaches=1 under OPEN_FLEET_REQUIRE_BUDGET=1:
+            env_b = {**env, **UNVERIFIED_OK, "OPEN_FLEET_REQUIRE_BUDGET": "1", "OPEN_FLEET_MAX_BUDGET_USD": "5"}
+            p_b = subprocess.run(["bash", str(SPAWN), "t1", "current", "t", "claude"],
+                                 env=env_b, capture_output=True, text=True)
+            self.assertEqual(p_b.returncode, 2, p_b.stdout + p_b.stderr)
+            self.assertIn("no spend cap reaches this worker", p_b.stderr)
+
+    def test_775_require_budget_fail_closed_boolean_parsing(self):
+        for bad in ("maybe", "2", "truthy", "enabled"):
+            with self.subTest(val=bad):
+                rc, _launch, err = run_launch("claude", "rw", {**self.RW, "OPEN_FLEET_REQUIRE_BUDGET": bad})
+                self.assertEqual(rc, 2, err)
+                self.assertIn("SPAWN=REFUSED", err)
+                self.assertIn("not a recognized boolean", err)
+        for truthy in ("true", "YES", "on"):
+            with self.subTest(val=truthy):
+                rc, _launch, err = run_launch("claude", "rw", {**self.RW, "OPEN_FLEET_REQUIRE_BUDGET": truthy})
+                self.assertEqual(rc, 2, err)
+                self.assertIn("no spend cap", err)
+        for falsy in ("false", "NO", "off"):
+            with self.subTest(val=falsy):
+                rc, _launch, err = run_launch("claude", "rw", {**self.RW, "OPEN_FLEET_REQUIRE_BUDGET": falsy})
+                self.assertEqual(rc, 0, err)
+
+    def test_775_budget_flag_must_appear_in_launch_effective_on_posix_claude(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _git_repo(tmp)
+            env = {
+                "PATH": "/usr/bin:/bin", "HOME": tmp, "SP": tmp,
+                "OPEN_FLEET_RUNTIME": "posix",
+                "OPEN_FLEET_STATE_DB": str(Path(tmp) / "state" / "s.db"),
+                "OPEN_FLEET_POSIX_BACKEND": "dry-run",
+                "PROFILE": "ro",
+                "OPEN_FLEET_MAX_BUDGET_USD": "2.50",
+                "OPEN_FLEET_REQUIRE_BUDGET": "true",
+            }
+            p = subprocess.run(
+                ["bash", str(SPAWN), "--spec", "budgeted review", "new-child", "rev", "claude", "high"],
+                env=env, capture_output=True, text=True, cwd=str(repo),
+            )
+            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+            eff = json.loads(next(ln for ln in p.stdout.splitlines()
+                                  if ln.startswith("LAUNCH_EFFECTIVE="))[len("LAUNCH_EFFECTIVE="):])
+            self.assertIn("--max-budget-usd 2.50", eff["command"])
+
+    def test_788_refused_ro_new_child_never_creates_worktree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _git_repo(tmp)
+            log = Path(tmp) / "calls.log"
+            stub = Path(tmp) / "fake-cli"
+            stub.write_text(
+                f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{log}"\n'
+                'case "$*" in *task-list*) echo \'{"result":{"tasks":[{"id":"task_pend","status":"pending"}]}}\' ;;'
+                ' *) echo \'{"result":{"worktree":{"path":"/tmp/should-not-create"}}}\' ;; esac\n',
+                encoding="utf-8",
+            )
+            stub.chmod(0o755)
+            env = {
+                **UNVERIFIED_OK, "PATH": f"{tmp}:/usr/bin:/bin", "HOME": tmp, "SP": tmp,
+                "OPEN_FLEET_RUNTIME": "posix", "OPEN_FLEET_CLI_COMMAND": str(stub),
+                "PROFILE": "ro",
+            }
+            p = subprocess.run(
+                ["bash", str(SPAWN), "task_pend", "new-child", "rev", "codex", "high"],
+                env=env, capture_output=True, text=True, cwd=str(repo),
+            )
+            self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+            self.assertIn("status=pending", p.stderr)
+            calls = log.read_text(encoding="utf-8") if log.exists() else ""
+            self.assertNotIn("worktree create", calls)
 
 
 if __name__ == "__main__":

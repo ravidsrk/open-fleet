@@ -59,14 +59,21 @@ Exit codes
     2  usage — a missing or malformed argument, or an event the schema refuses
     3  fail-closed — the record is unwritable, unreadable, tampered or schema-invalid
 """
+import sys
+
+if (__name__ == "__main__" and not getattr(sys.flags, "safe_path", False) and sys.path
+        and ("os" not in sys.modules or sys.modules["os"].path.realpath(sys.path[0])
+             == sys.modules["os"].path.dirname(sys.modules["os"].path.realpath(__file__)))):
+    del sys.path[0]
+
 import argparse
 import fcntl
 import importlib.util
 import json
+import math
 import os
 import re
 import stat
-import sys
 from datetime import datetime, timezone
 from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 from fractions import Fraction
@@ -1473,7 +1480,7 @@ def cmd_ingest_transcript(args):
 
 
 def _money(value):
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
         return None
     return format(Decimal(str(value)), "f")
 

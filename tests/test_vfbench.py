@@ -8,6 +8,8 @@ fooled by at least one (else there is no contrast), and the sound gate still pas
 """
 import ast
 import contextlib
+import copy
+import hashlib
 import importlib.util
 import io
 import json
@@ -293,8 +295,12 @@ class VFBenchReviewLeg(unittest.TestCase):
         cls.trap = next(t for t in vfbench.load_traps() if t["class"] == "review-fetch-fail-closed")
 
     def _run_verify(self, env=None):
+        manifest = copy.deepcopy(self.trap["manifest"])
+        for entry in manifest.get("commands") or ():
+            if isinstance(entry, dict) and isinstance(entry.get("cmd"), str) and not entry.get("cmd_sha256"):
+                entry["cmd_sha256"] = hashlib.sha256(entry["cmd"].encode("utf-8")).hexdigest()
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
-            json.dump(self.trap["manifest"], fh)
+            json.dump(manifest, fh)
             path = fh.name
         try:
             return subprocess.run(
