@@ -378,6 +378,14 @@ def _restore_hints(hints):
     return hints
 
 
+def _project_hints_bundle(bundle):
+    return {"hints": _project_hints(bundle["hints"]), "counts": bundle["counts"]}
+
+
+def _restore_hints_bundle(data):
+    return _restore_hints(data["hints"]), data.get("counts")
+
+
 def _decode(data):
     """A JSON result from a contained scan, or None when it is past RESULT_BYTES or holds more than
     RESULT_VALUES structural bytes: both checked before it is decoded, so the parent's decode is
@@ -828,6 +836,20 @@ def _structured_tokens(unit):
     return out
 
 
+def _prior_hints_with_counts(clean_paths, rdir, live=None, observations=(), mode="current"):
+    """(hints, raw_counts): every manifest unit whose path tokens match a query path, assessed,
+    ranked, and currency-filtered/deferred BEFORE MAX_HINTS / RESULT_BYTES truncation (#780)."""
+    if not (rdir.is_dir() and clean_paths):
+        return [], None
+    return _contained(
+        _judged_hints_bundle,
+        (clean_paths, rdir, live, observations, mode),
+        ([], None),
+        _project_hints_bundle,
+        _restore_hints_bundle,
+    )
+
+
 def _prior_hints(clean_paths, rdir, live=None, observations=()):
     """Every manifest unit whose path tokens match a query path, with its provenance assessed and its
     currency label computed. The manifests are untrusted bytes, read, parsed AND judged in a
@@ -835,14 +857,14 @@ def _prior_hints(clean_paths, rdir, live=None, observations=()):
     supersession) run there on the whole record, so nothing a projection cap leaves out can be what
     a label was decided on (Codex round 12 on 419a8435: the 33rd evidence artifact, cut, was never
     checked); only display data and the label cross back."""
-    if not (rdir.is_dir() and clean_paths):
-        return []
-    return _contained(_judged_hints, (clean_paths, rdir, live, observations), [], _project_hints, _restore_hints)
+    return _prior_hints_with_counts(clean_paths, rdir, live, observations)[0]
 
 
-def _judged_hints(clean_paths, rdir, live, observations):
+def _judged_hints(clean_paths, rdir, live, observations, mode="current"):
     """_scan_manifests' hints, each assessed against the live source, superseded where a newer
-    record or the current evidence contradicts it, and labelled (hint_provenance.verdict)."""
+    record or the current evidence contradicts it, labelled (hint_provenance.verdict), and ranked
+    (with STALE/SUPERSEDED deferred behind active hints in _rank_key / round-robin order) BEFORE
+    _project_hints applies MAX_HINTS and RESULT_BYTES truncation (#780)."""
     prior = _scan_manifests(clean_paths, rdir)
     archive = hp.Archive(rdir) if prior else None
     for hint in prior:
@@ -855,7 +877,19 @@ def _judged_hints(clean_paths, rdir, live, observations):
     hp.supersede(prior, live, observations)
     for hint in prior:
         hint["currency"], hint["why"] = hp.verdict(hint["reasons"])
-    return prior
+    active = [h for h in prior if h["currency"] not in hp.SUPPRESSED]
+    suppressed = [h for h in prior if h["currency"] in hp.SUPPRESSED]
+    if mode == "current":
+        return _round_robin(sorted(active, key=_rank_key)) + _round_robin(sorted(suppressed, key=_rank_key))
+    return _round_robin(sorted(prior, key=_rank_key))
+
+
+def _judged_hints_bundle(clean_paths, rdir, live, observations, mode="current"):
+    ordered = _judged_hints(clean_paths, rdir, live, observations, mode)
+    counts = {label: sum(1 for h in ordered if h["currency"] == label)
+              for label in (hp.CURRENT, hp.UNKNOWN, hp.STALE, hp.SUPERSEDED)}
+    counts["total"] = len(ordered)
+    return {"hints": ordered, "counts": counts}
 
 
 def _scan_manifests(clean_paths, rdir):
@@ -1036,6 +1070,25 @@ def _render_label(hint, withhold, blank=False):
     return f"{hint['currency']}:{_reason(hint['why'][0], 80, withhold, blank)}{extra}"
 
 
+_STRAY_QUOTES = re.compile(r"[\"'`“”‘’]")
+
+
+def _balance_field_quotes(text):
+    """Strip unmatched quote characters outside intra-field quoted spans so a quote opened in one
+    field (e.g. title) cannot close in another (e.g. snippet) and disguise a cross-field claim
+    from _decided_as_shown() (#780)."""
+    s = str(text or "")
+    out, pos = [], 0
+    for m in guard_text.QUOTED_SPAN.finditer(s):
+        if m.start() > pos:
+            out.append(_STRAY_QUOTES.sub(" ", s[pos:m.start()]))
+        out.append(m.group(0))
+        pos = m.end()
+    if pos < len(s):
+        out.append(_STRAY_QUOTES.sub(" ", s[pos:]))
+    return "".join(out)
+
+
 def _decided_as_shown(compose, hint, withhold):
     """Render an entry line, then decide on the line as shown: fields that pass one by one can
     still read as a claim once the line joins them -- a session title `Deployment approved` and
@@ -1068,7 +1121,8 @@ def _render_prior(hint, withhold):
 
 def _compose_prior(hint, withhold, blank, found=None):
     """(line, probe) for a prior-run entry. The probe is the line as shown, unlabelled, with the
-    trusted match-field name neutral (`scope_allow:` is a permission-key shape itself)."""
+    trusted match-field name neutral (`scope_allow:` is a permission-key shape itself) and
+    unmatched quotes stripped per field so no quote spans across field boundaries."""
     def ident(value, limit, status=False):
         return "(withheld)" if blank else _ident(value, limit, withhold, status=status)
     run_s, uid, status = ident(hint["run"], 48), ident(hint["unit"], 40), ident(hint["status"], 24, True)
@@ -1097,15 +1151,24 @@ def _compose_prior(hint, withhold, blank, found=None):
     else:
         repo = "(withheld)" if blank else _token(hint["repo"], 60, withhold, _REPO_KEEP)
 
-    def prov(field_name):
-        return (f"src={repo or 'unknown'}@{hint['rev'][:12] if hint['rev'] else 'unknown'} "
-                f"artifact={ident(hint['artifact'], 80)}@sha256:{hint['digest'][:16]} at={when} "
-                f"scope={scope} match={field_name}:{ident(cand, 60)}"
-                f"{'::' + ident(sym, 40) if sym else ''}~{_inert(query, 60)}({kind})")
+    art_s = ident(hint["artifact"], 80)
+    cand_s = ident(cand, 60)
+    sym_s = ident(sym, 40) if sym else ""
+    query_s = _inert(query, 60)
+
+    def prov(field_name, balanced=False):
+        b = _balance_field_quotes if balanced else (lambda x: x)
+        return (f"src={b(repo or 'unknown')}@{hint['rev'][:12] if hint['rev'] else 'unknown'} "
+                f"artifact={b(art_s)}@sha256:{hint['digest'][:16]} at={when} "
+                f"scope={b(scope)} match={field_name}:{b(cand_s)}"
+                f"{'::' + b(sym_s) if sym_s else ''}~{b(query_s)}({kind})")
     core = f"[run {run_s} / {uid} ({status})] {detail}"
+    p_core = (f"[run {_balance_field_quotes(run_s)} / {_balance_field_quotes(uid)} "
+              f"({_balance_field_quotes(status)})] {_balance_field_quotes(detail)}")
     label = _render_label(hint, withhold, blank)
     body = _guard_entry(core, hint["park"], hint["inv"], *_hint_identifiers(hint), *([found] if found else []))
-    return f"- [{label}] {body} ‖ {prov(field)}", f"- [{label}] {core} ‖ {prov('field')}"
+    return (f"- [{label}] {body} ‖ {prov(field)}",
+            f"- [{_balance_field_quotes(label)}] {p_core} ‖ {prov('field', balanced=True)}")
 
 
 def _render_session(hint, withhold):
@@ -1124,17 +1187,26 @@ def _compose_session(hint, withhold, blank, found=None):
     sid = "(withheld)" if blank else _ident(hint["sid"] or "?", 40, withhold)
     if hint["withheld"]:
         text = WITHHELD_NOTE
+        p_text = WITHHELD_NOTE
     else:
+        title_s = _inert(hint["title"] or "(untitled)", 60)
         snip = _inert(hint["snippet"] or "", 80)
-        text = _inert(hint["title"] or "(untitled)", 60) + (f" — {snip}" if snip else "")
+        text = title_s + (f" — {snip}" if snip else "")
+        p_title = _balance_field_quotes(title_s)
+        p_snip = _balance_field_quotes(snip)
+        p_text = p_title + (f" — {p_snip}" if snip else "")
     agent = "(withheld)" if blank else (_token(hint["agent"] or "session", 32, withhold, _AGENT_KEEP) or "session")
     core = f"[session {sid}] {text}"
+    p_core = f"[session {_balance_field_quotes(sid)}] {p_text}"
     body = _guard_entry(core, hint["sid"], hint["title"], hint["snippet"], hint["agent"],
                         *([found] if found else []))
     tail = (f"src=unknown@unknown artifact=session:{agent}@sha256:{hint['digest'][:16]} at=unknown "
             f"scope=unresolved match=query(session-search)")
+    p_tail = (f"src=unknown@unknown artifact=session:{_balance_field_quotes(agent)}@sha256:{hint['digest'][:16]} "
+              f"at=unknown scope=unresolved match=query(session-search)")
     label = _render_label(hint, withhold, blank)
-    return f"- [{label}] {body} ‖ {tail}", f"- [{label}] {core} ‖ {tail}"
+    return (f"- [{label}] {body} ‖ {tail}",
+            f"- [{_balance_field_quotes(label)}] {p_core} ‖ {p_tail}")
 
 
 def build_episodic_selection(paths, runs_dir=None, session_hits=None, max_lines=15, live=None,
@@ -1159,7 +1231,7 @@ def build_episodic_selection(paths, runs_dir=None, session_hits=None, max_lines=
         live = hp.LiveSource(live)
     observations = _bounded_observations(current_evidence) if current_evidence is not None else []
     rdir = Path(runs_dir) if runs_dir is not None else DEFAULT_RUNS_DIR
-    prior = _prior_hints(clean_paths, rdir, live, observations)  # assessed and labelled, contained
+    prior, prior_counts = _prior_hints_with_counts(clean_paths, rdir, live, observations, mode=mode)
     sessions = _session_hints(session_hits)
     for hint in sessions:
         hint["currency"], hint["why"] = hp.verdict(hint["reasons"])
@@ -1178,10 +1250,18 @@ def build_episodic_selection(paths, runs_dir=None, session_hits=None, max_lines=
     shown = entries[:budget]
     rendered = [(_render_prior if h["kind"] == "run" else _render_session)(h, withhold) for h in shown]
     every = prior + sessions
-    counts = {label: sum(1 for h in every if h["currency"] == label)
-              for label in (hp.CURRENT, hp.UNKNOWN, hp.STALE, hp.SUPERSEDED)}
-    counts.update(suppressed=len(prior) - len(visible), withheld=sum(1 for h in shown if h.get("withheld")))
-    header.append(f"PRIOR_RUNS={len(prior)} SESSION_HITS={len(sessions)} SHOWN={len(shown)} "
+    if prior_counts is not None:
+        counts = {label: prior_counts[label] + sum(1 for h in sessions if h["currency"] == label)
+                  for label in (hp.CURRENT, hp.UNKNOWN, hp.STALE, hp.SUPERSEDED)}
+        total_prior = prior_counts["total"]
+        suppressed_count = (prior_counts[hp.STALE] + prior_counts[hp.SUPERSEDED]) if withhold else 0
+    else:
+        counts = {label: sum(1 for h in every if h["currency"] == label)
+                  for label in (hp.CURRENT, hp.UNKNOWN, hp.STALE, hp.SUPERSEDED)}
+        total_prior = len(prior)
+        suppressed_count = len(prior) - len(visible)
+    counts.update(suppressed=suppressed_count, withheld=sum(1 for h in shown if h.get("withheld")))
+    header.append(f"PRIOR_RUNS={total_prior} SESSION_HITS={len(sessions)} SHOWN={len(shown)} "
                   f"CURRENT={counts['CURRENT']} UNKNOWN={counts['UNKNOWN']} STALE={counts['STALE']} "
                   f"SUPERSEDED={counts['SUPERSEDED']} SUPPRESSED={counts['suppressed']} "
                   f"WITHHELD={counts['withheld']}")
@@ -1307,14 +1387,40 @@ def _guard_field(value, limit=200):
 
     Inert (_visible escapes controls), one line (newlines folded, so a title
     cannot fabricate a HIT/SNIPPET line), banners defused (a title cannot forge
-    a `<<< END UNTRUSTED` marker), and directive-shaped text labelled.
+    a `<<< END UNTRUSTED` marker), and directive-shaped text labelled across both
+    raw and post-newline-folding forms (#780).
     """
     raw = str(value if value is not None else "")
-    text = _visible(raw).replace("\\n", " ").replace("\\r", " ")
-    text = " ".join(text.split())[:limit]
+    raw_folded = raw.replace("\\n", " ").replace("\\r", " ").replace("\n", " ").replace("\r", " ")
+    folded = _visible(raw).replace("\\n", " ").replace("\\r", " ")
+    folded = " ".join(folded.split())
+    text = folded[:limit]
     text = guard_text.defuse_banners(text)
-    names = _guard_labels(raw)
+    names = _guard_labels(raw, raw_folded, folded, text)
     return f"[INJECTION-PATTERN:{','.join(names)}] {text}" if names else text
+
+
+def _raw_snippet_labels(snippet):
+    """Per-line injection labels computed on RAW snippet lines BEFORE pm._visible() escapes
+    U+200B and other Cf/Mn/Cc characters into literal \\uXXXX text (#780)."""
+    raw_lines = snippet.split("\n")
+    single = [guard_text.line_labels(ln) for ln in raw_lines]
+    effective = [list(lbls) for lbls in single]
+    covered_pairs = {}
+    for idx in range(len(raw_lines) - 1):
+        pair_lbls = guard_text.line_labels(raw_lines[idx] + " " + raw_lines[idx + 1])
+        covered_pairs[idx] = set(pair_lbls)
+        for name in pair_lbls:
+            if name not in single[idx] and name not in single[idx + 1] and name not in effective[idx]:
+                effective[idx].append(name)
+    for idx in range(len(raw_lines) - 2):
+        tri_lbls = guard_text.line_labels(
+            raw_lines[idx] + " " + raw_lines[idx + 1] + " " + raw_lines[idx + 2])
+        already = covered_pairs.get(idx, set()) | covered_pairs.get(idx + 1, set())
+        for name in tri_lbls:
+            if name not in already and name not in effective[idx]:
+                effective[idx].append(name)
+    return effective
 
 
 def _source_name(agent):
@@ -1355,13 +1461,32 @@ def format_results(result):
                      f"{_guard_field(hit.get('title') or '(untitled)', 200)}")
         role = _guard_field(ev.get("role", "?"), 32)
         if snippet:
+            raw_labels = _raw_snippet_labels(snippet)
             bounded_snip = _bounded(_visible(snippet), SNIPPET_LIMIT)
-            indented = "\n".join("  " + ln for ln in bounded_snip.split("\n"))
+            vis_lines = bounded_snip.split("\n")
+            indented = "\n".join("  " + ln for ln in vis_lines)
             fenced_snip = guard_text.envelope(
                 indented,
                 source=_source_name(hit.get("agent")),
                 label=_guard_field(hit.get("sessionId") or "?", 60),
             )
+            env_lines = fenced_snip.split("\n")
+            body_lines = env_lines[5:-2]
+            if len(body_lines) == len(vis_lines):
+                merged = []
+                for idx, bline in enumerate(body_lines):
+                    extra = raw_labels[idx] if idx < len(raw_labels) else []
+                    if extra:
+                        if bline.startswith("[INJECTION-PATTERN:"):
+                            prefix, sep, rest = bline.partition("] ")
+                            if sep:
+                                existing = prefix[len("[INJECTION-PATTERN:"):].split(",")
+                                combined = existing + [n for n in extra if n not in existing]
+                                bline = f"[INJECTION-PATTERN:{','.join(combined)}] {rest}"
+                        else:
+                            bline = f"[INJECTION-PATTERN:{','.join(extra)}] {bline}"
+                    merged.append(bline)
+                fenced_snip = "\n".join(env_lines[:5] + merged + env_lines[-2:])
             lines.append(f"SNIPPET [{role}]:\n{fenced_snip}")
         else:
             lines.append("SNIPPET: (none)")
@@ -2267,7 +2392,6 @@ def _crush_dbs():
                 continue
             data_dir = Path(str(proj.get("data_dir") or Path(str(proj["path"])) / ".crush"))
             out.append((data_dir / "crush.db", str(proj["path"])))
-    out.append((Path.cwd() / ".crush" / "crush.db", str(Path.cwd())))
     seen, uniq = set(), []
     for db, cwd in out:
         key = str(db.resolve()) if db.exists() else str(db)

@@ -172,7 +172,8 @@ GOOD = {
     "bwrap": dict(BASE, backend="bwrap", networkScope="deny", filesystemScope="workspace"),
     "gondolin": dict(BASE, backend="gondolin", mounts=[{"source": WT, "target": "/workspace"}]),
     "superset-cloud": dict(BASE, backend="superset-cloud"),
-    "openhands-docker": dict(BASE, backend="openhands-docker"),
+    "openhands-docker": dict(BASE, backend="openhands-docker",
+                             isolation={"capDrop": ["ALL"], "noNewPrivileges": True, "pidsLimit": 256}),
     "apptainer": dict(BASE, backend="apptainer"),
 }
 
@@ -769,3 +770,116 @@ class ErrorEnvelopesAreFindings(unittest.TestCase):
             raw = json.dumps({"recipeId": "lane-7", "ok": True, "checks": [], "error": value})
             clear, reason = sandbox_doctor.verdict(raw, "lane-7")
             self.assertTrue(clear, f"{value!r}: {reason}")
+
+
+class AdversarialSandboxHardening(unittest.TestCase):
+    """#777 / #770: mount parser hardening, openhands-docker in DOCKER_FAMILY, dangerous
+    docker flags, credential descendants, nested privileged/network shadowing, gondolin
+    target normalization, and W3-01 stdlib-shadow guard."""
+
+    def verdict(self, doc):
+        return sandbox_doctor.assess(json.dumps(doc), "lane-7")
+
+    def test_leading_boolean_quoted_and_attached_mounts_are_refused(self):
+        for spec in (
+            "--mount readonly,type=bind,source=/home,target=/h",
+            "readonly,type=bind,source=/home,target=/h",
+            '--mount type=bind,source="/home",target="/h"',
+            "--mount 'readonly,type=bind,src=/var/run,dst=/r'",
+            "--mount type=bind,target=/h",
+            "--mount readonly",
+            "-v/:/host",
+            "-v/home:/h:ro",
+        ):
+            with self.subTest(spec=spec):
+                doc = copy.deepcopy(GOOD["docker"])
+                doc["mounts"] = [spec]
+                clear, reason, exposes = self.verdict(doc)
+                self.assertFalse(clear, f"{spec!r} should be refused")
+                self.assertTrue(exposes, reason)
+
+    def test_openhands_docker_requires_docker_family_isolation(self):
+        doc = dict(BASE, backend="openhands-docker")
+        clear, reason, exposes = self.verdict(doc)
+        self.assertFalse(clear)
+        self.assertTrue(exposes)
+        self.assertIn("capDrop", reason)
+
+    def test_docker_family_refuses_cap_add_host_namespaces_devices_and_disabling_secopt(self):
+        cases = (
+            ("capAdd", {"capAdd": ["SYS_ADMIN"]}),
+            ("cap_add", {"cap_add": ["NET_ADMIN"]}),
+            ("pidMode host", {"pidMode": "host"}),
+            ("pid_mode container", {"pid_mode": "container:other"}),
+            ("ipcMode host", {"ipcMode": "host"}),
+            ("utsMode host", {"utsMode": "host"}),
+            ("networkMode container", {"networkMode": "container:sidecar"}),
+            ("devices", {"devices": ["/dev/fuse:/dev/fuse"]}),
+            ("seccomp unconfined", {"securityOpt": ["seccomp=unconfined"]}),
+            ("apparmor unconfined", {"security_opt": ["apparmor=unconfined"]}),
+            ("label disable", {"securityOpt": ["label=disable"]}),
+        )
+        for label, extra in cases:
+            for backend in ("docker", "openhands-docker"):
+                with self.subTest(backend=backend, case=label):
+                    doc = copy.deepcopy(GOOD[backend])
+                    doc["isolation"].update(extra)
+                    clear, reason, exposes = self.verdict(doc)
+                    self.assertFalse(clear, f"{backend} {label} passed")
+                    self.assertTrue(exposes, reason)
+
+    def test_nested_privileged_or_host_network_cannot_be_shadowed_by_isolation(self):
+        for extra in (
+            {"privileged": True},
+            {"hostConfig": {"Privileged": True}},
+            {"networkMode": "host"},
+            {"hostConfig": {"NetworkMode": "container:init"}},
+            {"network": "  HOST  "},
+        ):
+            with self.subTest(extra=extra):
+                doc = posix_docker_doc()
+                doc.update(extra)
+                clear, reason, exposes = self.verdict(doc)
+                self.assertFalse(clear, f"{extra!r} was shadowed")
+                self.assertTrue(exposes, reason)
+
+    def test_credential_descendants_and_gcloud_azure_tokens_are_refused(self):
+        for source in (
+            os.path.join(HOME, ".config/gcloud/application_default_credentials.json"),
+            os.path.join(HOME, ".azure/accessTokens.json"),
+            os.path.join(HOME, ".ssh/id_ed25519"),
+            "/srv/mirror/.config/gcloud/creds.json",
+            "/srv/mirror/.azure/profile.json",
+        ):
+            with self.subTest(source=source):
+                doc = copy.deepcopy(GOOD["docker"])
+                doc["mounts"] = [{"source": source, "target": "/c"}]
+                clear, reason, exposes = self.verdict(doc)
+                self.assertFalse(clear, f"{source!r} passed")
+                self.assertTrue(exposes, reason)
+
+    def test_gondolin_normalizes_dotdot_mount_targets(self):
+        for target in ("/workspace/../etc", "/workspace/sub/../../etc", "workspace"):
+            with self.subTest(target=target):
+                doc = dict(GOOD["gondolin"], mounts=[{"source": WT, "target": target}])
+                clear, reason, exposes = self.verdict(doc)
+                self.assertFalse(clear, f"{target!r} passed")
+                self.assertTrue(exposes, reason)
+
+    def test_entrypoint_carries_w3_01_guard_and_blocks_stdlib_shadow(self):
+        import ast
+        import shutil
+        from tests import test_entrypoint_guard as eg
+        body = eg._statements("runtime/scripts/sandbox_doctor.py")
+        self.assertGreaterEqual(len(body), 2)
+        self.assertTrue(isinstance(body[0], ast.Import) and [a.name for a in body[0].names] == ["sys"])
+        self.assertEqual(ast.dump(body[1]), ast.dump(ast.parse(eg.CANONICAL_GUARD).body[0]))
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            shutil.copy2(ROOT / "runtime" / "scripts" / "sandbox_doctor.py", t / "sandbox_doctor.py")
+            (t / "json.py").write_text("raise RuntimeError('shadow loaded')\n", encoding="utf-8")
+            env = {k: v for k, v in os.environ.items() if not k.startswith("PYTHON")}
+            r = subprocess.run([sys.executable, str(t / "sandbox_doctor.py")],
+                               cwd=t, env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertNotIn("shadow loaded", r.stderr)

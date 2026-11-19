@@ -659,8 +659,14 @@ HOOK_ENV_KEYS = ("ORCA_UNIT_WORKTREE", "OPEN_FLEET_UNIT_WORKTREE", "ORCA_HOOK_ST
                  "OPEN_FLEET_DENY_HOOK", "ORCA_DENY_HOOK_PATH", "OPEN_FLEET_ROOT", "ORCA_FLEET_ROOT",
                  "GOOSE_MODE", "CODEX_CI", "CODEX_SANDBOX", "JCODE_HOOK_TOOL_NAME")
 PASS_THROUGH = ("PATH", "HOME", "LANG", "TMPDIR", "TMP", "TEMP", "TERM")
-STEERING = ("PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP",
-            "ENV", "BASH_ENV", "SHELLOPTS", "CDPATH", "IFS", "SHELL")
+STEERING = ("PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "GLIBC_TUNABLES",
+            "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH",
+            "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP",
+            "ENV", "BASH_ENV", "SHELLOPTS", "BASHOPTS", "CDPATH", "IFS", "SHELL",
+            "NODE_OPTIONS", "PERL5OPT", "RUBYOPT",
+            "ANTHROPIC_BASE_URL", "HTTP_PROXY", "HTTPS_PROXY",
+            "GIT_SSH_COMMAND", "GIT_EXTERNAL_DIFF")
+COMMAND_KEYS = ("apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper")
 SHELLS = ("sh", "bash", "dash")
 ASSIGN_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=(.*)", re.DOTALL)
 try:
@@ -713,9 +719,21 @@ def registered_hook(command):
     return assigns, shell, str(hook)
 
 
+if isinstance(settings, dict):
+    if settings.get("disableAllHooks") is True:
+        sys.exit(refuse("the settings file sets disableAllHooks: true, which disarms every hook"))
+    bad_cmd_keys = sorted(k for k in COMMAND_KEYS if isinstance(settings.get(k), str))
+    if bad_cmd_keys:
+        sys.exit(refuse(f"the settings file defines command key(s) {', '.join(bad_cmd_keys)}, "
+                        "which execute commands outside the hook boundary"))
 registered_env = settings.get("env") if isinstance(settings, dict) else {}
 registered_env = registered_env if isinstance(registered_env, dict) else {}
-steering = sorted(k for k in registered_env if str(k) in STEERING)
+steering = sorted(
+    str(k) for k in registered_env
+    if str(k) in STEERING
+    or str(k).upper() in ("HTTP_PROXY", "HTTPS_PROXY")
+    or str(k).startswith("BASH_FUNC_")
+)
 if steering:
     sys.exit(refuse(f"the settings env sets {', '.join(steering)}, which would steer what the "
                     "probes execute; a registration env carries only the hook switches"))
@@ -986,7 +1004,7 @@ PAYLOAD=$(cat 2>/dev/null || true)
 # python3 on a pipe as its program (python3 -), with the payload on fd 3. No argv
 # or env string carries either, and nothing is written to disk: a heredoc this
 # size is a temp file under bash, which a read-only sandbox would refuse.
-_READER='import fnmatch,json,os,re,shlex,sys
+_READER='import fnmatch,json,os,re,shlex,shutil,sys
 d = json.loads(open(3, encoding=sys.stdin.encoding, errors=sys.stdin.errors, closefd=False).read())
 if not isinstance(d, dict):
     raise SystemExit(1)
@@ -1537,16 +1555,39 @@ def _brace_word(word, budget):
     return [word]
 
 
+_BRACE_CMD_KEYWORDS = ("if", "then", "elif", "else", "do", "while", "until", "!", "{", "time", "coproc")
+_BRACE_RESET_SEPS = chr(10) + ";|&)"
+_BRACE_CMD_SEPS = chr(10) + ";|&(" + chr(96)
+
+
 def _brace_expand_text(text):
     # The command with every unquoted brace expansion written out, word by word. A word ends at
     # what the shell splits on before it expands: a blank, a newline, an operator character or a
     # backtick; quotes are tracked across the word so a quoted blank stays inside it.
-    out, i, n, budget, in_test = [], 0, len(text), [_BRACE_TOTAL], False
+    # Comments (# to newline) are skipped verbatim; [[ suppresses brace expansion ONLY when it
+    # appears in command position, and any unquoted command separator resets in_test (#767).
+    out, i, n, budget, in_test, cmd_pos = [], 0, len(text), [_BRACE_TOTAL], False, True
     while i < n:
         ch = text[i]
-        if ch in BLANKS or ch in _BRACE_SEPS:
+        if ch in BLANKS:
             out.append(ch)
             i += 1
+            continue
+        if ch in _BRACE_SEPS:
+            out.append(ch)
+            if ch in _BRACE_RESET_SEPS:
+                in_test = False
+            if ch in _BRACE_CMD_SEPS:
+                cmd_pos = True
+            elif ch == ")":
+                cmd_pos = False
+            i += 1
+            continue
+        if ch == "#":
+            start = i
+            while i < n and text[i] != chr(10):
+                i += 1
+            out.append(text[start:i])
             continue
         start, quote = i, ""
         while i < n:
@@ -1563,10 +1604,15 @@ def _brace_expand_text(text):
                 break
             i += 1
         word = text[start:min(i, n)]
-        if word == "[[":
+        if word == "[[" and cmd_pos:
             in_test = True   # bash performs no brace expansion between [[ and ]]
+            cmd_pos = False
         elif word == "]]":
             in_test = False
+            cmd_pos = False
+        elif cmd_pos:
+            if not (word in _BRACE_CMD_KEYWORDS or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", word, re.DOTALL)):
+                cmd_pos = False
         if "{" in word and "}" in word and not in_test:
             # bash parses before it expands, so a word an expansion produces is a word even when
             # it opens with a comment or operator character; escaped, it stays one here too.
@@ -1581,11 +1627,22 @@ def _brace_expand_text(text):
 cmd_val = ti.get("command") if (norm_tool == "Bash" and isinstance(ti.get("command"), str)) else (ti.get("cmd") if isinstance(ti.get("cmd"), str) else (ti.get("command") if norm_tool == "Bash" else ""))
 raw_command = r(cmd_val)
 _BRACE_REFUSAL = None
-try:
-    raw_command = _brace_expand_text(raw_command)
-except ValueError as _brace_err:
-    _BRACE_REFUSAL = ("brace expansion of this command is more than the hook reads (%s); "
-                      "spell the words out" % _brace_err)
+
+
+def _expand_braces(text):
+    global _BRACE_REFUSAL
+    if not text or "{" not in text or "}" not in text:
+        return text
+    try:
+        return _brace_expand_text(text)
+    except ValueError as _brace_err:
+        if not _BRACE_REFUSAL:
+            _BRACE_REFUSAL = ("brace expansion of this command is more than the hook reads (%s); "
+                              "spell the words out" % _brace_err)
+        return text
+
+
+raw_command = _expand_braces(raw_command)
 
 
 target_paths = []
@@ -1610,16 +1667,49 @@ if raw_tool in ("apply_patch", "patch"):
             _patch_blobs.append(ti.get(_pk))
     if isinstance(d.get("patch"), str):
         _patch_blobs.append(d.get("patch"))
+
+
+def _unquote_c_path(path):
+    # Decode git C-quoted diff paths ("b/.claude/\163ettings.json" -> b/.claude/settings.json).
+    s = path.strip()
+    if len(s) >= 2 and s[0] == DQ and s[-1] == DQ:
+        inner, raw, i, n = s[1:-1], bytearray(), 0, len(s) - 2
+        esc = {"a": 7, "b": 8, "f": 12, "n": 10, "r": 13, "t": 9, "v": 11, "\\": 92, DQ: 34}
+        while i < n:
+            ch = inner[i]
+            if ch == "\\" and i + 1 < n:
+                nxt = inner[i + 1]
+                if nxt in esc:
+                    raw.append(esc[nxt])
+                    i += 2
+                elif nxt in "01234567" and i + 3 < n and all(c in "01234567" for c in inner[i + 1:i + 4]):
+                    raw.append(int(inner[i + 1:i + 4], 8) & 0xFF)
+                    i += 4
+                else:
+                    raw.extend(nxt.encode("utf-8"))
+                    i += 2
+            else:
+                raw.extend(ch.encode("utf-8"))
+                i += 1
+        s = raw.decode("utf-8", "replace")
+    return s
+
+
 def patch_targets(blob):
     found = []
     for _pln in blob.splitlines():
+        _is_diff_hdr = False
         _m = re.match(r"^\*\*\* (?:Add|Update|Delete) File:\s*(.+)$", _pln)
         if not _m:
             _m = re.match(r"^\*\*\* Move to:\s*(.+)$", _pln)
         if not _m:
-            _m = re.match(r"^(?:\+\+\+|---) (?:[ab]/)?([^\t\r\n]+)", _pln)
+            _m = re.match(r"^(?:\+\+\+|---) ([^\t\r\n]+)", _pln)
+            _is_diff_hdr = bool(_m)
         if _m:
-            _cand = _m.group(1).strip()
+            _cand = _unquote_c_path(_m.group(1))
+            if _is_diff_hdr:
+                _cand = re.sub(r"^[ab]/", "", _cand)
+            _cand = _cand.strip()
             if _cand and _cand != "/dev/null":
                 found.append(_cand)
     return found
@@ -1941,7 +2031,90 @@ def _command_words(args, assigns=None):
     if ws and ws[-1].endswith(")"):
         last = ws[-1].rstrip(")")  # a subshell close glued to the last word
         ws = ws[:-1] + ([last] if last else [])
-    return _peel_shell(_plain_words(ws, extended=True, assigns=assigns))   # F2: busybox sh
+    ws = _plain_words(ws, extended=True, assigns=assigns)
+    # Peel busybox/toybox applets consistently (F2, #767): busybox tee / toybox rm / busybox env ...
+    # Option-led busybox invocations (`busybox --install`) never match _BUSYBOX_APPLETS.
+    while ws:
+        head, rest = _peel_busybox(ws[0].rsplit("/", 1)[-1], ws[1:])
+        if len(rest) == len(ws) - 1:
+            break
+        ws = _plain_words([head] + list(rest), extended=True, assigns=assigns)
+    return ws
+
+
+_EGRESS_WRITE_OPTS = frozenset({
+    "--sink", "--host", "--payload-class", "--consent",
+    "--bytes", "--payload-file", "--payload-sha256", "--ts",
+})
+_EGRESS_HELP_WORDS = frozenset({"-h", "--h", "--he", "--hel", "--help"})
+_egress_cands = []
+if os.environ.get("DH_SELF"):
+    _egress_cands.append(os.path.join(os.path.dirname(os.path.realpath(os.environ["DH_SELF"])), "egress.py"))
+for _rk in ("OPEN_FLEET_ROOT", "ORCA_FLEET_ROOT"):
+    if os.environ.get(_rk):
+        _egress_cands.append(os.path.join(os.environ[_rk], "runtime", "scripts", "egress.py"))
+_EGRESS_SIBLING = next((os.path.realpath(p) for p in _egress_cands if os.path.isfile(p)), "")
+_EGRESS_SIBLING_BYTES = None
+if _EGRESS_SIBLING:
+    try:
+        with open(_EGRESS_SIBLING, "rb") as _efh:
+            _EGRESS_SIBLING_BYTES = _efh.read()
+    except OSError:
+        _EGRESS_SIBLING_BYTES = None
+
+
+def _is_egress_script(word):
+    """Verify the egress.py path matches the fleet sibling beside DH_SELF when resolvable (#767)."""
+    if not word or os.path.basename(word) != "egress.py":
+        return False
+    if word == "egress.py":
+        found = shutil.which("egress.py")
+        return bool(found and _EGRESS_SIBLING and os.path.realpath(found) == _EGRESS_SIBLING)
+    if word.startswith(("/", "~")):
+        real = os.path.realpath(os.path.expanduser(word))
+        if _EGRESS_SIBLING:
+            return real == _EGRESS_SIBLING and os.path.isfile(real)
+        return real.endswith("/runtime/scripts/egress.py") and os.path.isfile(real)
+    norm = os.path.normpath(word)
+    cand = os.path.join(os.getcwd(), word)
+    if os.path.lexists(cand):
+        real = os.path.realpath(cand)
+        if _EGRESS_SIBLING:
+            if real == _EGRESS_SIBLING:
+                return True
+            if norm == "runtime/scripts/egress.py" and _EGRESS_SIBLING_BYTES is not None and os.path.isfile(real):
+                try:
+                    with open(real, "rb") as _cfh:
+                        return _cfh.read() == _EGRESS_SIBLING_BYTES
+                except OSError:
+                    return False
+            return False
+        return norm == "runtime/scripts/egress.py"
+    return norm == "runtime/scripts/egress.py"
+
+
+def _valid_receipt_args(tail):
+    """Reject -h, --help, --h* abbreviations and unknown/malformed options after `write` (#767)."""
+    k = 0
+    while k < len(tail):
+        tok = tail[k]
+        if tok in _EGRESS_HELP_WORDS or tok.startswith("-h"):
+            return False
+        if not tok.startswith("--") or tok == "--":
+            return False
+        opt, eq, _val = tok.partition("=")
+        if opt in _EGRESS_HELP_WORDS or opt not in _EGRESS_WRITE_OPTS:
+            return False
+        if eq:
+            k += 1
+        else:
+            if k + 1 >= len(tail):
+                return False
+            nxt = tail[k + 1]
+            if nxt in _EGRESS_HELP_WORDS or nxt.startswith("-"):
+                return False
+            k += 2
+    return True
 
 
 def _is_receipt(args):
@@ -1950,11 +2123,11 @@ def _is_receipt(args):
     # MENTIONING it (`echo egress.py write`) records nothing and arms
     # nothing (PR #567 review, P1).
     ws = _plain_words(args, peel_bang=False, extended="receipt")
-    def is_egress(word):
-        return word == "egress.py" or word.endswith("/egress.py")
-
-    if len(ws) >= 2 and is_egress(ws[0]) and ws[1] == "write":
-        return True
+    if ws and ws[-1].endswith(")"):
+        last = ws[-1].rstrip(")")  # a subshell close glued to or after the last word
+        ws = ws[:-1] + ([last] if last else [])
+    if len(ws) >= 2 and _is_egress_script(ws[0]) and ws[1] == "write":
+        return _valid_receipt_args(ws[2:])
     # python3 [options] … egress.py write: versioned interpreters
     # (python3.12) and interpreter options before the script still run the
     # writer (PR #567 review, P2). The options are ALLOWLISTED to ones that
@@ -1975,9 +2148,14 @@ def _is_receipt(args):
                 i += 1
             else:
                 break
-        return i < len(ws) and not ws[i].startswith("-") \
-            and i + 1 < len(ws) and is_egress(ws[i]) and ws[i + 1] == "write"
+        if i < len(ws) and not ws[i].startswith("-") \
+                and i + 1 < len(ws) and _is_egress_script(ws[i]) and ws[i + 1] == "write":
+            return _valid_receipt_args(ws[i + 2:])
     return False
+
+
+_GH_API_VAL_LONG = frozenset({"--header", "--jq", "--template", "--preview", "--cache", "--hostname", "--repo"})
+_GH_API_VAL_SHORT = "HqtpR"
 
 
 def _is_send(args):
@@ -1991,24 +2169,60 @@ def _is_send(args):
         return False
     group, tail = rest[i], rest[i + 1:]
     if group == "api":
-        method, fields, i = None, False, 0
+        method, fields, has_input, i = None, False, False, 0
         while i < len(tail):
             word = tail[i]
-            if word in ("-X", "--method") and i + 1 < len(tail):
-                method = tail[i + 1].upper()
-                i += 2
+            if word == "--":
+                break
+            if word.startswith("--"):
+                opt, eq, val = word.partition("=")
+                if opt == "--method":
+                    if eq:
+                        method = val.upper()
+                        i += 1
+                    elif i + 1 < len(tail):
+                        method = tail[i + 1].upper()
+                        i += 2
+                    else:
+                        i += 1
+                    continue
+                if opt in ("--field", "--raw-field", "--input"):
+                    fields = True
+                    if opt == "--input":
+                        has_input = True
+                    i += 1 if eq else 2
+                    continue
+                if opt in _GH_API_VAL_LONG and not eq:
+                    i += 2
+                    continue
+                i += 1
                 continue
-            if word.startswith("--method="):
-                method = word.split("=", 1)[1].upper()
-            elif word.startswith("-X") and len(word) > 2:
-                method = word[2:].upper()
-            elif word in ("-f", "-F", "--field", "--raw-field", "--input") \
-                    or word.startswith(("--field=", "--raw-field=", "--input=")) \
-                    or (len(word) > 2 and word[:2] in ("-f", "-F")):
-                # Attached short forms (-ftitle=x) supply fields too, and so
-                # imply POST with no explicit method (PR #567 review, P1).
-                fields = True
+            if word.startswith("-") and len(word) > 1:
+                cluster = word[1:]
+                step = 1
+                for k, ch in enumerate(cluster):
+                    if ch == "X":
+                        rem = cluster[k + 1:]
+                        if rem:
+                            method = rem.upper()
+                        elif i + 1 < len(tail):
+                            method = tail[i + 1].upper()
+                            step = 2
+                        break
+                    if ch in ("f", "F"):
+                        fields = True
+                        if k == len(cluster) - 1:
+                            step = 2
+                        break
+                    if ch in _GH_API_VAL_SHORT:
+                        if k == len(cluster) - 1:
+                            step = 2
+                        break
+                i += step
+                continue
             i += 1
+        if has_input:
+            return True
         # An explicit method wins: --method GET with -f filters is a read.
         # Fields imply POST only when no method was supplied (gh semantics).
         if method is not None:
@@ -2484,7 +2698,10 @@ _AWKS = ("awk", "gawk", "mawk", "nawk")
 # toybox is the same multi-call shape.
 # Every shell applet too: busybox bash -c and toybox sh -c run a shell (2026-10-29 audit, F2).
 _BUSYBOX_APPLETS = set(_AWKS) | set(_SHELLS) | {"sed", "tar", "unzip", "cpio", "rm", "rmdir", "cp",
-                                 "mv", "dd", "tee", "wget", "vi", "ln", "install", "chmod"}
+                                 "mv", "dd", "tee", "wget", "vi", "ln", "install", "chmod",
+                                 "chown", "chgrp", "env", "xargs", "timeout", "nohup", "nice",
+                                 "chroot", "setsid", "truncate", "shred", "unlink", "sort",
+                                 "patch", "find", "cat", "head", "tail", "tac", "uniq"}
 
 
 def _is_awk(head):
@@ -3122,6 +3339,43 @@ def _git_bodies(rest):
     return out
 
 
+def _guard_text_fetch_body(ws):
+    """Extract the command line passed to `guard_text.py ... --fetch <argv...>` (#780)."""
+    if not ws:
+        return None
+    idx = None
+    head = ws[0].rsplit("/", 1)[-1]
+    if head == "guard_text.py":
+        idx = 0
+    elif _canon_interp(head) == "python":
+        i = 1
+        while i < len(ws):
+            w = ws[i]
+            if w == "--":
+                i += 1
+                break
+            if w in ("-W", "-X"):
+                i += 2
+            elif w.startswith(("-W", "-X")) and len(w) > 2:
+                i += 1
+            elif w.startswith("-") and not w.startswith("--") and not any(c in w[1:] for c in "cm"):
+                i += 1
+            else:
+                break
+        if i < len(ws) and ws[i].rsplit("/", 1)[-1] == "guard_text.py":
+            idx = i
+    if idx is None:
+        return None
+    rest = ws[idx + 1:]
+    for k, w in enumerate(rest):
+        if w == "--fetch" and k + 1 < len(rest):
+            return shlex.join(rest[k + 1:])
+        if w.startswith("--fetch="):
+            tail = [t for t in ([w.split("=", 1)[1]] + rest[k + 1:]) if t]
+            return shlex.join(tail) if tail else None
+    return None
+
+
 def _inner_body(ws):
     """The command text ws runs as a command line of its own, or None.
 
@@ -3182,6 +3436,9 @@ def _inner_body(ws):
             bodies += _code_commands(code)
             if _awk:
                 bodies += _awk_pipe_cmds(code)   # print | "cmd", "cmd" | getline, |& (g1 #1)
+    gt_body = _guard_text_fetch_body(ws)
+    if gt_body is not None:
+        bodies.append(gt_body)
     bodies += _head_bodies(ws)
     if not bodies:
         return None
@@ -3736,6 +3993,7 @@ def _expand(text, depth=0, nest=0, written=None):
     read with its own heredocs), and every program a command reads (_fed_code) -- each judged
     as command lines of their own."""
     written = {} if written is None else written
+    text = _expand_braces(text)
     raws, surface, patches, docs = substitution_bodies(text, 1 if nest else 0, flat=False)
     parts = [surface]
     for raw in raws:
@@ -3744,7 +4002,7 @@ def _expand(text, depth=0, nest=0, written=None):
             parts += more
             patches = patches + more_patches
         else:
-            parts.append(raw)
+            parts.append(_expand_braces(raw))
     if depth < 3:
         for kind, code in _fed_code(surface, docs, written):
             if kind == "shell":
@@ -3778,6 +4036,7 @@ def _views(args, depth=0, texts=None):
     out = [(assigns, ws)]
     body = _inner_body(ws) if depth < 3 else None
     if body is not None:
+        body = _expand_braces(body)
         try:
             pairs = _body_pairs(body, texts)
         except ValueError:
@@ -3849,7 +4108,8 @@ def _write_targets(seg):
             toks.append((val, rawslice))
     out = list(redirs)
     ws = _command_words([v for v, _r in toks])
-    if ws and ws[0].rsplit("/", 1)[-1] == "tee":
+    head, _rest = _peel_busybox(ws[0].rsplit("/", 1)[-1], ws[1:]) if ws else ("", [])
+    if head == "tee":
         seen = False
         for v, rawslice in toks:
             if not seen:
@@ -3987,6 +4247,7 @@ def _unreceipted_scope(text, armed=False, depth=0, nest=0):
     same reader as one on the surface (PR #648 review)."""
     if depth > 4:
         return False
+    text = _expand_braces(text)
     raws, surface, _patch, docs = substitution_bodies(text, 1 if nest else 0, flat=False)
     if _unreceipted_flow(_flow(surface, docs), armed, depth):
         return True
@@ -4033,31 +4294,78 @@ _GIT_CONFIG_READS = ("--get", "--get-all", "--get-regexp", "--get-urlmatch", "-l
 _GIT_CONFIG_OPERAND = ("-f", "--file", "--blob", "--default", "--type")
 
 
-def _git_alias_laundering(assigns, ws):
-    # D (2026-10-26 review): `git -c alias.p=push p --force origin main` runs `git push`, yet once
-    # the -c operand is stripped the subcommand this hook and the HIGH tier read is `p`, so the
-    # force-push was ALLOWED. An alias defined in the same command -- -c, --config-env, a
-    # GIT_CONFIG_* assignment, or `git config alias.X Y` -- renames a verb every rule here judges
-    # by name, and a worker has no use for one: the definition itself is refused.
-    if not ws or ws[0].rsplit("/", 1)[-1] != "git":
+_GIT_DANGER_PUSH_RE = re.compile(r"^remote\..+\.(mirror|push|prune)$")
+_GIT_EXEC_CONFIG_EXACT = frozenset({
+    "core.fsmonitor", "core.pager", "core.sshcommand", "core.hookspath",
+    "core.editor", "core.askpass", "credential.helper", "diff.external",
+    "core.alternaterefscommand", "gpg.program", "protocol.allow",
+})
+_GIT_EXEC_CONFIG_RE = re.compile(
+    r"^(?:pager\..+|credential\..+\.helper|diff\..+\.(?:command|textconv)"
+    r"|filter\..+\.(?:clean|smudge|process)|merge\..+\.driver"
+    r"|gpg\..+\.program|protocol\..+\.allow)$"
+)
+
+
+def _git_config_key_reason(raw_key, inline_val=None, from_dash_c=False):
+    key = raw_key.strip().strip(SQ + DQ).lower()
+    if not key:
         return None
-    keys = []
-    for a in assigns or []:
-        name, _eq, value = a.partition("=")
-        if name == "GIT_CONFIG_PARAMETERS" or re.fullmatch(r"GIT_CONFIG_KEY_[0-9]+", name):
-            keys.append(value)
-    rest, i = ws[1:], 0
-    while i < len(rest) and rest[i].startswith("-") and rest[i] != "-":
-        w = rest[i]
-        if w in ("-c", "--config-env") and i + 1 < len(rest):
-            keys.append(rest[i + 1])
-        elif w.startswith("--config-env="):
-            keys.append(w.split("=", 1)[1])
-        i += 2 if w in _GIT_GLOBAL_ARG else 1
-    if any("alias." in k.lower() for k in keys):
+    if key.startswith("alias.") or ".alias." in key:
         return ("a git alias defined in the command itself (-c alias.*, --config-env=alias.*, "
                 "GIT_CONFIG_*) renames the subcommand this hook judges by name; run the real "
                 "subcommand instead.")
+    if _GIT_DANGER_PUSH_RE.match(key):
+        return ("a destructive push config (%s) via -c/--config-env/GIT_CONFIG_* can mirror, "
+                "prune or force-push remote refs without flags; push named refs instead." % key)
+    if key == "core.pager" and from_dash_c and inline_val in ("", "cat"):
+        return None
+    if key in _GIT_EXEC_CONFIG_EXACT or _GIT_EXEC_CONFIG_RE.match(key):
+        return ("a command-executing git config key (%s) runs an arbitrary command outside the "
+                "hook judgment boundary; do not set execution hooks inline." % key)
+    return None
+
+
+def _git_alias_laundering(assigns, ws):
+    # D (2026-10-26 review, #767): `git -c alias.p=push p --force origin main` renames a verb
+    # every rule here judges by name, and -c/--config-env/GIT_CONFIG_* can also inject
+    # destructive push configs (remote.*.mirror/push/prune) or command-execution keys
+    # (core.fsmonitor, core.sshCommand, core.hooksPath, diff.external, filter.*, ...).
+    if not ws or ws[0].rsplit("/", 1)[-1] != "git":
+        return None
+    entries = []   # (key, inline_val_or_None, from_dash_c)
+    for a in assigns or []:
+        name, _eq, value = a.partition("=")
+        if re.fullmatch(r"GIT_CONFIG_KEY_[0-9]+", name):
+            entries.append((value, None, False))
+        elif name == "GIT_CONFIG_PARAMETERS":
+            try:
+                items = shlex.split(value)
+            except ValueError:
+                items = value.split()
+            for item in items:
+                k, _e, _v = item.partition("=")
+                entries.append((k, None, False))
+    rest, i = ws[1:], 0
+    while i < len(rest) and rest[i].startswith("-") and rest[i] != "-":
+        w = rest[i]
+        if w == "-c" and i + 1 < len(rest):
+            k, eq, v = rest[i + 1].partition("=")
+            entries.append((k, v if eq else None, True))
+        elif w.startswith("-c") and len(w) > 2:
+            k, eq, v = w[2:].partition("=")
+            entries.append((k, v if eq else None, True))
+        elif w == "--config-env" and i + 1 < len(rest):
+            k, _eq, _v = rest[i + 1].partition("=")
+            entries.append((k, None, False))
+        elif w.startswith("--config-env="):
+            k, _eq, _v = w.split("=", 1)[1].partition("=")
+            entries.append((k, None, False))
+        i += 2 if w in _GIT_GLOBAL_ARG else 1
+    for k, val, from_c in entries:
+        why = _git_config_key_reason(k, val, from_c)
+        if why:
+            return why
     sub = rest[i:]
     if sub[:1] != ["config"]:
         return None
@@ -4072,9 +4380,19 @@ def _git_alias_laundering(assigns, ws):
         if not w.startswith("-") or w == "-":
             operands.append(w)
         j += 1
-    if len(operands) >= 2 and operands[0].lower().startswith("alias."):
-        return ("git config alias.* defines an alias that a later command runs under another "
-                "name, past every rule here; run the real subcommand instead.")
+    cfg_key = None
+    cfg_val = None
+    if len(operands) >= 3 and operands[0] == "set":
+        cfg_key, cfg_val = operands[1], operands[2]
+    elif len(operands) >= 2:
+        cfg_key, cfg_val = operands[0], operands[1]
+    if cfg_key:
+        if cfg_key.lower().startswith("alias."):
+            return ("git config alias.* defines an alias that a later command runs under another "
+                    "name, past every rule here; run the real subcommand instead.")
+        why = _git_config_key_reason(cfg_key, cfg_val, from_dash_c=True)
+        if why:
+            return why
     return None
 
 
@@ -4187,10 +4505,6 @@ def _operands(rest, opt_arg=()):
             out.append(w)
         i += 1
     return out
-
-
-_GIT_GLOBAL_ARG = ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix",
-                   "--config-env", "--list-cmds", "--exec-path")
 
 
 def _git_sub(rest):
@@ -4627,6 +4941,7 @@ def guard_targets(words, depth=0):
     elif depth < 3 and _inner_body(ws) is not None:
         inner = _inner_body(ws)
         if inner:
+            inner = _expand_braces(inner)
             try:
                 for _j, seg2 in _split(inner):
                     a2, w2 = _tokenize(seg2)
@@ -4650,11 +4965,12 @@ def _code_guard_targets(code, depth=0):
         lit = m[1] if m[1] is not None else m[2]
         out.append((lit, False))
         if depth < 3 and " " in lit.strip():
+            lit_exp = _expand_braces(lit)
             try:
-                for _j, seg2 in _split(lit):
+                for _j, seg2 in _split(lit_exp):
                     out += guard_targets(_tokenize(seg2)[0], depth + 1)
             except ValueError:
-                out += [(w, False) for w in lit.split()]
+                out += [(w, False) for w in lit_exp.split()]
     return out
 
 
@@ -4703,6 +5019,8 @@ if _guard_hits:
     record("G", s(_guard_hits[0]))
 if strict_payload:
     record("S", "1")
+if raw_tool in ("apply_patch", "patch") and not target_paths:
+    record("U", s(raw_tool))
 for _hp in heredoc_targets:
     record("P", s(_home_path(_hp)))
 
@@ -4846,14 +5164,16 @@ def _rooty(tok):
 
 
 def _root_wipe(ws):
-    """True when ws is a recursive rm whose every target is root/home-class (W1-06)."""
-    if not ws or ws[0].rsplit("/", 1)[-1] != "rm":
+    """True when ws is a recursive rm with any root/home-class target (W1-06, #767)."""
+    if not ws:
         return False
-    rest = ws[1:]
+    head, rest = _peel_busybox(ws[0].rsplit("/", 1)[-1], ws[1:])
+    if head != "rm":
+        return False
     recursive = any(re.fullmatch(r"-[A-Za-z]*[rR][A-Za-z]*", w) or w == "--recursive"
                     for w in rest if w.startswith("-"))
     targets = _operands(rest)
-    return bool(recursive and targets and all(_rooty(t) for t in targets))
+    return bool(recursive and targets and any(_rooty(t) for t in targets))
 
 
 # File-write redirect operators (NOT the fd-duplication ops): a numeric target is a filename
@@ -4867,6 +5187,11 @@ def _has_write(text, depth=0):
     (W4-05) reads this, so a write hidden in a shell -c body is caught too. A body is descended
     through _expand, so a program the body feeds a shell (sh -c "echo CMD | sh") is judged as
     well; text this reader cannot split counts as a write (fail closed)."""
+    try:
+        if "{" in text and "}" in text:
+            text = _brace_expand_text(text)
+    except ValueError:
+        return True
     try:
         segs = _split(text)
     except ValueError:
@@ -4886,7 +5211,8 @@ def _has_write(text, depth=0):
         ws = _command_words(words)
         if not ws:
             continue
-        if ws[0].rsplit("/", 1)[-1] == "tee" and _operands(ws[1:]):
+        head, rest = _peel_busybox(ws[0].rsplit("/", 1)[-1], ws[1:])
+        if head == "tee" and _operands(rest):
             return True
         if depth < 4:
             body = _inner_body(ws)
@@ -5004,7 +5330,36 @@ def _fetch_runs():
     return False
 
 
+def _never_gh(ws):
+    """Parsed-word Never-list checks for gh commands that accept flags before the verb (#767)."""
+    if not ws or ws[0].rsplit("/", 1)[-1] != "gh":
+        return None
+    rest, i = ws[1:], 0
+    while i < len(rest) and rest[i].startswith("-"):
+        i += 2 if rest[i] in _GH_OPERAND_FLAGS else 1
+    if i >= len(rest):
+        return None
+    group, tail = rest[i], rest[i + 1:]
+    verb, j = None, 0
+    while j < len(tail):
+        w = tail[j]
+        if w in _GH_OPERAND_FLAGS:
+            j += 2
+            continue
+        if w.startswith("-"):
+            j += 1
+            continue
+        verb = w
+        break
+    if group == "secret" and verb in ("set", "delete"):
+        return "Writing or removing a repository secret."
+    if group == "repo" and verb == "delete":
+        return "Deleting a repository."
+    return None
+
+
 _never = [why for why in (_never_git(_vw) for _vw, _w, _sg in _all_views) if why]
+_never += [why for why in (_never_gh(_vw) for _vw, _w, _sg in _all_views) if why]
 _never += [why for why in (_extracts_over_guard(_vw) for _vw, _w, _sg in _all_views) if why]
 if _fetch_runs():
     _never.append("Running a script fetched from the network in the same command.")
@@ -5462,10 +5817,16 @@ PYTOUCH
 
 case "$TOOL" in
   Edit|Write|NotebookEdit|MultiEdit)
-    [ -n "$FILE" ] || exit 0
     guard_check
     if [ "$HOOK_READONLY" = "1" ]; then
       decide deny "deny-hook[READONLY]: this worker runs read-only (ro tier) and may not edit, write or create files. Run it under the rw tier if it needs to change the tree."
+      exit 0
+    fi
+    if [ -z "$FILE" ]; then
+      if printf '%s\n' "$FIELDS" | sed -n '4,$p' | grep -q '^U '; then
+        decide deny "deny-hook[HIGH]: apply_patch/patch payload carried no parseable target path. Fail-closed: name the target file in a standard diff or patch header."
+        exit 0
+      fi
       exit 0
     fi
     if [ -n "$BOUND" ]; then
@@ -5625,7 +5986,7 @@ strip_git_opts() {
   while : ; do
     case "$_rest" in
       # Options taking a separate operand: drop the option, then the operand.
-      -C\ *|-c\ *|--git-dir\ *|--work-tree\ *|--namespace\ *|--config-env\ *)
+      -C\ *|-c\ *|--git-dir\ *|--work-tree\ *|--namespace\ *|--config-env\ *|--attr-source\ *|--super-prefix\ *)
         _rest=${_rest#* }
         _rest=$(skip_tok "$_rest") ;;
       # Immediate-exit options print and stop — `git --html-path push --force`
@@ -5640,7 +6001,7 @@ strip_git_opts() {
       # Inline `--opt=value`: drop `name=` then the whole word — the value may
       # quote only its middle (`=/srv/dir" one"`), so it goes through skip_tok
       # like any other operand (PR #321 review, P1).
-      --git-dir=*|--work-tree=*|--namespace=*|--exec-path=*|--config-env=*)
+      --git-dir=*|--work-tree=*|--namespace=*|--exec-path=*|--config-env=*|--attr-source=*|--super-prefix=*)
         _rest=${_rest#*=}
         _rest=$(skip_tok "$_rest") ;;
       # Valueless flags drop one token each.
@@ -5741,10 +6102,10 @@ git_redirected() {
       -C\ *|-C|--git-dir\ *|--git-dir|--work-tree\ *|--work-tree|\
       --git-dir=*|--work-tree=*)
         return 0 ;;
-      -c\ *|-c|--namespace\ *|--namespace|--config-env\ *|--config-env)
+      -c\ *|-c|--namespace\ *|--namespace|--config-env\ *|--config-env|--attr-source\ *|--attr-source|--super-prefix\ *|--super-prefix)
         _r=${_r#* }
         _r=$(skip_tok "$_r") ;;
-      --namespace=*|--config-env=*|--exec-path=*)
+      --namespace=*|--config-env=*|--exec-path=*|--attr-source=*|--super-prefix=*)
         _r=${_r#*=}
         _r=$(skip_tok "$_r") ;;
       -p|-p\ *|-P|-P\ *|--paginate|--paginate\ *|--no-pager|--no-pager\ *|\
@@ -5906,18 +6267,17 @@ for _SEG in "$@"; do
       decide deny "deny-hook[HIGH]: rm --no-preserve-root is refused. No task authorizes disabling the root guard."
       exit 0
     fi
-    ROOTY=0; SAFE=0
+    ROOTY=0
     set -f
     for TOK in $CMD; do
       TOK=${TOK#\"}; TOK=${TOK%\"}; TOK=${TOK#\'}; TOK=${TOK%\'}
       case "$TOK" in
         sudo|rm|-*|[0-9]'>'*|'>'*|'<'*|'&') continue ;;
         '/'|'//'|'/*'|'~'|'~/'|'$HOME'|'$HOME/'|'${HOME}'|'${HOME}/') ROOTY=1 ;;
-        *) SAFE=1 ;;
       esac
     done
     set +f
-    if [ "$ROOTY" -eq 1 ] && [ "$SAFE" -eq 0 ]; then
+    if [ "$ROOTY" -eq 1 ]; then
       decide deny "deny-hook[HIGH]: recursive delete of / or the home directory is refused. Delete a named path inside the unit worktree instead."
       exit 0
     fi
@@ -6101,8 +6461,14 @@ if [ -n "${UNIT_WORKTREE:-}" ]; then
     # refusing it would make the boundary a thing workers route around. Named
     # one by one, not as a /dev/ prefix — `> /dev/sda` IS an escape.
     case "$_t" in
-      /dev/null|/dev/zero|/dev/full|/dev/tty|/dev/stdout|/dev/stderr|/dev/stdin|/dev/fd/*)
+      /dev/null|/dev/zero|/dev/full|/dev/tty|/dev/stdout|/dev/stderr|/dev/stdin)
         return 0 ;;
+      /dev/fd/*)
+        _fd_suf=${_t#/dev/fd/}
+        case "$_fd_suf" in
+          ""|*[!0123456789]*) : ;;
+          *) return 0 ;;
+        esac ;;
     esac
     resolve_target "$_t"
     [ -n "$RESOLVED" ] || return 0
