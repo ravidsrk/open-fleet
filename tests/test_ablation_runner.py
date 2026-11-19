@@ -2068,5 +2068,53 @@ class DiscoveryFailureNeverLeavesACallRunning(SafetyNet):
         self.assertAllDead(out, at_least=2)
 
 
+class SpendLedgerAndGraderMeterRejectNonFinite(SafetyNet):
+    """#778: NaN/Infinity/negative values must never poison SpendLedger or GRADER_METER."""
+
+    def test_spend_ledger_rejects_nan_inf_and_negative_on_read_and_write(self):
+        for raw in (
+            '{"call":"agent","cell":"c","event":"start","reserve_usd":NaN,"run":"r"}\n',
+            '{"call":"agent","cell":"c","event":"start","reserve_usd":Infinity,"run":"r"}\n',
+            '{"call":"agent","cell":"c","event":"start","reserve_usd":-1.0,"run":"r"}\n',
+            '{"call":"agent","cell":"c","event":"settle","charged_usd":Infinity,"run":"r"}\n',
+        ):
+            with self.subTest(raw=raw.strip()):
+                p = self.tmpdir() / "spend.jsonl"
+                p.write_text(raw, encoding="utf-8")
+                with self.assertRaises(runner.Refused):
+                    runner.SpendLedger(p, "r2")
+        p = self.tmpdir() / "clean.jsonl"
+        ledger = runner.SpendLedger(p, "r1")
+        self.addCleanup(ledger.release)
+        for bad in (float("nan"), float("inf"), float("-inf"), -0.5):
+            with self.assertRaises(ValueError):
+                ledger.start("c", "agent", bad)
+            with self.assertRaises(ValueError):
+                ledger.settle("c", "agent", bad, None, False)
+
+    def test_grader_meter_ignores_nonfinite_cost_and_writes_strict_json(self):
+        td = self.tmpdir()
+        meter = td / "meter.py"
+        meter.write_text(runner.GRADER_METER, encoding="utf-8")
+        sink = td / "usage.json"
+        for bad_token in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(bad_token=bad_token):
+                fake_grader = td / "fake_grader.py"
+                fake_grader.write_text(
+                    "import sys; sys.stdin.read(); "
+                    f"sys.stdout.write('{{\"type\":\"result\",\"result\":\"ok\",\"total_cost_usd\":{bad_token}}}')\n",
+                    encoding="utf-8",
+                )
+                env = dict(os.environ, ABLATION_GRADER_USAGE=str(sink), ABLATION_GRADER_TIMEOUT="10")
+                proc = subprocess.run(
+                    [sys.executable, str(meter), "claude-json", "--", sys.executable, str(fake_grader)],
+                    input="prompt", capture_output=True, text=True, env=env, timeout=30,
+                )
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                doc = json.loads(sink.read_text(encoding="utf-8"),
+                                 parse_constant=lambda t: (_ for _ in ()).throw(ValueError(t)))
+                self.assertIsNone(doc["cost_usd"])
+
+
 if __name__ == "__main__":
     unittest.main()

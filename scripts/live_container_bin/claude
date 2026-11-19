@@ -12,6 +12,7 @@ be a prompt, not an option), unless the caller passed one of its own before any 
 and takes no flag. A broker that never answers, or settings that cannot be read, refuse, exit 2.
 """
 import json
+import math
 import os
 import sys
 import time
@@ -48,12 +49,16 @@ def broker_ready(wait_s=WAIT_S):
         time.sleep(0.5)
 
 
+def _reject_nonfinite(token):
+    raise ValueError(f"non-finite JSON constant: {token}")
+
+
 def budget_flag(argv):
     """The `--max-budget-usd` to append from SETTINGS: [] when there are none or argv has its own,
     None when SETTINGS cannot be read."""
     try:
         with open(SETTINGS, encoding="utf-8") as fh:
-            value = json.load(fh).get("max_budget_usd")
+            value = json.load(fh, parse_constant=_reject_nonfinite).get("max_budget_usd")
     except FileNotFoundError:
         return []
     except (OSError, ValueError, AttributeError):
@@ -61,8 +66,11 @@ def budget_flag(argv):
     options = argv[:argv.index("--")] if "--" in argv else argv  # after "--" everything is a prompt
     if value is None or any(a == "--max-budget-usd" or a.startswith("--max-budget-usd=") for a in options):
         return []
+    if isinstance(value, bool):
+        return None
     try:
-        if float(value) > 0:
+        amount = float(value)
+        if math.isfinite(amount) and amount > 0:
             return ["--max-budget-usd", str(value)]
     except (TypeError, ValueError):
         pass

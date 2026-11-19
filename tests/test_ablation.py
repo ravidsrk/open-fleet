@@ -796,6 +796,25 @@ class Parsing(unittest.TestCase):
         self.assertLessEqual({"VALIDATE", "GRILL", "DECOMPOSE", "BUILD", "ACCEPTANCE-REVIEW", "LAND"}, phases)
         self.assertNotIn("Composes", phases)
 
+    def test_cap_errors_rejects_nonfinite_numbers_778(self):
+        base = {
+            "proposed_usd": 10.0,
+            "max_cost_per_agent_run_usd": 2.0,
+            "grader_reserve_usd": 0.5,
+            "harness_limit_fraction": 0.8,
+            "status": ablation.AUTHORISED,
+            "authorised_usd": 10.0,
+            "authorised_by": "owner",
+        }
+        self.assertEqual(ablation._cap_errors(base), [])
+        for key in ("proposed_usd", "max_cost_per_agent_run_usd", "grader_reserve_usd",
+                    "harness_limit_fraction", "authorised_usd"):
+            for bad in (float("nan"), float("inf"), float("-inf")):
+                with self.subTest(key=key, bad=bad):
+                    mutated = dict(base, **{key: bad})
+                    errs = ablation._cap_errors(mutated)
+                    self.assertTrue(errs, f"accepted non-finite {key}={bad}")
+
 
 if __name__ == "__main__":
     unittest.main()
