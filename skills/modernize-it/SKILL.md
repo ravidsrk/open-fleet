@@ -62,7 +62,7 @@ evidence manifest. A dep on a still-supported older major is CURRENT.
 ## Pipeline
 
 ```
-INVENTORY (outdated + advisories; read the CHANGELOG not the version delta; reachability triage —
+REFUSE-IF-QUARANTINED (runtime/scripts/preflight.py --mode readonly --mission modernize-it) → INVENTORY (outdated + advisories; read the CHANGELOG not the version delta; reachability triage —
   dev-only/unreachable transitive is lower priority; never `audit fix --force`)
   → BOOTSTRAP integration BASE (runtime/scripts/preflight.py --mission modernize-it --base <BASE> --fork-point <sha
     recorded in the ledger header at BASE creation>; BASE ≠ default — dispatch-lifecycle.md)

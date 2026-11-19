@@ -45,7 +45,7 @@ def _refresh_issue_gauge_best_effort() -> None:
 
 
 def configure_logging() -> None:
-    """JSON lines on stdout — what promtail scrapes via docker logs."""
+    """JSON lines on stdout — teed to the shared log volume promtail scrapes."""
     structlog.configure(
         processors=[
             structlog.processors.add_log_level,
@@ -70,7 +70,7 @@ async def telemetry_middleware(
     except Exception:
         elapsed = time.perf_counter() - start
         route = request.scope.get("route")
-        path = getattr(route, "path", request.url.path)
+        path = route.path if route is not None else "__unmatched__"
         REQUEST_LATENCY.labels(request.method, path, "500").observe(elapsed)
         get_logger().info(
             "request",
@@ -82,7 +82,7 @@ async def telemetry_middleware(
         raise
     elapsed = time.perf_counter() - start
     route = request.scope.get("route")
-    path = getattr(route, "path", request.url.path)
+    path = route.path if route is not None else "__unmatched__"
     REQUEST_LATENCY.labels(request.method, path, str(response.status_code)).observe(
         elapsed
     )

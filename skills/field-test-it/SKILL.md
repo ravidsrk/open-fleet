@@ -59,7 +59,7 @@ DEFERRED READS: liveness-resume.md on a stall or resume.
 ## Pipeline
 
 ```
-PAIR: load the version-matched guides from the binary (`orca skills get orca-emulator`,
+REFUSE-IF-QUARANTINED (runtime/scripts/preflight.py --mode readonly --mission field-test-it) → PAIR: load the version-matched guides from the binary (`orca skills get orca-emulator`,
   `orca skills get orca-emulator-android`) and establish the session per them — Android: boot/attach
   an emulator or an adb-visible physical device (adb, accessibility tree, logcat are the command
   surface); iOS: the Simulator pane via the app's own xcodebuild/simctl build+install first — the

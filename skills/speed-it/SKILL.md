@@ -55,7 +55,7 @@ work happened.
 ## Pipeline
 
 ```
-HUMAN SCOPE CONFIRM: freeze the critical-journey list + per-journey budgets (an unbounded journey
+REFUSE-IF-QUARANTINED (runtime/scripts/preflight.py --mode readonly --mission speed-it) → HUMAN SCOPE CONFIRM: freeze the critical-journey list + per-journey budgets (an unbounded journey
   list is an unbounded mission) → declare metric contracts → BASELINE every journey (to contract,
   and `explain-the-number` is not inconclusive) → rank breaches by gap×traffic
   → DIAGNOSE the bottleneck (profile; symptom→cause tree; name the one dominant cause)

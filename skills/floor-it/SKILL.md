@@ -55,7 +55,7 @@ never co-mount.
 ## Pipeline
 
 ```
-DETECT: read the stack (manifests, CI, existing gates) and DRAFT the dimension set with measured
+REFUSE-IF-QUARANTINED (runtime/scripts/preflight.py --mode readonly --mission floor-it) → DETECT: read the stack (manifests, CI, existing gates) and DRAFT the dimension set with measured
   current values (run the repo's own counters: its coverage runner, its scanner, its perf harness,
   its linters — record the command + the number per candidate dimension) — never ask what the
   repo already answers.

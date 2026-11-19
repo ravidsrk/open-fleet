@@ -797,6 +797,100 @@ class EveryWorkflowToolComesFromAHashedLock(unittest.TestCase):
                 self.assertEqual(self._mutable_images(path.read_text(encoding="utf-8")), [])
 
     APP = ROOT / "evals" / "demo" / "target-app"
+    PIP_DIRECTIVE = re.compile(
+        r"(?:^|\s)(?:--(?:index-url|extra-index-url|find-links|trusted-host)(?:=|\s|$)"
+        r"|-[if](?:\s|=|$)|-[if](?=[/.a-zA-Z0-9:]))"
+    )
+
+    @classmethod
+    def _parse_requirements_lock(cls, text):
+        """Parse requirements.lock the way pip does, tracking backslash continuations (#787)."""
+        entries, current, continued, problems = {}, None, False, []
+        for lineno, raw in enumerate(text.splitlines(), 1):
+            if raw.lstrip().startswith("#"):
+                if continued:
+                    problems.append(f"L{lineno}: comment inside backslash continuation")
+                current, continued = None, False
+                continue
+            line = raw.split(" #", 1)[0].rstrip()
+            if not line:
+                if continued:
+                    problems.append(f"L{lineno}: blank line inside backslash continuation")
+                current, continued = None, False
+                continue
+            if cls.PIP_DIRECTIVE.search(line):
+                problems.append(f"L{lineno}: forbidden pip directive: {line.strip()}")
+                continued = line.endswith("\\")
+                continue
+            if not continued:
+                if line.lstrip().startswith("-"):
+                    problems.append(f"L{lineno}: unexpected option line: {line.strip()}")
+                    continue
+                opens = re.match(
+                    r"^([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s;\\]+)(?:\s*;[^\\]*?)?\s*(\\?)$",
+                    line,
+                )
+                if not opens:
+                    problems.append(f"L{lineno}: unparsed requirement line: {line.strip()}")
+                    continue
+                name = opens.group(1).lower().replace("_", "-")
+                if name in entries:
+                    problems.append(f"L{lineno}: duplicate package entry: {name}")
+                entries[name] = {"version": opens.group(2), "hashes": []}
+                current = name
+                continued = bool(opens.group(3))
+            else:
+                body = line[:-1].strip() if line.endswith("\\") else line.strip()
+                tokens = body.split()
+                if not tokens or any(not t.startswith("--hash=sha256:") for t in tokens):
+                    problems.append(f"L{lineno}: invalid continuation line: {line.strip()}")
+                elif current is not None:
+                    entries[current]["hashes"].extend(
+                        t.removeprefix("--hash=sha256:") for t in tokens
+                    )
+                continued = line.endswith("\\")
+                if not continued:
+                    current = None
+        if continued:
+            problems.append("EOF: dangling backslash continuation")
+        return entries, problems
+
+    @staticmethod
+    def _uv_lock_hashes(lock):
+        by_pkg = {}
+        for pkg in lock.get("package", []):
+            if "version" not in pkg:
+                continue
+            key = (pkg["name"].lower().replace("_", "-"), pkg["version"])
+            digests = by_pkg.setdefault(key, set())
+            sdist = pkg.get("sdist")
+            if isinstance(sdist, dict) and str(sdist.get("hash", "")).startswith("sha256:"):
+                digests.add(sdist["hash"].removeprefix("sha256:"))
+            for wheel in pkg.get("wheels", []):
+                if isinstance(wheel, dict) and str(wheel.get("hash", "")).startswith("sha256:"):
+                    digests.add(wheel["hash"].removeprefix("sha256:"))
+        return by_pkg
+
+    @classmethod
+    def _lock_mismatch_errors(cls, req_text, uv_lock):
+        entries, problems = cls._parse_requirements_lock(req_text)
+        errors = list(problems)
+        uv_hashes = cls._uv_lock_hashes(uv_lock)
+        for name, entry in sorted(entries.items()):
+            version, hashes = entry["version"], entry["hashes"]
+            if not hashes:
+                errors.append(f"{name}=={version}: missing --hash=sha256 entries")
+                continue
+            allowed = uv_hashes.get((name, version), set())
+            if not allowed:
+                errors.append(f"{name}=={version}: absent from uv.lock")
+                continue
+            for digest in hashes:
+                if not re.fullmatch(r"[0-9a-f]{64}", digest):
+                    errors.append(f"{name}=={version}: malformed sha256 {digest!r}")
+                elif digest not in allowed:
+                    errors.append(f"{name}=={version}: hash {digest} not in uv.lock")
+        return errors
 
     def test_the_demo_containers_install_only_hashed_requirements(self):
         # PR #718 re-attack (W6-13 residual): the app containers ran `pip install -e .` against
@@ -811,6 +905,24 @@ class EveryWorkflowToolComesFromAHashedLock(unittest.TestCase):
                 self.assertIn("pip install --quiet --require-hashes --only-binary :all: "
                               "-r requirements.lock", line)
                 self.assertNotRegex(line, r"\s-e\s|--editable")
+
+    def test_the_demo_stack_does_not_mount_docker_sock(self):
+        # #787: promtail must not mount /var/run/docker.sock; app/staging ship logs through a
+        # shared named log volume mounted read-only into promtail, and app code mounts :ro.
+        compose = (self.APP / "compose.yaml").read_text(encoding="utf-8")
+        promtail = (self.APP / "observability" / "promtail-config.yml").read_text(encoding="utf-8")
+        self.assertNotIn("docker.sock", compose)
+        self.assertNotIn("docker.sock", promtail)
+        self.assertNotIn("docker_sd_configs", promtail)
+        self.assertIn("app-logs:/var/log/target-app:ro", compose)
+        self.assertIn(".:/srv/app:ro", compose)
+        self.assertNotRegex(compose, r"(?m)^\s*-\s*\.:/srv/app\s*$")
+        self.assertIn("static_configs:", promtail)
+        self.assertIn("/var/log/target-app/app.log", promtail)
+        self.assertIn("/var/log/target-app/staging.log", promtail)
+        for m in re.finditer(r'(?m)^\s*-\s*"([^"]+:\d+:\d+)"\s*$', compose):
+            self.assertTrue(m.group(1).startswith("127.0.0.1:"),
+                            f"port mapping must bind 127.0.0.1: {m.group(1)}")
 
     def test_the_containers_lock_is_the_uv_lock(self):
         import tomllib
@@ -827,6 +939,8 @@ class EveryWorkflowToolComesFromAHashedLock(unittest.TestCase):
         for block in (b for b in blocks if re.match(r"[a-z0-9]", b)):
             with self.subTest(block=block.split()[0]):
                 self.assertIn("--hash=sha256:", block)
+        self.assertEqual(self._lock_mismatch_errors(text, lock), [],
+                         "requirements.lock failed continuation, directive, or uv.lock hash check")
         project = tomllib.loads((self.APP / "pyproject.toml").read_text(encoding="utf-8"))
         wanted = {re.split(r"[<>=!~\[ ;]", d, maxsplit=1)[0].lower().replace("_", "-")
                   for d in project["project"]["dependencies"]}
@@ -841,6 +955,38 @@ class EveryWorkflowToolComesFromAHashedLock(unittest.TestCase):
         target_pkg = next(p for p in lock["package"] if p["name"] == "target-app")
         self.assertEqual(target_pkg.get("source"), {"virtual": "."},
                          "target-app in uv.lock must use a virtual source rather than editable build")
+
+    def test_the_containers_lock_rejects_broken_continuations_directives_and_forged_hashes(self):
+        h_good = "a" * 64
+        h_other = "b" * 64
+        h_forged = "c" * 64
+        uv_lock = {
+            "package": [
+                {"name": "pkg-a", "version": "1.0.0",
+                 "sdist": {"hash": f"sha256:{h_good}"}, "wheels": []},
+                {"name": "pkg-b", "version": "2.0.0",
+                 "wheels": [{"hash": f"sha256:{h_other}"}]},
+            ]
+        }
+        good = f"pkg-a==1.0.0 \\\n    --hash=sha256:{h_good}\n"
+        self.assertEqual(self._lock_mismatch_errors(good, uv_lock), [])
+        bad_cases = {
+            "dropped-backslash": f"pkg-a==1.0.0\n    --hash=sha256:{h_good}\n",
+            "index-url": f"--index-url https://evil.test/simple\n{good}",
+            "extra-index-url": f"--extra-index-url=https://evil.test/simple\n{good}",
+            "find-links": f"--find-links /tmp/wheels\n{good}",
+            "trusted-host": f"--trusted-host evil.test\n{good}",
+            "short-i": f"-i https://evil.test/simple\n{good}",
+            "short-f": f"-f /tmp/wheels\n{good}",
+            "inline-directive": f"pkg-a==1.0.0 ; python_version >= '3.13' --index-url https://evil.test \\\n    --hash=sha256:{h_good}\n",
+            "forged-hash": f"pkg-a==1.0.0 \\\n    --hash=sha256:{h_forged}\n",
+            "cross-package-hash": f"pkg-a==1.0.0 \\\n    --hash=sha256:{h_other}\n",
+            "truncated-hash": f"pkg-a==1.0.0 \\\n    --hash=sha256:{h_good}\\\n    --hash=sha256:deadbeef\n",
+        }
+        for label, sample in bad_cases.items():
+            with self.subTest(case=label):
+                self.assertTrue(self._lock_mismatch_errors(sample, uv_lock),
+                                f"{label} was not rejected by the requirements.lock verifier")
 
     def test_setup_uv_steps_pin_version_and_checksum(self):
         # #750 C4: astral-sh/setup-uv without version + checksum installs whatever uv binary is

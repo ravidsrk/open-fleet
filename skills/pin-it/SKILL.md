@@ -56,7 +56,7 @@ state), `attention-budget`, `orca-pin` (the pin record: read the prior pin + run
 ## Pipeline
 
 ```
-FREEZE the claim inventory: extract every mechanics claim from runtime/*.md, runtime/scripts/, and
+REFUSE-IF-QUARANTINED (runtime/scripts/preflight.py --mode readonly --mission pin-it) → FREEZE the claim inventory: extract every mechanics claim from runtime/*.md, runtime/scripts/, and
   mission SKILL.md dispatch preambles — command shapes, receipt fields, lifecycle rules, error
   codes, scoping claims. SCOPE CUT: claims about the fleet's own policy (BASE ≠ default, ledger
   flags, reviewed-SHA freshness) are enforced by preflight.py / verify.py and are NOT in scope —
