@@ -54,7 +54,14 @@ Usage:
 
 Exit: 0 valid and fresh · 1 invalid or stale (matrix/markdown still print) · 2 unreadable / usage.
 """
-from __future__ import annotations
+import sys
+
+# W3-01: drop this script's own directory from sys.path before any other import, so a sibling
+# named like a stdlib module can never be the module imported here (tests/test_entrypoint_guard.py).
+if (__name__ == "__main__" and not getattr(sys.flags, "safe_path", False) and sys.path
+        and ("os" not in sys.modules or sys.modules["os"].path.realpath(sys.path[0])
+             == sys.modules["os"].path.dirname(sys.modules["os"].path.realpath(__file__)))):
+    del sys.path[0]
 
 import argparse
 import datetime
@@ -62,7 +69,6 @@ import functools
 import importlib.util
 import json
 import re
-import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent

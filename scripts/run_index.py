@@ -26,13 +26,21 @@ Cells are the Markdown the table shows, relative to docs/runs/; no cell holds a 
 
 Exit: 0 every check holds, 1 a check failed, 2 the input could not be read.
 """
+import sys
+
+# W3-01: drop this script's own directory from sys.path before any other import, so a sibling
+# named like a stdlib module can never be the module imported here (tests/test_entrypoint_guard.py).
+if (__name__ == "__main__" and not getattr(sys.flags, "safe_path", False) and sys.path
+        and ("os" not in sys.modules or sys.modules["os"].path.realpath(sys.path[0])
+             == sys.modules["os"].path.dirname(sys.modules["os"].path.realpath(__file__)))):
+    del sys.path[0]
+
 import argparse
 import bisect
 import html
 import importlib.util
 import json
 import re
-import sys
 import urllib.parse
 from datetime import date
 from pathlib import Path
