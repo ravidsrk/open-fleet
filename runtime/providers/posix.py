@@ -45,6 +45,7 @@ from .base import (
     check_monotonic_profile,
     env_get,
     fence_state,
+    most_restrictive_profile,
     normalize_read,
     normalize_show,
 )
@@ -244,18 +245,40 @@ def _runs_a_command(value: Any) -> bool:
     return False
 
 
-def _merge_hook_doc(path: Path, ours: dict[str, Any]) -> dict[str, Any]:
-    """`ours` laid over the JSON object already at `path` (2026-10-26 review).
+_SAFE_PERMISSION_LIST_KEYS = frozenset(("allow", "deny", "ask"))
+_SAFE_CRUSH_OPTION_KEYS = frozenset(("debug", "debug_lsp"))
 
-    The guard used to REPLACE the file: a repository's checked-in `.crush/crush.json` or
-    `.codex/hooks.json`, or an operator's `.claude/settings.local.json` in a reused worktree, lost
-    every other key it carried. Now its plain settings survive, and what could disarm the guard
-    or run beside it is dropped: `disableAllHooks`, `env` entries that steer the hook
-    (ORCA_*/OPEN_FLEET_*) or the shell that runs it (`_SHELL_STEERING_KEYS`), every hook already
-    there, and every setting that names a command (#707 review: a kept repository hook ran beside
-    the guard, never through it, and Codex launches with --dangerously-bypass-hook-trust). The
-    `hooks` written are ours alone. A file that is unreadable or not a JSON object is replaced
-    outright.
+
+def _sanitize_permissions(value: Any) -> dict[str, list[str]] | None:
+    """Keep only safe non-executing permission rule lists (`allow`, `deny`, `ask`).
+
+    Drops privilege-widening keys such as `defaultMode` or `additionalDirectories`."""
+    if not isinstance(value, dict) or _runs_a_command(value):
+        return None
+    out: dict[str, list[str]] = {}
+    for k, v in value.items():
+        if k in _SAFE_PERMISSION_LIST_KEYS and isinstance(v, list) and all(isinstance(x, str) for x in v):
+            out[k] = list(v)
+    return out or None
+
+
+def _sanitize_crush_options(value: Any) -> dict[str, Any] | None:
+    """Keep only safe boolean UI/debug flags from a repository's `.crush/crush.json` `options`."""
+    if not isinstance(value, dict) or _runs_a_command(value):
+        return None
+    out = {k: v for k, v in value.items() if k in _SAFE_CRUSH_OPTION_KEYS and isinstance(v, bool)}
+    return out or None
+
+
+def _merge_hook_doc(path: Path, ours: dict[str, Any]) -> dict[str, Any]:
+    """Build the guard config at `path` from `ours` plus a strict allowlist of safe keys (#774).
+
+    Untrusted repository configs at a guard path must NEVER pass arbitrary top-level keys
+    (`env`, `apiKeyHelper`, `awsAuthRefresh`, `awsCredentialExport`, `otelHeadersHelper`,
+    `disableAllHooks`, `statusLine`, `mcpServers`, `lsp`, repository `hooks`, etc.) into a
+    worker's harness. Only explicitly allowlisted non-executing keys (`permissions` allow/deny/ask
+    string lists for Claude settings, safe boolean `options` for `crush.json`) survive alongside
+    our own guard entries. A file that is unreadable or not a JSON object is replaced outright.
     """
     try:
         have = json.loads(path.read_text(encoding="utf-8"))
@@ -263,11 +286,15 @@ def _merge_hook_doc(path: Path, ours: dict[str, Any]) -> dict[str, Any]:
         return ours
     if not isinstance(have, dict):
         return ours
-    merged: dict[str, Any] = {k: v for k, v in have.items()
-                              if k not in ("disableAllHooks", "hooks") and not _runs_a_command(v)}
-    env = merged.get("env")
-    if isinstance(env, dict):
-        merged["env"] = {k: v for k, v in env.items() if not _steers_the_guard(k)}
+    merged: dict[str, Any] = {}
+    if path.name in ("settings.local.json", "settings.json") and "permissions" in have:
+        safe_perms = _sanitize_permissions(have["permissions"])
+        if safe_perms is not None:
+            merged["permissions"] = safe_perms
+    if path.name == "crush.json" and "options" in have:
+        safe_opts = _sanitize_crush_options(have["options"])
+        if safe_opts is not None:
+            merged["options"] = safe_opts
     merged["hooks"] = {event: list(entries) for event, entries in ours.get("hooks", {}).items()}
     for key, value in ours.items():
         if key != "hooks":
@@ -2126,6 +2153,7 @@ if {repr(self.backend)} == "cmux":
                 effort=effort or "xhigh",
                 deny_hook_path=hook_script,
                 bridge_dir=str(Path(wt_path) / ".open-fleet" / "bridges"),
+                environ=self.env,
             )
             # The guard is installed; prove it is armed before the agent starts (W4-06). A
             # new-child spawn cannot be verified in the coordinator's pre-launch gate (no
@@ -3507,6 +3535,13 @@ if {repr(self.backend)} == "cmux":
                         "cross_run_access",
                         f"dispatch {dispatch_id!r} belongs to run {row_run!r}, not {bound!r}",
                     )
+        if self.state._own_worker_identity():
+            own_ids = set(self.state._bound_worker_identities())
+            if dispatch_id not in own_ids:
+                raise ProviderError(
+                    "worker_forbidden",
+                    f"launched worker cannot fence peer dispatch {dispatch_id!r}; only the coordinator may",
+                )
         payload_sha = _launch_payload_sha256({"verb": verb, "dispatch_id": dispatch_id, "reason": reason})
         method = f"worker-{verb}"
         cached = self.state.get_or_record_request(retry_request, method, payload_sha)
@@ -3833,6 +3868,7 @@ if {repr(self.backend)} == "cmux":
         include_visual_layouts: bool = False,
     ) -> dict[str, Any]:
         bound = self.state._resolve_caller_run(None, default_run=None)
+        is_worker = bool(self.state._own_worker_identity())
         with self.state._connect() as conn:
             rows = conn.execute("SELECT * FROM terminals ORDER BY created_at DESC").fetchall()
             foreign_handles = (
@@ -3846,17 +3882,20 @@ if {repr(self.backend)} == "cmux":
                 if bound
                 else set()
             )
-            owned_handles = (
-                {
-                    str(orow["terminal_handle"])
-                    for orow in conn.execute(
-                        "SELECT DISTINCT terminal_handle FROM dispatches WHERE terminal_handle != '' AND run_id = ?",
-                        (bound,),
-                    ).fetchall()
-                }
-                if bound
-                else None
-            )
+            if is_worker:
+                owned_handles: set[str] | None = set(self.state._bound_worker_identities(conn))
+            else:
+                owned_handles = (
+                    {
+                        str(orow["terminal_handle"])
+                        for orow in conn.execute(
+                            "SELECT DISTINCT terminal_handle FROM dispatches WHERE terminal_handle != '' AND run_id = ?",
+                            (bound,),
+                        ).fetchall()
+                    }
+                    if bound
+                    else None
+                )
         terms = [
             {
                 "handle": r["handle"],
@@ -3987,6 +4026,11 @@ if {repr(self.backend)} == "cmux":
                     f"terminal {terminal!r} is bound to run {disp['run_id']!r}, not {eff_run!r}",
                 )
         r = self._terminal_row(terminal)
+        if self.state._own_worker_identity():
+            raise ProviderError(
+                "worker_forbidden",
+                f"launched worker cannot send input to terminal {terminal!r}; only the coordinator may",
+            )
         self._deliver_terminal_input(r, text, enter=enter)
         req_id = f"req_{uuid.uuid4().hex[:10]}"
         stages = ["input_accepted"] if (r["backend"] or self.backend) != "dry-run" else ["input_accepted", "simulated"]
@@ -4001,6 +4045,10 @@ if {repr(self.backend)} == "cmux":
     ) -> dict[str, Any]:
         worker_run = self.state._worker_bound_run()
         eff_run = self.state._resolve_caller_run(run, default_run=None)
+        parent_prof = most_restrictive_profile(
+            env_get("OPEN_FLEET_PARENT_PROFILE", "ORCA_PARENT_PROFILE", self.env, ""),
+            env_get("OPEN_FLEET_SANDBOX_PROFILE", "ORCA_SANDBOX_PROFILE", self.env, ""),
+        )
         req_id = f"req_{uuid.uuid4().hex[:10]}"
         dispatch_id = f"disp_{uuid.uuid4().hex[:10]}"
         now = time.time()
@@ -4042,6 +4090,22 @@ if {repr(self.backend)} == "cmux":
                         "cross_run_access",
                         f"launched worker in run {worker_run!r} cannot inject into unregistered terminal {to_handle!r}",
                     )
+            if self.state._own_worker_identity():
+                conn.execute("ROLLBACK")
+                raise ProviderError(
+                    "worker_forbidden",
+                    f"launched worker cannot inject tasks into terminal {to_handle!r}; only the coordinator may",
+                )
+            prior_disp = conn.execute(
+                "SELECT profile FROM dispatches WHERE terminal_handle = ? ORDER BY created_at DESC LIMIT 1",
+                (to_handle,),
+            ).fetchone()
+            target_profile = str(prior_disp["profile"]) if (prior_disp and prior_disp["profile"]) else "rw"
+            try:
+                check_monotonic_profile(parent_prof, target_profile)
+            except ProviderError:
+                conn.execute("ROLLBACK")
+                raise
             cur = conn.execute(
                 "UPDATE tasks SET status = 'dispatched', updated_at = ? WHERE id = ? AND status = 'ready'",
                 (now, task_id),
@@ -4060,7 +4124,7 @@ if {repr(self.backend)} == "cmux":
                     task_id,
                     effective_run,
                     term_row["worktree"] or "",
-                    self.env.get("OPEN_FLEET_SANDBOX_PROFILE") or "ro",
+                    target_profile,
                     to_handle,
                     int(term_row["pid"] or 0),
                     term_row["backend"] or self.backend,

@@ -999,5 +999,82 @@ class TestCoordinatorTakeoverAndWorkerBindingFence(Base):
         )
 
 
+    def test_773_gated_task_cannot_bypass_via_task_update_and_workers_cannot_mutate_tasks_or_gates(self):
+        self.store.run_create(run="run-g", sender="coord-g")
+        t1 = self.store.task_create(spec="gated-unit", run="run-g")["task"]["id"]
+        t2 = self.store.task_create(spec="other-unit", run="run-g")["task"]["id"]
+        gate_id = self.store.gate_create(task_id=t1, question="approve?", sender="coord-g", run="run-g")["gate"]["id"]
+        # Pending gate holds t1 against transitioning into ready/dispatched/completed or out of blocked:
+        for bad_status in ("ready", "dispatched", "completed", "failed", "pending"):
+            with self.assertRaises(self.mod.ProviderError) as ctx:
+                self.store.task_update(task_id=t1, status=bad_status, run="run-g")
+            self.assertEqual(ctx.exception.code, "gate_held", bad_status)
+        # Re-asserting blocked stays allowed:
+        self.store.task_update(task_id=t1, status="blocked", run="run-g")
+        # Resolving the gate via gate_resolve releases the hold:
+        self.store.gate_resolve(gate_id=gate_id, resolution="approved", sender="coord-g", run="run-g")
+        self.store.task_update(task_id=t1, status="completed", run="run-g")
+
+        # Launched worker inside run-g cannot call task_update or gate_create even on its own run:
+        with self.store._connect() as conn:
+            conn.execute(
+                "INSERT INTO dispatches(dispatch_id, task_id, run_id, worktree, agent, terminal_handle, state, created_at, updated_at) "
+                "VALUES ('disp-g1', ?, 'run-g', '/w', 'claude', 'term-g1', 'running', 10, 10)",
+                (t2,),
+            )
+        worker_store = self.mod.LocalStateStore(
+            self.db,
+            env={"OPEN_FLEET_DISPATCH_ID": "disp-g1", "OPEN_FLEET_TERMINAL_HANDLE": "term-g1"},
+        )
+        with self.assertRaises(self.mod.ProviderError) as ctx_tu:
+            worker_store.task_update(task_id=t2, status="completed", run="run-g")
+        self.assertEqual(ctx_tu.exception.code, "worker_forbidden")
+        with self.assertRaises(self.mod.ProviderError) as ctx_gc:
+            worker_store.gate_create(task_id=t2, question="worker gate?", run="run-g")
+        self.assertEqual(ctx_gc.exception.code, "worker_forbidden")
+
+    def test_786_check_messages_wait_reuses_one_connection_without_write_lock_polling(self):
+        self.store.run_create(run="run-poll", sender="coord-poll")
+        connects = 0
+        begin_immediates = 0
+        orig_connect = self.store._connect
+
+        class _CountingConn:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def execute(self, sql, *args, **kwargs):
+                nonlocal begin_immediates
+                if str(sql).strip().upper().startswith("BEGIN IMMEDIATE"):
+                    begin_immediates += 1
+                return self._inner.execute(sql, *args, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+            def __enter__(self):
+                self._inner.__enter__()
+                return self
+
+            def __exit__(self, *exc):
+                return self._inner.__exit__(*exc)
+
+        def tracked_connect():
+            nonlocal connects
+            connects += 1
+            return _CountingConn(orig_connect())
+
+        self.store._connect = tracked_connect
+        try:
+            res = self.store.check_messages(terminal="coord-poll", run="run-poll", wait=True, timeout_ms=260)
+        finally:
+            self.store._connect = orig_connect
+        self.assertEqual(res["count"], 0)
+        self.assertTrue(res["timedOut"])
+        # One connection for initial scope check + one reused connection for the entire wait loop:
+        self.assertLessEqual(connects, 2, f"expected <=2 connections across wait loop, got {connects}")
+        self.assertEqual(begin_immediates, 0, f"polling wait loop must not run BEGIN IMMEDIATE, got {begin_immediates}")
+
+
 if __name__ == "__main__":
     unittest.main()

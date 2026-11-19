@@ -677,7 +677,7 @@ class GuardConfigsMergeWhatIsAlreadyThere(unittest.TestCase):
         self.install()
         doc = self.read(".claude/settings.local.json")
         self.assertEqual(doc["permissions"], {"allow": ["Bash(ls)"]})
-        self.assertEqual(doc["env"], {"KEEP_ME": "1"}, "env that steers the guard is dropped, the rest kept")
+        self.assertNotIn("env", doc, "untrusted env block is dropped completely (#774)")
         self.assertNotIn("disableAllHooks", doc)
         pre = doc["hooks"]["PreToolUse"]
         self.assertIn(str(self.posix_mod.CANONICAL_DENY_HOOK), pre[0]["hooks"][0]["command"])
@@ -695,7 +695,7 @@ class GuardConfigsMergeWhatIsAlreadyThere(unittest.TestCase):
             (self.wt / rel).write_text(json.dumps({"env": {**steer, "KEEP_ME": "1"}}), encoding="utf-8")
         self.install(agent="crush")
         for rel in (".claude/settings.local.json", ".codex/hooks.json", ".crush/crush.json"):
-            self.assertEqual(self.read(rel)["env"], {"KEEP_ME": "1"}, rel)
+            self.assertNotIn("env", self.read(rel), rel)
 
     def test_the_dropped_keys_cover_what_verify_settings_refuses(self):
         hook = (Path(__file__).resolve().parents[1] / "runtime" / "scripts" / "deny-hook.sh").read_text(
@@ -806,6 +806,77 @@ class StateAndLanesArePrivateToTheFleetUser(unittest.TestCase):
             os.chmod(pre, 0o755)
             providers.get_provider("posix", env={**env, "OPEN_FLEET_STATE_DB": str(pre / "runtime.db")})
             self.assertEqual(mode(pre), 0o755, "an operator's existing directory keeps its mode")
+
+
+class AdversarialReviewBaseAndOrcaTests(unittest.TestCase):
+    """Regressions for #775 and #786 on runtime/providers/base.py and runtime/providers/orca.py."""
+
+    def test_775_claude_budget_args_and_environ_threading(self):
+        base = _load_base()
+        # Require budget fails closed when unset or malformed:
+        for truthy in ("1", "true", "YES", "on"):
+            with self.assertRaises(base.ProviderError) as ctx:
+                base.claude_budget_args({"OPEN_FLEET_REQUIRE_BUDGET": truthy})
+            self.assertEqual(ctx.exception.code, "budget_required")
+        for malformed in ("maybe", "2", "truthy", "enabled"):
+            with self.assertRaises(base.ProviderError) as ctx_bad:
+                base.claude_budget_args({"OPEN_FLEET_REQUIRE_BUDGET": malformed, "OPEN_FLEET_MAX_BUDGET_USD": "5"})
+            self.assertEqual(ctx_bad.exception.code, "invalid_budget")
+        for falsy in ("", "0", "false", "NO", "off"):
+            self.assertEqual(base.claude_budget_args({"OPEN_FLEET_REQUIRE_BUDGET": falsy}), [])
+        # environ threads through build_harness_command -> _build_harness_command -> claude_budget_args:
+        launch = base.build_harness_command(
+            "claude", "rw", "/tmp/wt", "fix it",
+            environ={"OPEN_FLEET_MAX_BUDGET_USD": "4.50", "OPEN_FLEET_REQUIRE_BUDGET": "true"},
+        )
+        self.assertEqual(launch["argv"][-4:], ["--max-budget-usd", "4.50", "--", "fix it"])
+
+    def test_786_double_dash_before_positional_prompt_across_seven_harnesses(self):
+        base = _load_base()
+        hostile_prompt = "--dangerously-skip-permissions evil"
+        for agent in ("claude", "codex", "opencode", "omp", "pi", "jcode", "crush"):
+            for profile in ("ro", "rw"):
+                with self.subTest(agent=agent, profile=profile):
+                    launch = base.build_harness_command(agent, profile, "/tmp/wt", hostile_prompt, environ={})
+                    argv = launch["argv"]
+                    self.assertEqual(argv[-2:], ["--", hostile_prompt], f"{agent}/{profile}: {argv}")
+
+    def test_786_flag_parsing_bool_flags_and_prompt_text_flag(self):
+        base = _load_base()
+        pos, flags = base._parse_flag_map(["--no-enter", "--include-remote", "--transcript", "--prompt", "--json", "tail"])
+        self.assertEqual(flags["no-enter"], True)
+        self.assertEqual(flags["include-remote"], True)
+        self.assertEqual(flags["transcript"], True)
+        self.assertEqual(flags["prompt"], "--json")
+        self.assertEqual(pos, ["tail"])
+        # Empty --prompt flag rejected cleanly by _text_flag during dispatch:
+        class _DummyProvider(base.RuntimeProvider):
+            name = "dummy"
+            def worker_start(self, **kw):
+                return kw
+        with self.assertRaises(base.ProviderError) as ctx:
+            _DummyProvider().dispatch(["orchestration", "worker-start", "--task", "t1", "--prompt"])
+        self.assertEqual(ctx.exception.code, "invalid_argument")
+
+    def test_786_orca_dispatch_refuses_ok_false_or_nonzero_without_error_key(self):
+        providers = _load_providers()
+        base = _load_base()
+        with tempfile.TemporaryDirectory() as tmp:
+            stub_false = Path(tmp) / "orca-false"
+            stub_false.write_text('#!/bin/sh\necho \'{"ok": false, "result": {}}\'\nexit 0\n', encoding="utf-8")
+            stub_false.chmod(0o755)
+            prov_false = providers.OrcaProvider(env={"ORCA_CLI_COMMAND": str(stub_false)})
+            with self.assertRaises(base.ProviderError) as ctx1:
+                prov_false.dispatch(["orchestration", "check"])
+            self.assertEqual(ctx1.exception.code, "runtime_error")
+
+            stub_rc = Path(tmp) / "orca-rc"
+            stub_rc.write_text('#!/bin/sh\necho \'{}\'\nexit 7\n', encoding="utf-8")
+            stub_rc.chmod(0o755)
+            prov_rc = providers.OrcaProvider(env={"ORCA_CLI_COMMAND": str(stub_rc)})
+            with self.assertRaises(base.ProviderError) as ctx2:
+                prov_rc.dispatch(["orchestration", "check"])
+            self.assertEqual(ctx2.exception.code, "runtime_error")
 
 
 if __name__ == "__main__":

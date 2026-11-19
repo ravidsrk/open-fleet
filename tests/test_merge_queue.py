@@ -817,13 +817,12 @@ class GateRunsIsolated(QueueCase):
         probe = self.w.tmp / "bin" / "arith-probe"
         probe.write_text("#!/bin/sh\necho 0\n", encoding="utf-8")
         probe.chmod(0o755)
-        gate_cmd = f"(exit $(( $({probe}) )))"
+        gate_cmd = f"test $({probe}) -eq 0"
         exes, _, probs = mq_mod.MergeQueue._analyze_gate_command(gate_cmd)
         self.assertEqual(probs, [])
         self.assertIn(str(probe), exes)
         for sub_form in (
-            f"(exit $(( `{probe}` )))",
-            f"test $(( 1 + $({probe}) )) -eq 1",
+            f"test $(( 1 + 0 )) -eq 1 && {probe}",
             f"echo $(({probe}); true)",
             f"true # '\necho $({probe}) # '",
             f"echo $(case x in (x) {probe} ;; esac)",
@@ -833,6 +832,9 @@ class GateRunsIsolated(QueueCase):
             self.assertEqual(sub_probs, [], sub_form)
             self.assertIn(str(probe), sub_exes, sub_form)
         for unsafe_form in (
+            f"(exit $(( $({probe}) )))",
+            f"(exit $(( `{probe}` )))",
+            f"test $(( 1 + $({probe}) )) -eq 1",
             "runner$((1+1))",
             f"echo $'\\'' $({probe}) $'\\''",
             ': "${PYTHONPATH:=/tmp}"',
@@ -2144,6 +2146,104 @@ class DoctrineWiring(unittest.TestCase):
         text = (ROOT / "docs" / "runtime-scripts.md").read_text(encoding="utf-8")
         self.assertIn("## `merge_queue.py`", text)
         self.assertIn("tests/test_merge_queue_drills.py", text)
+
+
+class AdversarialReview776And770(unittest.TestCase):
+    """Regressions for #776 (gate fingerprinting + protected-branch teardown) and #770 (W3-01 guard)."""
+
+    def test_w3_01_canonical_guard_and_no_future_import(self):
+        import ast
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "_test_entrypoint_guard_ref", Path(__file__).resolve().parent / "test_entrypoint_guard.py"
+        )
+        assert spec and spec.loader
+        guard_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard_mod)
+
+        body = guard_mod._statements("runtime/scripts/merge_queue.py")
+        self.assertGreaterEqual(len(body), 2)
+        first, second = body[0], body[1]
+        self.assertTrue(isinstance(first, ast.Import) and [a.name for a in first.names] == ["sys"])
+        self.assertEqual(ast.dump(second), ast.dump(ast.parse(guard_mod.CANONICAL_GUARD).body[0]))
+        tree = ast.parse((ROOT / "runtime" / "scripts" / "merge_queue.py").read_text(encoding="utf-8"))
+        futures = [n.lineno for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module == "__future__"]
+        self.assertEqual(futures, [])
+
+    def test_for_and_select_without_semicolon_before_do_fingerprints_body(self):
+        for cmd in (
+            "for x do /opt/tools/evil; done",
+            "select x do /opt/tools/evil; done",
+        ):
+            exes, _, probs = mq_mod.MergeQueue._analyze_gate_command(cmd)
+            self.assertEqual(probs, [], cmd)
+            self.assertIn("/opt/tools/evil", exes, cmd)
+
+    def test_arith_body_forbids_all_command_substitutions(self):
+        for cmd in (
+            'echo "$(( $(echo 1) ))"',
+            "echo $(( `echo 1` ))",
+            'echo "${x:-$(( $(echo 1) ))}"',
+        ):
+            _, _, probs = mq_mod.MergeQueue._analyze_gate_command(cmd)
+            self.assertTrue(probs, cmd)
+
+    def test_case_inside_cmdsub_and_pipe_esac_are_handled_safely(self):
+        for unsafe in (
+            'echo "$(case x in x) /opt/tools/evil ;; esac)"',
+            "echo \"$(case x in 'x') /opt/tools/evil ;; esac)\"",
+            'echo "$(case x in a|esac) /opt/tools/evil ;; esac)"',
+            'echo "$(case x in (a) true ;; x) /opt/tools/evil ;; esac)"',
+        ):
+            _, _, probs = mq_mod.MergeQueue._analyze_gate_command(unsafe)
+            self.assertTrue(probs, unsafe)
+        for safe_case in (
+            "case x in a | esac) /opt/tools/probe ;; esac",
+            "( case x in a | esac) /opt/tools/probe ;; esac )",
+            "case x in (esac) /opt/tools/probe ;; esac",
+            'echo "$(case x in (a|esac) /opt/tools/probe ;; esac)"',
+        ):
+            exes, _, probs = mq_mod.MergeQueue._analyze_gate_command(safe_case)
+            self.assertEqual(probs, [], safe_case)
+            self.assertIn("/opt/tools/probe", exes, safe_case)
+
+    def test_subshell_function_scoping_and_shadowed_external_checks(self):
+        exes, _, probs = mq_mod.MergeQueue._analyze_gate_command("( helper() { :; } ); helper")
+        self.assertEqual(probs, [])
+        self.assertIn("helper", exes)
+        self.assertNotIn("__func__:helper", exes)
+
+        w = W.World(Path(tempfile.mkdtemp(prefix="mq-test-")))
+        self.addCleanup(w.cleanup)
+        q = w.queue()
+        _, probs_py = q._gate_fingerprint("if false; then python3() { :; }; fi; python3 -c 'print(1)'")
+        self.assertTrue(probs_py, "function shadowing external interpreter must fail closed")
+
+        custom_dir = w.tmp / "bin" / "fn-shadow"
+        custom_dir.mkdir(parents=True, exist_ok=True)
+        shadowed = custom_dir / "mygate"
+        shadowed.write_text("#!/bin/sh\neval \"$UNSAFE\"\n", encoding="utf-8")
+        shadowed.chmod(0o755)
+        old_path = q.env.get("PATH", "")
+        q.env["PATH"] = f"{custom_dir}:{old_path}"
+        _, probs_body = q._gate_fingerprint("if false; then mygate() { :; }; fi; mygate")
+        self.assertTrue(probs_body, "function shadowing external script must analyze its body")
+
+    def test_protected_default_and_base_branches_are_never_deleted(self):
+        w = W.World(Path(tempfile.mkdtemp(prefix="mq-test-")))
+        self.addCleanup(w.cleanup)
+        w.cli(*w.init_args())
+        q = w.queue()
+        cfg = {"repo": "github.com/team/repo", "base": W.BASE, "default_branch": W.DEFAULT, "mode": "gh"}
+        for branch in (W.DEFAULT, W.BASE):
+            entry = {"entry_id": "mq_prot", "branch": branch, "accepted_head": "a" * 40, "pr": 99}
+            dec = q._teardown_decide(cfg, entry)
+            self.assertEqual(dec["delete"], False)
+            self.assertEqual(dec["final"], True)
+            self.assertEqual(dec["outcome"], "retained: protected branch")
+            outcome, final, claimed = q._delete_branch("unused-token", cfg, entry, mq_mod.EffectLock(w.tmp / "l"))
+            self.assertEqual((outcome, final, claimed), ("retained: protected branch", True, None))
 
 
 if __name__ == "__main__":
