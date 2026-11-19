@@ -115,6 +115,7 @@ def build_harness_command(
     deny_hook_path: str | None = None,
     bridge_dir: str | None = None,
     data_dir: str | None = None,
+    environ: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Build the launch for `agent`; adds `shell`: the COMPLETE quoted launch line.
 
@@ -134,6 +135,7 @@ def build_harness_command(
         deny_hook_path=deny_hook_path,
         bridge_dir=bridge_dir,
         data_dir=data_dir,
+        environ=environ,
     )
     wt_abs = worktree if worktree and os.path.isabs(worktree) else ""
     if wt_abs:
@@ -176,15 +178,33 @@ def shell_launch_line(launch: dict[str, Any]) -> str:
 # where a runtime EXECUTES that argv (posix, worktrunk): the `command` label stays without it,
 # since an interactive (non -p) session ignores the flag. spawn_worker.sh names every other lane.
 MAX_BUDGET_ENV = "OPEN_FLEET_MAX_BUDGET_USD"
+REQUIRE_BUDGET_ENV = "OPEN_FLEET_REQUIRE_BUDGET"
+_REQUIRE_BUDGET_OFF = frozenset({"", "0", "false", "no", "off"})
+_REQUIRE_BUDGET_ON = frozenset({"1", "true", "yes", "on"})
 _BUDGET_RE = re.compile(r"(?:0|[1-9][0-9]{0,5})(?:\.[0-9]{1,4})?")
 
 
 def claude_budget_args(environ: dict[str, str] | None = None) -> list[str]:
     """`["--max-budget-usd", "<usd>"]` from OPEN_FLEET_MAX_BUDGET_USD, or [] when it is unset or
     empty. A value that is not a plain positive dollar amount is refused, never dropped: a typo
-    must not launch a worker the coordinator believes is capped."""
-    raw = (os.environ if environ is None else environ).get(MAX_BUDGET_ENV, "")
+    must not launch a worker the coordinator believes is capped. Also enforces
+    OPEN_FLEET_REQUIRE_BUDGET fail-closed."""
+    env = os.environ if environ is None else environ
+    raw_req = env.get(REQUIRE_BUDGET_ENV, "")
+    norm_req = raw_req.lower()
+    if norm_req not in _REQUIRE_BUDGET_OFF and norm_req not in _REQUIRE_BUDGET_ON:
+        raise ProviderError(
+            "invalid_budget",
+            f"{REQUIRE_BUDGET_ENV}={raw_req!r} is not a recognized boolean "
+            "(use 1/true/yes/on or 0/false/no/off)",
+        )
+    raw = env.get(MAX_BUDGET_ENV, "")
     if not raw:
+        if norm_req in _REQUIRE_BUDGET_ON:
+            raise ProviderError(
+                "budget_required",
+                f"{REQUIRE_BUDGET_ENV}={raw_req!r} requires {MAX_BUDGET_ENV} to be set",
+            )
         return []
     if not _BUDGET_RE.fullmatch(raw) or float(raw) <= 0:
         raise ProviderError("invalid_budget",
@@ -203,6 +223,7 @@ def _build_harness_command(
     deny_hook_path: str | None = None,
     bridge_dir: str | None = None,
     data_dir: str | None = None,
+    environ: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Build the CLI command, argv, env, and profile_flag for any of the 14 CLI harnesses.
 
@@ -230,7 +251,7 @@ def _build_harness_command(
     }
 
     if agent == "claude":
-        budget = claude_budget_args()
+        budget = claude_budget_args(environ)
         if profile == "ro":
             flag = "--permission-mode plan"
             argv = ["claude", "-p", "--permission-mode", "plan",
@@ -238,7 +259,7 @@ def _build_harness_command(
                     "--output-format", "stream-json", "--verbose"]
             argv += budget
             if prompt_str:
-                argv.append(prompt_str)
+                argv += ["--", prompt_str]
             # `=`-joined and ending on the fixed-arity plan flag: --disallowedTools is variadic,
             # and a gt alias gets a prompt appended (emdash.py EMDASH_CLAUDE_RO_ARGS, #596).
             cmd = f"claude --disallowedTools={CLAUDE_RO_DISALLOWED_TOOLS} --permission-mode plan"
@@ -248,7 +269,7 @@ def _build_harness_command(
                     "--output-format", "stream-json", "--verbose"]
             argv += budget
             if prompt_str:
-                argv.append(prompt_str)
+                argv += ["--", prompt_str]
             cmd = "claude --dangerously-skip-permissions"
         return {"agent": agent, "profile": profile, "argv": argv, "command": cmd, "env": env, "profile_flag": flag}
 
@@ -260,7 +281,7 @@ def _build_harness_command(
                     "-c", 'approval_policy="never"', "-c", cx_eff,
                     "--dangerously-bypass-hook-trust"]
             if prompt_str:
-                argv.append(prompt_str)
+                argv += ["--", prompt_str]
             cmd = f"codex --sandbox read-only -c {cx_eff}"
         else:
             flag = "--dangerously-bypass-approvals-and-sandbox"
@@ -268,7 +289,7 @@ def _build_harness_command(
                     "--dangerously-bypass-approvals-and-sandbox", "-c", cx_eff,
                     "--dangerously-bypass-hook-trust"]
             if prompt_str:
-                argv.append(prompt_str)
+                argv += ["--", prompt_str]
             cmd = f"codex --dangerously-bypass-approvals-and-sandbox -c {cx_eff}"
         return {"agent": agent, "profile": profile, "argv": argv, "command": cmd, "env": env, "profile_flag": flag}
 
@@ -279,7 +300,7 @@ def _build_harness_command(
             flag = "edit:deny,bash:deny"
             argv = ["opencode", "run", "--standalone", "--format", "json", "--dir", wt]
             if prompt_str:
-                argv.append(prompt_str)
+                argv += ["--", prompt_str]
             cmd = f"OPENCODE_CONFIG_CONTENT={shlex.quote(cfg)} opencode run --standalone --format json --dir {shlex.quote(wt)}"
         else:
             cfg = json.dumps({"permission": {"*": "allow", "external_directory": "deny"}})
@@ -287,7 +308,7 @@ def _build_harness_command(
             flag = "--auto --standalone"
             argv = ["opencode", "run", "--auto", "--standalone", "--format", "json", "--dir", wt]
             if prompt_str:
-                argv.append(prompt_str)
+                argv += ["--", prompt_str]
             cmd = f"OPENCODE_CONFIG_CONTENT={shlex.quote(cfg)} opencode run --auto --standalone --format json --dir {shlex.quote(wt)}"
         return {"agent": agent, "profile": profile, "argv": argv, "command": cmd, "env": env, "profile_flag": flag}
 
@@ -298,14 +319,14 @@ def _build_harness_command(
             argv = ["omp", "-p", "--mode", "json", "--cwd", wt, "--no-session", "--no-lsp",
                     "--tools", "read,grep,glob,find,ast_grep", "--approval-mode", "always-ask"]
             if prompt_str:
-                argv.append(prompt_str)
+                argv += ["--", prompt_str]
             cmd = f"PI_NO_TITLE=1 omp -p --mode json --cwd {shlex.quote(wt)} --no-session --no-lsp --tools read,grep,glob,find,ast_grep --approval-mode always-ask"
         else:
             flag = "--yolo"
             argv = ["omp", "-p", "--mode", "json", "--cwd", wt, "--yolo",
                     "--trusted-extension", omp_bridge]
             if prompt_str:
-                argv.append(prompt_str)
+                argv += ["--", prompt_str]
             cmd = f"PI_NO_TITLE=1 omp -p --mode json --cwd {shlex.quote(wt)} --yolo --trusted-extension {shlex.quote(omp_bridge)}"
         return {"agent": agent, "profile": profile, "argv": argv, "command": cmd, "env": env, "profile_flag": flag}
 
@@ -316,14 +337,14 @@ def _build_harness_command(
                     "--tools", "read,grep,find,ls",
                     "--exclude-tools", "bash,powershell,write,edit,codemode,mcp__*"]
             if prompt_str:
-                argv.append(prompt_str)
+                argv += ["--", prompt_str]
             cmd = f"cd {shlex.quote(wt)} && pi -p --mode json --no-session --no-mcp -ne -na --tools read,grep,find,ls --exclude-tools 'bash,powershell,write,edit,codemode,mcp__*'"
         else:
             flag = "--tools read,bash,edit,write,grep,find,ls"
             argv = ["pi", "-p", "--mode", "json", "-e", omp_bridge,
                     "--tools", "read,bash,edit,write,grep,find,ls"]
             if prompt_str:
-                argv.append(prompt_str)
+                argv += ["--", prompt_str]
             cmd = f"cd {shlex.quote(wt)} && pi -p --mode json -e {shlex.quote(omp_bridge)} --tools read,bash,edit,write,grep,find,ls"
         return {"agent": agent, "profile": profile, "argv": argv, "command": cmd, "env": env, "profile_flag": flag}
 
@@ -334,7 +355,7 @@ def _build_harness_command(
             argv = ["jcode", "-C", wt, "--no-update", "-q",
                     "--tools", "read,agentgrep,ls,session_search,conversation_search,memory,web_search",
                     "--disabled-tools", "bash,write,edit,replace,apply_patch,swarm,selfdev,desktop_selfdev,bg,codemode,mcp",
-                    "run", prompt_str or "inspect", "--ndjson"]
+                    "run", "--ndjson", "--", prompt_str or "inspect"]
             cmd = (f"JCODE_HOOK_PRE_TOOL={shlex.quote(hook_path)} jcode -C {shlex.quote(wt)} --no-update -q "
                    f"--tools read,agentgrep,ls,session_search,conversation_search,memory,web_search "
                    f"{flag} run")
@@ -342,7 +363,7 @@ def _build_harness_command(
             flag = "--disabled-tools selfdev,desktop_selfdev"
             argv = ["jcode", "-C", wt, "--no-update", "-q",
                     "--disabled-tools", "selfdev,desktop_selfdev",
-                    "run", prompt_str or "execute", "--ndjson"]
+                    "run", "--ndjson", "--", prompt_str or "execute"]
             cmd = f"JCODE_HOOK_PRE_TOOL={shlex.quote(hook_path)} jcode -C {shlex.quote(wt)} --no-update -q {flag} run"
         return {"agent": agent, "profile": profile, "argv": argv, "command": cmd, "env": env, "profile_flag": flag}
 
@@ -381,11 +402,11 @@ def _build_harness_command(
         c_data = data_dir or os.path.join(wt, ".crush-orca-ro" if profile == "ro" else ".crush")
         if profile == "ro":
             flag = "disabled_tools:bash,write,edit,multiedit"
-            argv = ["crush", "--cwd", wt, "--data-dir", c_data, "run", "-q", prompt_str or "inspect"]
+            argv = ["crush", "--cwd", wt, "--data-dir", c_data, "run", "-q", "--", prompt_str or "inspect"]
             cmd = f"crush --cwd {shlex.quote(wt)} --data-dir {shlex.quote(c_data)} run -q"
         else:
             flag = "--yolo"
-            argv = ["crush", "--cwd", wt, "--data-dir", c_data, "--yolo", "run", "-q", prompt_str or "execute"]
+            argv = ["crush", "--cwd", wt, "--data-dir", c_data, "--yolo", "run", "-q", "--", prompt_str or "execute"]
             cmd = f"crush --cwd {shlex.quote(wt)} --data-dir {shlex.quote(c_data)} --yolo run -q"
         return {"agent": agent, "profile": profile, "argv": argv, "command": cmd, "env": env, "profile_flag": flag}
 
@@ -537,7 +558,7 @@ def most_restrictive_profile(*profiles: str | None) -> str:
 
 # Flags whose value is free TEXT: the next token is the value whatever it looks like (`--text
 # --json` sends "--json"), except the bare `--` terminator (W2-01, PR #720 review).
-TEXT_FLAGS = frozenset({"--text", "--spec", "--subject", "--body", "--question"})
+TEXT_FLAGS = frozenset({"--text", "--spec", "--subject", "--body", "--question", "--prompt"})
 
 
 def split_output_flag(argv: list[str]) -> tuple[list[str], list[str]]:
@@ -596,6 +617,7 @@ def _parse_flag_map(tokens: list[str], rest: list[str] | None = None) -> tuple[l
         "--brief", "--wait", "--format", "--unread", "--peek", "--all",
         "--screen", "--focus", "--include-visual-layouts", "--fresh",
         "--debug", "--inject", "--json", "--force", "--takeover-legacy", "--takeover",
+        "--no-enter", "--include-remote", "--transcript",
     }
     def add(key: str, val: str) -> None:
         if key in flags:
@@ -831,7 +853,7 @@ class RuntimeProvider:
                     if flag in flags and param in accepted:
                         kw[param] = flags[flag]
                 if "prompt" in flags:
-                    kw["prompt"] = str(flags["prompt"])
+                    kw["prompt"] = _text_flag(flags, "prompt")
                 else:
                     spec = self.task_spec(kw["task_id"])
                     if spec:

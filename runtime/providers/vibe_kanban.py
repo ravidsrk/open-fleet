@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ._external import _ensure_ctx_task_claimed, release_claim_on_failure
-from ._external import ExternalDispatchMixin, coerce_output, env_flag, env_lookup, http_json, real_worktree, run_cli
+from ._external import ExternalDispatchMixin, coerce_output, env_flag, env_lookup, http_json, quote_url_segment, real_worktree, run_cli
 from .base import (
     ProviderError,
     RuntimeProvider,
@@ -195,7 +195,8 @@ class VibeKanbanProvider(ExternalDispatchMixin, RuntimeProvider):
 
     # --- worktree / process resolution -----------------------------------------------
     def _resolve_worktree(self, workspace_id: str) -> str | None:
-        ws = self._request("GET", f"/api/workspaces/{workspace_id}")
+        q_ws = quote_url_segment(workspace_id, provider="vibe-kanban", label="workspace_id")
+        ws = self._request("GET", f"/api/workspaces/{q_ws}")
         container = real_worktree((ws or {}).get("container_ref") if isinstance(ws, dict) else None)
         if not container:
             return None
@@ -214,7 +215,8 @@ class VibeKanbanProvider(ExternalDispatchMixin, RuntimeProvider):
         return wt
 
     def _process(self, proc_id: str) -> dict[str, Any]:
-        data = self._request("GET", f"/api/execution-processes/{proc_id}")
+        q_proc = quote_url_segment(proc_id, provider="vibe-kanban", label="proc_id")
+        data = self._request("GET", f"/api/execution-processes/{q_proc}")
         if not isinstance(data, dict):
             raise ProviderError("vibe_kanban_bad_response", f"vibe-kanban: execution process {proc_id!r} has no body")
         return data
@@ -439,7 +441,8 @@ class VibeKanbanProvider(ExternalDispatchMixin, RuntimeProvider):
             new_state, term_state = self._fence_local(dispatch_id, verb)
             return {"dispatchId": dispatch_id, "verb": verb, "state": new_state, "terminalState": term_state,
                     "reason": reason, "upstream": None}
-        raw = self._request("POST", f"/api/workspaces/{row['dispatch_id']}/execution/stop")
+        q_ws = quote_url_segment(row["dispatch_id"], provider="vibe-kanban", label="workspace_id")
+        raw = self._request("POST", f"/api/workspaces/{q_ws}/execution/stop")
         guard: dict[str, Any] | None = None
         if verb in ("stop", "release"):
             try:

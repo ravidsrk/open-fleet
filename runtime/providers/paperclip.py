@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ._external import release_claim_on_failure
-from ._external import ExternalDispatchMixin, env_lookup, http_json, real_worktree
+from ._external import ExternalDispatchMixin, env_lookup, http_json, quote_url_segment, real_worktree
 from .base import (
     ProviderError,
     RuntimeProvider,
@@ -128,14 +128,16 @@ class PaperclipProvider(ExternalDispatchMixin, RuntimeProvider):
         return co
 
     def _delete_agent(self, agent_id: str) -> dict[str, Any]:
+        q_agent = quote_url_segment(agent_id, provider="paperclip", label="agent_id")
         try:
-            self._request("DELETE", f"/api/agents/{agent_id}")
+            self._request("DELETE", f"/api/agents/{q_agent}")
             return {"agentDeleted": agent_id}
         except ProviderError as exc:
             return {"orphanAgent": agent_id, "deleteError": exc.code}
 
     def _verify_agent(self, agent_id: str, adapter_type: str, expected: dict[str, Any]) -> dict[str, Any]:
-        back = self._request("GET", f"/api/agents/{agent_id}")
+        q_agent = quote_url_segment(agent_id, provider="paperclip", label="agent_id")
+        back = self._request("GET", f"/api/agents/{q_agent}")
         cfg = back.get("adapterConfig") if isinstance(back, dict) else None
         problems: list[str] = []
         if not isinstance(back, dict) or back.get("adapterType") != adapter_type:
@@ -201,14 +203,15 @@ class PaperclipProvider(ExternalDispatchMixin, RuntimeProvider):
             "runner": "legacy",
             "adapterConfig": adapter_cfg,
         }
-        created = self._request("POST", f"/api/companies/{co}/agents", agent_body)
+        q_co = quote_url_segment(co, provider="paperclip", label="company_id")
+        created = self._request("POST", f"/api/companies/{q_co}/agents", agent_body)
         agent_id = require_id(created, "id", provider="paperclip", what="agent id")
         read_back = self._verify_agent(agent_id, adapter_type, adapter_cfg)
 
         try:
             issue = self._request(
                 "POST",
-                f"/api/companies/{co}/issues",
+                f"/api/companies/{q_co}/issues",
                 {
                     "title": (task_prompt.strip().splitlines()[0][:200] or task_id or "open-fleet task"),
                     "description": task_prompt,
@@ -217,7 +220,8 @@ class PaperclipProvider(ExternalDispatchMixin, RuntimeProvider):
                 },
             )
             issue_id = require_id(issue, "id", provider="paperclip", what="issue id")
-            checkout = self._request("POST", f"/api/issues/{issue_id}/checkout", {"agentId": agent_id, "expectedStatuses": ["todo"]})
+            q_issue = quote_url_segment(issue_id, provider="paperclip", label="issue_id")
+            checkout = self._request("POST", f"/api/issues/{q_issue}/checkout", {"agentId": agent_id, "expectedStatuses": ["todo"]})
         except ProviderError as exc:
             cleanup = self._delete_agent(agent_id)
             if exc.data.get("status") == 409:
@@ -231,7 +235,7 @@ class PaperclipProvider(ExternalDispatchMixin, RuntimeProvider):
 
         run_id = None
         try:
-            execu = self._request("GET", f"/api/issues/{issue_id}/execution")
+            execu = self._request("GET", f"/api/issues/{q_issue}/execution")
             run_id = execu.get("runId") if isinstance(execu, dict) else None
         except ProviderError:
             run_id = None
@@ -270,7 +274,8 @@ class PaperclipProvider(ExternalDispatchMixin, RuntimeProvider):
         eff = self._effective(row)
         if eff.get("runId"):
             return str(eff["runId"])
-        execu = self._request("GET", f"/api/issues/{eff.get('issueId') or row['session_id']}/execution")
+        q_issue = quote_url_segment(eff.get("issueId") or row["session_id"], provider="paperclip", label="issue_id")
+        execu = self._request("GET", f"/api/issues/{q_issue}/execution")
         run_id = execu.get("runId") if isinstance(execu, dict) else None
         if not run_id:
             raise ProviderError("run_not_found", f"paperclip: no heartbeat run yet for agent {row['dispatch_id']!r}")
@@ -282,7 +287,8 @@ class PaperclipProvider(ExternalDispatchMixin, RuntimeProvider):
 
     def worker_show(self, *, dispatch_id: str = "", **kwargs: Any) -> dict[str, Any]:
         row = self._dispatch_row(dispatch_id)
-        raw = self._request("GET", f"/api/agents/{dispatch_id}")
+        q_disp = quote_url_segment(dispatch_id, provider="paperclip", label="dispatch_id")
+        raw = self._request("GET", f"/api/agents/{q_disp}")
         return normalize_show(
             row["dispatch_id"], row["state"], task_id=row["task_id"], terminal_state=row["terminal_state"],
             handle=row["terminal_handle"], worktree=row["worktree"],
@@ -292,7 +298,8 @@ class PaperclipProvider(ExternalDispatchMixin, RuntimeProvider):
     def worker_read(self, *, dispatch_id: str = "", source: str = "transcript", limit: int = 50, **kwargs: Any) -> dict[str, Any]:
         row = self._dispatch_row(dispatch_id)
         run_id = self._run_id(row)
-        raw = self._request("GET", f"/api/heartbeat-runs/{run_id}/log")
+        q_run = quote_url_segment(run_id, provider="paperclip", label="run_id")
+        raw = self._request("GET", f"/api/heartbeat-runs/{q_run}/log")
         content = raw.get("content") if isinstance(raw, dict) else None
         if not isinstance(content, str):
             raise ProviderError("paperclip_bad_response", "paperclip: run log has no content", {"response": raw})
@@ -317,10 +324,12 @@ class PaperclipProvider(ExternalDispatchMixin, RuntimeProvider):
         row = self._dispatch_row(dispatch_id)
         upstream: dict[str, Any] = {}
         if verb != "retain":
-            upstream["pause"] = self._request("POST", f"/api/agents/{dispatch_id}/pause")
+            q_disp = quote_url_segment(dispatch_id, provider="paperclip", label="dispatch_id")
+            upstream["pause"] = self._request("POST", f"/api/agents/{q_disp}/pause")
         if verb == "release":
             issue_id = self._effective(row).get("issueId") or row["session_id"]
-            upstream["release"] = self._request("POST", f"/api/issues/{issue_id}/release")
+            q_issue = quote_url_segment(issue_id, provider="paperclip", label="issue_id")
+            upstream["release"] = self._request("POST", f"/api/issues/{q_issue}/release")
         new_state, term_state = self._fence_local(dispatch_id, verb)
         return {"dispatchId": dispatch_id, "verb": verb, "state": new_state, "terminalState": term_state,
                 "reason": reason, "upstream": upstream or None}

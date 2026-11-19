@@ -123,6 +123,16 @@ def _load_providers():
     return providers
 
 
+def _split_output_flag(argv):
+    """Strip `--json` only in option position (never as a text-flag value or after `--`, #786)."""
+    if "runtime" not in sys.modules:
+        package = type(sys)("runtime")
+        package.__path__ = [str(Path(__file__).resolve().parent.parent.parent / "runtime")]
+        sys.modules["runtime"] = package
+    from runtime.providers.base import split_output_flag
+    return split_output_flag(list(argv))
+
+
 class CliCommandError(ValueError):
     """A configured CLI command (OPEN_FLEET_CLI_COMMAND / ORCA_CLI_COMMAND) that is not one executable."""
 
@@ -198,8 +208,9 @@ def resolve(env=None, system=None) -> str:
     `env` and `system` are injectable for tests; production callers pass nothing. On Orca it is
     resolve_orca. Under OPEN_FLEET_RUNTIME=auto the registry decides (active_provider_name: the
     Orca binary only when it is on PATH), so this never names an Orca binary the registry
-    rejected; under an explicit non-Orca runtime a configured override still wins (a test stub,
-    an operator's wrapper), else this module's own shim answers.
+    rejected; under an explicit non-Orca runtime an inherited ORCA_CLI_COMMAND (which Orca exports
+    inside its own sessions) is ignored so it cannot hijack the non-Orca runtime (#775), while an
+    explicit OPEN_FLEET_CLI_COMMAND override still wins, else this module's own shim answers.
     """
     env = os.environ if env is None else env
     runtime = _active_non_orca_runtime(env)
@@ -207,7 +218,13 @@ def resolve(env=None, system=None) -> str:
         if _load_providers().active_provider_name(env, system) == "orca":
             return resolve_orca(env, system)
         return str(Path(__file__).resolve())
-    if runtime and not configured_command(env)[1]:
+    if runtime:
+        explicit = (env.get("OPEN_FLEET_CLI_COMMAND") or "").strip(" \t\r\n\v\f")
+        if explicit:
+            problem = cli_command_problem(explicit, "OPEN_FLEET_CLI_COMMAND")
+            if problem:
+                raise CliCommandError(problem)
+            return explicit
         return str(Path(__file__).resolve())
     return resolve_orca(env, system)
 
@@ -224,7 +241,8 @@ def run_json(argv, *, timeout, error, nonzero="strict"):
     if _active_non_orca_runtime():
         providers = _load_providers()
         try:
-            clean = [a for a in argv if a != "--json"]
+            options, tail = _split_output_flag(argv)
+            clean = [*options, *tail]
             res = providers.get_provider().dispatch(clean, timeout=timeout)
             return res if isinstance(res, dict) else {}
         except providers.ProviderError as exc:
@@ -239,8 +257,9 @@ def run_json(argv, *, timeout, error, nonzero="strict"):
     problem = cli_command_problem(configured, var, shutil.which) if configured else None
     if problem:
         raise error(f"could not run orca: {_inert(problem)}")
+    options, tail = _split_output_flag(argv)
     try:
-        proc = subprocess.run([cli, *argv, "--json"],
+        proc = subprocess.run([cli, *options, "--json", *tail],
                               capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.SubprocessError) as exc:
         raise error(f"could not run orca: {_inert(exc)}")
@@ -304,7 +323,8 @@ def main(argv=None) -> int:
         return 0
     if argv and argv[0] in _PROVIDER_DOMAINS:
         providers = _load_providers()
-        clean = [a for a in argv if a != "--json"]
+        options, tail = _split_output_flag(argv)
+        clean = [*options, *tail]
         try:
             res = providers.get_provider().dispatch(clean)
             print(json.dumps({"ok": True, "result": res}))

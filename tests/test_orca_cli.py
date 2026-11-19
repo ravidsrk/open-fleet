@@ -403,6 +403,59 @@ class NoScriptNamesTheExecutable(unittest.TestCase):
         self.assertIsNone(self.SHELL_INVOCATION.search('  orca_json "$tl" orchestration task-list'))
 
 
+class AdversarialReview775And786(unittest.TestCase):
+    """Regressions for #775 (non-Orca runtime ignores inherited ORCA_CLI_COMMAND) and #786 (split_output_flag)."""
+
+    class Boom(Exception):
+        pass
+
+    def setUp(self):
+        self.m = _load()
+
+    def test_775_explicit_non_orca_runtime_ignores_inherited_orca_cli_command(self):
+        env = {"OPEN_FLEET_RUNTIME": "posix", "ORCA_CLI_COMMAND": "/opt/orca/bin/orca"}
+        self.assertEqual(self.m.resolve(env, "Linux"), str(RESOLVER.resolve()))
+        env_override = {**env, "OPEN_FLEET_CLI_COMMAND": "/opt/custom/wrapper"}
+        self.assertEqual(self.m.resolve(env_override, "Linux"), "/opt/custom/wrapper")
+
+    def test_786_run_json_inserts_json_before_double_dash_and_preserves_text_flag_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = Path(tmp) / "orca-stub"
+            log = Path(tmp) / "argv.txt"
+            stub.write_text(
+                f'#!/bin/sh\nprintf "%s\\n" "$@" > "{log}"\necho \'{{"ok": true, "result": {{"sent": true}}}}\'\n',
+                encoding="utf-8",
+            )
+            stub.chmod(0o755)
+            with mock.patch.dict(os.environ, {"ORCA_CLI_COMMAND": str(stub)}, clear=True):
+                res = self.m.run_json(
+                    ["terminal", "send", "--terminal", "t1", "--", "--json", "--text"],
+                    timeout=10,
+                    error=self.Boom,
+                )
+            self.assertEqual(res, {"sent": True})
+            self.assertEqual(
+                log.read_text(encoding="utf-8").splitlines(),
+                ["terminal", "send", "--terminal", "t1", "--json", "--", "--json", "--text"],
+            )
+
+        # Under non-Orca provider path, `--text --json` keeps `--json` as the value of `--text`:
+        seen = {}
+
+        class _FakeProvider:
+            def dispatch(self, argv, timeout=120):
+                seen["argv"] = list(argv)
+                return {"sent": True}
+
+        fake_mod = mock.Mock()
+        fake_mod.ProviderError = RuntimeError
+        fake_mod.get_provider.return_value = _FakeProvider()
+        with mock.patch.dict(os.environ, {"OPEN_FLEET_RUNTIME": "posix"}, clear=True), \
+                mock.patch.object(self.m, "_load_providers", return_value=fake_mod):
+            self.m.run_json(["terminal", "send", "--text", "--json", "--json"], timeout=10, error=self.Boom)
+        self.assertEqual(seen["argv"], ["terminal", "send", "--text", "--json"])
+
+
 if __name__ == "__main__":
     unittest.main()
 

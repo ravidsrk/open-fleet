@@ -882,5 +882,64 @@ class EveryThresholdLivesInTheConfig(unittest.TestCase):
                 watchdog.load_config(conf)
 
 
+class AdversarialReview788And770(unittest.TestCase):
+    """Regressions for #788 (atomic locked save_state + single-pass build_nudge_argv) and #770 (W3-01)."""
+
+    def test_w3_01_canonical_guard_and_no_future_import(self):
+        import ast
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "_test_entrypoint_guard_ref", Path(__file__).resolve().parent / "test_entrypoint_guard.py"
+        )
+        assert spec and spec.loader
+        guard_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard_mod)
+
+        body = guard_mod._statements("runtime/scripts/watchdog.py")
+        self.assertGreaterEqual(len(body), 2)
+        first, second = body[0], body[1]
+        self.assertTrue(isinstance(first, ast.Import) and [a.name for a in first.names] == ["sys"])
+        self.assertEqual(ast.dump(second), ast.dump(ast.parse(guard_mod.CANONICAL_GUARD).body[0]))
+        tree = ast.parse((ROOT / "runtime" / "scripts" / "watchdog.py").read_text(encoding="utf-8"))
+        futures = [n.lineno for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module == "__future__"]
+        self.assertEqual(futures, [])
+
+    def test_build_nudge_argv_is_single_pass_no_second_pass_expansion(self):
+        cfg = {
+            "nudge_command": ["notify", "--run", "{run_id}", "--worker", "{worker_id}", "--disp", "{dispatch_id}", "--msg", "{text}"],
+            "nudge_text": "SECRET_TEXT",
+        }
+        argv = watchdog.build_nudge_argv(cfg, "{worker_id}", "{text}", "{run_id}")
+        self.assertEqual(
+            argv,
+            ["notify", "--run", "{worker_id}", "--worker", "{text}", "--disp", "{run_id}", "--msg", "SECRET_TEXT"],
+        )
+
+    def test_save_state_uses_locked_unique_temp_file_with_fsync(self):
+        import threading
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "watchdog-state.json"
+            errors = []
+
+            def writer(i):
+                try:
+                    for j in range(10):
+                        watchdog.save_state(state_path, {"workers": {f"w-{i}": {"n": j}}})
+                except Exception as exc:
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=writer, args=(i,)) for i in range(4)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            self.assertEqual(errors, [])
+            loaded = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertIn("workers", loaded)
+            self.assertTrue((Path(tmp) / ".watchdog-state.json.lock").exists())
+            self.assertEqual(list(Path(tmp).glob("*.tmp")), [])
+
+
 if __name__ == "__main__":
     unittest.main()
