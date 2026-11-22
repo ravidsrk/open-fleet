@@ -71,13 +71,22 @@ Exit codes
        future: its liveness cannot be judged), unknown config key, live mode without
        nudge_command, or a nudge transport failure
 """
+import sys
+
+if (__name__ == "__main__" and not getattr(sys.flags, "safe_path", False) and sys.path
+        and ("os" not in sys.modules or sys.modules["os"].path.realpath(sys.path[0])
+             == sys.modules["os"].path.dirname(sys.modules["os"].path.realpath(__file__)))):
+    del sys.path[0]
+
 import argparse
+import fcntl
 import functools
 import hashlib
 import json
 import os
+import re
 import subprocess
-import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -204,9 +213,33 @@ def load_state(path):
 def save_state(path, state):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    lock_path = path.parent / f".{path.name}.lock"
+    payload = json.dumps(state, indent=2, sort_keys=True) + "\n"
+    with open(lock_path, "a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as tmp:
+                tmp_path = tmp.name
+                tmp.write(payload)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            os.replace(tmp_path, path)
+            tmp_path = None
+        finally:
+            if tmp_path is not None:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _state_db_path(env=None):
@@ -543,12 +576,14 @@ def record_nudge(state, worker_id, dispatch_id, at, ci_signature=None):
 def build_nudge_argv(cfg, run_id, worker_id, dispatch_id):
     values = {"run_id": run_id, "worker_id": worker_id,
               "dispatch_id": dispatch_id, "text": cfg["nudge_text"]}
-    argv = []
-    for item in cfg["nudge_command"]:
-        for name in PLACEHOLDERS:
-            item = item.replace("{" + name + "}", values[name])
-        argv.append(item)
-    return argv
+    return [
+        re.sub(
+            r"\{(run_id|worker_id|dispatch_id|text)\}",
+            lambda m: str(values[m.group(1)]),
+            item,
+        )
+        for item in cfg["nudge_command"]
+    ]
 
 
 def decide(worker, now, cfg, state):

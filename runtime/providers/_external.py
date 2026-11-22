@@ -88,6 +88,26 @@ def run_cli(argv: list[str], *, provider: str, timeout: float = 60, cwd: str | N
     return {"stdout": out, "stderr": proc.stderr or "", "returncode": proc.returncode, "raw": out.strip()}
 
 
+def quote_url_segment(seg: Any, *, provider: str = "", label: str = "id") -> str:
+    """Validate and percent-encode one URL path segment (`safe=""`, #788).
+
+    Rejects empty values, `/`, `\\`, `..`, `.`, and ASCII control chars (including NUL/CR/LF)
+    so an interpolated ID can never traverse paths or inject query/fragment syntax.
+    """
+    text = str(seg) if seg is not None else ""
+    if (
+        not text
+        or "/" in text
+        or "\\" in text
+        or text in (".", "..")
+        or ".." in text
+        or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in text)
+    ):
+        prefix = f"{provider}: " if provider else ""
+        raise ProviderError("invalid_id", f"{prefix}unsafe URL path segment for {label}: {text!r}")
+    return urllib.parse.quote(text, safe="")
+
+
 def origin(url: str) -> tuple[str, str, int | None]:
     """(scheme, host, port) of `url`, the unit a redirect may not leave."""
     parts = urllib.parse.urlsplit(url)
@@ -389,6 +409,13 @@ class ExternalDispatchMixin:
                 "cross_run_access",
                 f"dispatch {dispatch_id!r} belongs to run {row_run!r}, not {bound!r}",
             )
+        if hasattr(self.state, "_own_worker_identity") and self.state._own_worker_identity():
+            own_ids = set(self.state._bound_worker_identities())
+            if dispatch_id not in own_ids:
+                raise ProviderError(
+                    "worker_forbidden",
+                    f"launched worker cannot access or fence peer dispatch {dispatch_id!r}; only the coordinator may",
+                )
         return row
 
     @staticmethod
@@ -438,6 +465,13 @@ class ExternalDispatchMixin:
             )
 
     def _fence_local(self, dispatch_id: str, verb: str) -> tuple[str, str]:
+        if hasattr(self.state, "_own_worker_identity") and self.state._own_worker_identity():
+            own_ids = set(self.state._bound_worker_identities())
+            if dispatch_id not in own_ids:
+                raise ProviderError(
+                    "worker_forbidden",
+                    f"launched worker cannot fence peer dispatch {dispatch_id!r}; only the coordinator may",
+                )
         new_state, term_state = fence_state(verb)
         with self.state._connect() as conn:
             conn.execute(
@@ -725,6 +759,13 @@ def load_dispatch(state: LocalStateStore, dispatch_id: str, backend: str) -> dic
             "cross_run_access",
             f"dispatch {dispatch_id!r} belongs to run {row_run!r}, not {bound!r}",
         )
+    if hasattr(state, "_own_worker_identity") and state._own_worker_identity():
+        own_ids = set(state._bound_worker_identities())
+        if dispatch_id not in own_ids:
+            raise ProviderError(
+                "worker_forbidden",
+                f"launched worker cannot access or fence peer dispatch {dispatch_id!r}; only the coordinator may",
+            )
     try:
         rec["effective"] = json.loads(rec.get("launch_effective") or "{}")
     except json.JSONDecodeError:
@@ -734,6 +775,13 @@ def load_dispatch(state: LocalStateStore, dispatch_id: str, backend: str) -> dic
 
 def record_fence(state: LocalStateStore, dispatch_id: str, verb: str) -> tuple[str, str]:
     """Store the posix fence state names (`stopped|abandoned|released|retained`)."""
+    if hasattr(state, "_own_worker_identity") and state._own_worker_identity():
+        own_ids = set(state._bound_worker_identities())
+        if dispatch_id not in own_ids:
+            raise ProviderError(
+                "worker_forbidden",
+                f"launched worker cannot fence peer dispatch {dispatch_id!r}; only the coordinator may",
+            )
     new_state, term_state = fence_state(verb)
     with state._connect() as conn:
         conn.execute(

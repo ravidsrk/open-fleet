@@ -1097,3 +1097,72 @@ class TestThePayloadIsStreamed(EgressBase):
         record = self.records()[0]
         self.assertEqual(record["payload_sha256"], hashlib.sha256(data).hexdigest())
         self.assertEqual(record["bytes"], len(data))
+
+
+class TestAnchorAndAbbrevHardening(EgressBase):
+    """#767 / #784 / #770: strict argparse (allow_abbrev=False), non-empty anchor validation,
+    real 64-hex anchor counting in verify/grants, and W3-01 stdlib-shadow guard."""
+
+    def test_abbreviated_options_are_refused(self):
+        for args in (
+            ("write", "--he"),
+            ("write", "--h"),
+            ("write", "--si", "s", "--ho", "h", "--pay", "c", "--con", "k"),
+            ("verify", "--allow"),
+            ("grants", "--j"),
+        ):
+            with self.subTest(args=args):
+                r = self.run_egress(*args)
+                self.assertEqual(r.returncode, egress.EXIT_USAGE, r.stdout + r.stderr)
+
+    def test_empty_whitespace_or_malformed_anchors_exit_usage(self):
+        self.write_one()
+        for cmd in ("verify", "grants"):
+            for flag in ("--expect-head", "--expect-ancestor"):
+                for bad in ("", "   ", "\t", "not-a-sha256", "a" * 63, "g" * 64):
+                    with self.subTest(cmd=cmd, flag=flag, bad=bad):
+                        r = self.run_egress(cmd, flag, bad)
+                        self.assertEqual(r.returncode, egress.EXIT_USAGE, r.stdout + r.stderr)
+
+    def test_empty_ancestor_on_nonempty_ledger_stays_unanchored(self):
+        self.write_one()
+        v = self.run_egress("verify", "--expect-ancestor", "(empty)")
+        self.assertEqual(v.returncode, 0, v.stderr)
+        self.assertIn("UNANCHORED", v.stdout)
+        self.assertNotIn("anchored receipt(s) present", v.stdout)
+        g = self.run_egress("grants", "--expect-ancestor", "(empty)")
+        self.assertEqual(g.returncode, 0, g.stderr)
+        self.assertIn("UNANCHORED", g.stdout)
+        g_json = self.run_egress("grants", "--json", "--expect-ancestor", "(empty)")
+        self.assertEqual(g_json.returncode, 0, g_json.stderr)
+        self.assertIn("UNANCHORED", g_json.stderr)
+        # A real 64-hex ancestor anchor still reports anchored and suppresses UNANCHORED.
+        head = self.run_egress("head").stdout.strip()
+        v_real = self.run_egress("verify", "--expect-ancestor", head)
+        self.assertEqual(v_real.returncode, 0, v_real.stderr)
+        self.assertIn("anchored receipt(s) present", v_real.stdout)
+        self.assertNotIn("UNANCHORED", v_real.stdout)
+        g_real = self.run_egress("grants", "--expect-ancestor", head)
+        self.assertEqual(g_real.returncode, 0, g_real.stderr)
+        self.assertNotIn("UNANCHORED", g_real.stdout + g_real.stderr)
+
+    def test_entrypoint_carries_w3_01_guard_and_blocks_stdlib_shadow(self):
+        import ast
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "test_entrypoint_guard", ROOT / "tests" / "test_entrypoint_guard.py")
+        eg = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(eg)
+        body = eg._statements("runtime/scripts/egress.py")
+        self.assertGreaterEqual(len(body), 2)
+        self.assertTrue(isinstance(body[0], ast.Import) and [a.name for a in body[0].names] == ["sys"])
+        self.assertEqual(ast.dump(body[1]), ast.dump(ast.parse(eg.CANONICAL_GUARD).body[0]))
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            shutil.copy2(EGRESS, t / "egress.py")
+            (t / "json.py").write_text("raise RuntimeError('shadow loaded')\n", encoding="utf-8")
+            env = {k: v for k, v in os.environ.items() if not k.startswith("PYTHON")}
+            r = subprocess.run([sys.executable, str(t / "egress.py"), "--help"],
+                               cwd=t, env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertNotIn("shadow loaded", r.stderr)

@@ -32,6 +32,7 @@ Source-verified against `apps/workspace-server` + `packages/wire`:
 from __future__ import annotations
 
 import json
+import re
 import socket
 import struct
 import uuid
@@ -188,8 +189,22 @@ class EmdashProvider(ExternalDispatchMixin, RuntimeProvider):
             raise ProviderError("missing_repository", "emdash: createWorktree needs a registered repositoryId (OPEN_FLEET_EMDASH_REPOSITORY_ID)")
         if not base:
             raise ProviderError("missing_base", "emdash: createWorktree needs --base (baseRef)")
+        if (
+            not name
+            or name.startswith(("/", "-"))
+            or "\x00" in name
+            or "\\" in name
+            or not re.fullmatch(r"[A-Za-z0-9._/-]+", name)
+            or any(part in ("", ".", "..") for part in name.split("/"))
+        ):
+            raise ProviderError("invalid_argument", f"emdash: unsafe worktree name {name!r}")
+        root_resolved = Path(self.worktree_root).expanduser().resolve()
+        candidate = Path(self.worktree_root).expanduser() / name
+        resolved_candidate = candidate.resolve()
+        if resolved_candidate == root_resolved or not resolved_candidate.is_relative_to(root_resolved):
+            raise ProviderError("invalid_argument", f"emdash: worktree path for {name!r} escapes worktree root {root_resolved}")
         workspace_id = str(uuid.uuid4())
-        path = str(Path(self.worktree_root).expanduser() / name)
+        path = str(candidate)
         record = self._call(
             "workspaceRegistry.createWorktree",
             {"workspaceId": workspace_id, "repositoryId": repository_id, "branch": name, "baseRef": base, "path": path},

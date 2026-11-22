@@ -50,6 +50,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import math
 import os
 import platform
 import re
@@ -265,14 +266,18 @@ def _terminated(signum, _frame):
     raise SystemExit(128 + signum)
 
 
+_EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+
+def _reject_nonfinite(token: str):
+    raise ValueError(f"non-finite JSON constant: {token}")
+
+
 def git_env(base: dict | None = None, repo: Path | None = None) -> dict:
-    """gitexec.py's hardened environment (#629): no system or user config (which would also make
-    the seed commit differ between hosts), no prompt, no replace objects, and every repository-
-    config command channel closed at command-line precedence: core.fsmonitor, core.hooksPath,
-    diff.external, the ext:: transport. With `repo`, every filter, diff and merge driver that
-    repository's config declares is blanked too. A builder writes the config its worktree shares
-    with the target clone, so without this a planted command ran on the coordinator, outside the
-    worker's guarded session (PR #653 review). The driver query fails closed."""
+    """gitexec.py's custody-hardened environment (#629, #766): no system or user config, no prompt,
+    no replace objects, no lazy fetch, file-only protocol, and every repository-config command
+    channel closed at command-line precedence. With `repo`, every filter, diff and merge driver
+    that repository's config declares is blanked too. The driver query fails closed."""
     blanks = ()
     if repo is not None:
         try:
@@ -280,7 +285,35 @@ def git_env(base: dict | None = None, repo: Path | None = None) -> dict:
         except gitexec.DriverQueryFailed as err:
             raise RunFailed(f"the git config of {repo} cannot be read, so its drivers cannot be "
                             f"neutralised: {err}") from err
-    return gitexec.env(dict(base if base is not None else os.environ), blanks)
+    return gitexec.custody_env(dict(base if base is not None else os.environ), blanks)
+
+
+def git_custody(cwd: Path, *args: str, env: dict | None = None, check=True, index: bool = False,
+                attr_source: str | None = None):
+    """Run a read-only git command inside gitexec.custody() so a concurrent builder writing
+    .git/config cannot inject an attribute-selected driver (#766)."""
+    if args and args[0] == "diff":
+        args = ("diff", "--no-ext-diff", "--no-textconv", *args[1:])
+    try:
+        gitexec.refuse_blocking_files(cwd)
+        with gitexec.custody(cwd, index=index, base=env) as c:
+            blanks = ()
+            if attr_source is not None:
+                info_attr = os.path.join(c.git_dir, "info", "attributes")
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(info_attr)
+                blanks = (("core.attributesFile", os.devnull),)
+            c_env = c.env(base=env, blanks=blanks)
+            if attr_source is not None:
+                c_env["GIT_ATTR_SOURCE"] = attr_source
+                c_env["GIT_ATTR_NOSYSTEM"] = "1"
+            proc = run_group(c.argv(*args), env=c_env)
+    except OSError as err:
+        raise RunFailed(f"git custody {' '.join(args[:2])} could not run in {cwd}: {err}") from err
+    if check and proc.returncode != 0:
+        raise RunFailed(f"git {' '.join(args)} failed in {cwd}: "
+                        f"{proc.stderr.decode('utf-8', 'replace').strip()[:400]}")
+    return proc
 
 
 def git(cwd: Path, *args: str, env: dict | None = None, check=True, data: bytes | None = None):
@@ -465,8 +498,17 @@ LIVE_CALL = ("held", "launching", "launched")  # a call that may still spend: it
 
 
 def _committed(calls: dict) -> Decimal:
-    return sum((Decimal(c["usd"]) for c in calls.values() if c.get("state") in LIVE_CALL + ("charged",)),
-               Decimal(0))
+    total = Decimal(0)
+    for c in calls.values():
+        if c.get("state") in LIVE_CALL + ("charged",):
+            try:
+                amount = Decimal(str(c["usd"]))
+            except (InvalidOperation, ValueError, KeyError) as err:
+                raise SourceError(f"invalid usd amount in budget ledger: {err}") from err
+            if not amount.is_finite() or amount < 0:
+                raise SourceError(f"non-finite or negative usd amount in budget ledger: {c.get('usd')!r}")
+            total += amount
+    return total
 
 
 class Budget:
@@ -497,7 +539,7 @@ class Budget:
                 fh.seek(0)
                 records, result = fn(self._parse(fh.read()))
                 for rec in records:
-                    fh.write(json.dumps({**rec, "at": now()}, sort_keys=True) + "\n")
+                    fh.write(json.dumps({**rec, "at": now()}, sort_keys=True, allow_nan=False) + "\n")
                 fh.flush()
                 os.fsync(fh.fileno())
                 return result
@@ -508,9 +550,16 @@ class Budget:
         calls = {}
         for lineno, line in enumerate(text.splitlines(), 1):
             try:
-                rec = json.loads(line)
+                rec = json.loads(line, parse_constant=_reject_nonfinite)
+                if not isinstance(rec, dict) or not isinstance(rec.get("call"), str):
+                    raise TypeError("record must be an object with string call id")
+                for key in ("usd", "hold_usd"):
+                    if key in rec and rec[key] is not None:
+                        val = Decimal(str(rec[key]))
+                        if not val.is_finite() or val < 0:
+                            raise ValueError(f"invalid {key}: {rec[key]!r}")
                 calls[rec["call"]] = {**calls.get(rec["call"], {}), **rec}
-            except (ValueError, KeyError, TypeError) as err:
+            except (ValueError, KeyError, TypeError, InvalidOperation) as err:
                 raise SourceError(f"{self.path}:{lineno} is not a ledger record ({err}): the budget "
                                   "cannot be read, so nothing may spend against it") from err
         return calls
@@ -539,6 +588,8 @@ class Budget:
     def hold(self, entries, amount: Decimal, cap: Decimal) -> bool:
         """Hold `amount` for each (call, fields) at once, or none: False when the cap cannot cover
         them on top of everything committed."""
+        if not amount.is_finite() or amount < 0 or not cap.is_finite() or cap < 0:
+            raise ValueError("budget hold amount and cap must be finite and non-negative")
         def fn(calls):
             reused = [c for c, _f in entries if c in calls]
             if reused:
@@ -552,6 +603,8 @@ class Budget:
     def admit(self, call: str, cap: Decimal) -> bool:
         """A held call may start only while everything committed, its own hold included, is within
         the cap; otherwise its hold is released unspent."""
+        if not cap.is_finite() or cap < 0:
+            raise ValueError("budget cap must be finite and non-negative")
         def fn(calls):
             c = calls.get(call)
             if not c or c.get("state") != "held":
@@ -570,6 +623,8 @@ class Budget:
 
     def charge(self, call: str, usd: Decimal, measured: bool, run: str | None = None) -> bool:
         """Charge a call once: a call already charged or released is reconciled, not charged again."""
+        if not usd.is_finite() or usd < 0:
+            raise ValueError("budget charge must be finite and non-negative")
         def fn(calls):
             c = calls.get(call)
             if c and c.get("state") in ("charged", "released"):
@@ -583,6 +638,8 @@ class Budget:
     def top_up(self, call: str, usd: Decimal) -> bool:
         """Raise a charged call to `usd` (its full hold) when a process of its run may still be
         spending (Codex review of PR #668): the charge never falls, and it is never added twice."""
+        if not usd.is_finite() or usd < 0:
+            raise ValueError("budget top-up must be finite and non-negative")
         def fn(calls):
             c = calls.get(call)
             if not c or c.get("state") != "charged" or Decimal(c["usd"]) >= usd:
@@ -836,8 +893,12 @@ def unswept_reruns() -> list[tuple[Path, list[str]]]:
 
 
 def extract_tree(git_dir: Path, rev: str, dest: Path, env: dict | None = None) -> None:
-    """`rev`'s tree, as files, at `dest`: a clean checkout no worker touched."""
-    data = git(git_dir, "archive", "--format=tar", rev, env=env).stdout
+    """`rev`'s tree, as files, at `dest`: a clean checkout no worker touched, extracted in git
+    custody with attributes sourced from the empty tree so .gitattributes or info/attributes
+    cannot hide or substitute files (#766, #788)."""
+    oid = git_out(git_dir, "rev-parse", "--verify", rev, env=env)
+    data = git_custody(git_dir, "archive", "--worktree-attributes", "--format=tar", oid,
+                       env=env, index=False, attr_source=_EMPTY_TREE).stdout
     dest.mkdir(parents=True, exist_ok=True)
     with tarfile.open(fileobj=io.BytesIO(data)) as tar:
         tar.extractall(dest, filter="data")
@@ -1232,7 +1293,8 @@ class Run:
     # --- plumbing ---------------------------------------------------------------------------
     def wrapper(self, argv, env=None, cwd=None, timeout=600):
         proc = run_text(argv, cwd=cwd or self.sb.target, env={**self.sb.env, **(env or {})}, timeout=timeout)
-        self.commands.append({"argv": [str(a)[:120] for a in argv], "rc": proc.returncode})
+        self.commands.append({"argv": [str(a) if i < 2 else str(a)[:120] for i, a in enumerate(argv)],
+                              "rc": proc.returncode})
         return proc
 
     def emit(self, kind, *, source_ref, task=None, dispatch=None, data=None, basis="observed",
@@ -1305,7 +1367,7 @@ class Run:
                 continue
             if isinstance(obj, dict) and obj.get("type") == "result":
                 value = obj.get("total_cost_usd")
-                if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
                     return None
                 total += Decimal(str(value))
                 seen = True
@@ -1776,7 +1838,7 @@ class Run:
                 continue
             review_dir = wt / ".wip-review" / tid
             review_dir.mkdir(parents=True)
-            diff = git(self.sb.target, "diff", a["base"], a["head"], env=self.sb.env).stdout
+            diff = git_custody(self.sb.target, "diff", a["base"], a["head"], env=self.sb.env).stdout
             (review_dir / "change.diff").write_bytes(diff)
             t = self.tasks[tid]
             (review_dir / "task.md").write_text(f"# {tid}: {t['title']}\n\n{t['statement']}\n", encoding="utf-8")
@@ -2527,7 +2589,7 @@ def bind_outcomes(bound: Bound, derived: dict, raw_events: list, prereg: dict, t
             if not against or not merge.get("head"):
                 problems.append(f"conflict {merge.get('entry')}: no retained prefix to re-derive it from")
                 continue
-            proc = git(repo, "merge-tree", "--write-tree", "--no-messages", against, merge["head"], check=False)
+            proc = git_custody(repo, "merge-tree", "--write-tree", "--no-messages", against, merge["head"], check=False)
             if proc.returncode != 1:
                 problems.append(f"conflict {merge['entry']}: git merges {merge['head'][:12]} onto its prefix "
                                 f"cleanly (rc={proc.returncode}); the recorded conflict does not re-derive")

@@ -71,17 +71,62 @@ from .base import (
     require_id,
 )
 from .local_state import LocalStateStore
+from .posix import verify_installed_guard
 
 RO_DENIED_TOOLS = ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"]
 RO_HOOK_COMMAND = "echo 'open-fleet PROFILE=ro: write tools and Bash are denied' >&2; exit 2"
 DENY_HOOK = Path(__file__).resolve().parent.parent / "scripts" / "deny-hook.sh"
 _HEX_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
+_SAFE_REPO_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 # multiclaude only ever launches claude (daemon.go startAgentWithConfig).
 SUPPORTED_HARNESSES = ("claude",)
 # hooks.CopyConfig writes this into every worker worktree; it is ours, not the worker's work.
 MC_SETTINGS_ARTIFACT = ".claude/settings.json"
 # tmux answers these once the window (and with it its session/server) is gone.
 _TMUX_GONE = ("can't find window", "can't find session", "no server running", "session not found", "no such")
+
+
+def _refuse_symlink(path: Path, label: str) -> None:
+    if path.is_symlink():
+        raise ProviderError("multiclaude_unsafe_path", f"multiclaude: refusing symlink at {label} ({path})")
+
+
+def _read_regular_nofollow(path: Path, label: str) -> bytes | None:
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(str(path), os.O_RDONLY | nofollow)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ProviderError("multiclaude_unsafe_path", f"multiclaude: refusing unsafe {label} ({path}): {exc}") from exc
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ProviderError("multiclaude_unsafe_path", f"multiclaude: {label} ({path}) is not a regular file")
+        with os.fdopen(fd, "rb") as fh:
+            fd = -1
+            return fh.read()
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def _write_regular_nofollow(path: Path, data: bytes, label: str) -> None:
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | nofollow, 0o600)
+    except OSError as exc:
+        raise ProviderError("multiclaude_unsafe_path", f"multiclaude: refusing unsafe {label} ({path}): {exc}") from exc
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ProviderError("multiclaude_unsafe_path", f"multiclaude: {label} ({path}) is not a regular file")
+        with os.fdopen(fd, "wb") as fh:
+            fd = -1
+            fh.write(data)
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 
 def worker_settings(profile: str, worktree: str) -> dict[str, Any]:
@@ -100,18 +145,20 @@ def worker_settings(profile: str, worktree: str) -> dict[str, Any]:
 
 
 def merge_settings(ours: dict[str, Any], original: dict[str, Any] | None) -> dict[str, Any]:
-    """Ours first; keep the repo's own hooks and deny rules (never drop a stricter rule)."""
-    if not isinstance(original, dict):
-        return ours
-    merged = json.loads(json.dumps(original))
-    hooks = merged.setdefault("hooks", {})
-    for event, entries in ours.get("hooks", {}).items():
-        hooks[event] = list(entries) + [e for e in (hooks.get(event) or []) if e not in entries]
-    if "permissions" in ours:
-        perms = merged.setdefault("permissions", {})
-        deny = list(ours["permissions"].get("deny", []))
-        perms["deny"] = deny + [d for d in (perms.get("deny") or []) if d not in deny]
-        perms.pop("defaultMode", None)
+    """Build worker settings from `ours` only, strictly allowlisting non-executing `permissions.deny` strings (#774).
+
+    Never inherits untrusted keys (`hooks`, `disableAllHooks`, `apiKeyHelper`, `awsAuthRefresh`,
+    `awsCredentialExport`, `otelHeadersHelper`, `env`, `permissions.allow`, `permissions.defaultMode`,
+    etc.) from a repository's `.multiclaude/hooks.json`."""
+    merged: dict[str, Any] = json.loads(json.dumps(ours))
+    if isinstance(original, dict):
+        orig_perms = original.get("permissions")
+        if isinstance(orig_perms, dict) and isinstance(orig_perms.get("deny"), list):
+            extra_deny = [d for d in orig_perms["deny"] if isinstance(d, str)]
+            if extra_deny:
+                perms = merged.setdefault("permissions", {})
+                deny = list(perms.get("deny") or [])
+                perms["deny"] = deny + [d for d in extra_deny if d not in deny]
     return merged
 
 
@@ -202,6 +249,8 @@ class MulticlaudeProvider(ExternalDispatchMixin, RuntimeProvider):
         r = repo or self.repo
         if not r:
             raise ProviderError("missing_repo", "multiclaude: set OPEN_FLEET_MULTICLAUDE_REPO to the tracked repository name")
+        if r in (".", "..") or not _SAFE_REPO_RE.fullmatch(r):
+            raise ProviderError("multiclaude_unsafe_path", f"multiclaude: unsafe repo name {r!r}")
         return r
 
     def _tmux_target(self, repo: str, window: str) -> str:
@@ -254,25 +303,42 @@ class MulticlaudeProvider(ExternalDispatchMixin, RuntimeProvider):
         agent_name = safe_agent_name(name or f"of-{task_id or uuid.uuid4().hex[:8]}")
         task_prompt = self.resolve_task_prompt(task_id, prompt)
         repo_dir = self.home / "repos" / repo_name
+        _refuse_symlink(repo_dir, "repo dir")
         if not repo_dir.is_dir():
             raise ProviderError("multiclaude_repo_unknown", f"multiclaude: {repo_dir} does not exist (repo not tracked?)")
         expected_wt = str((self.home / "wts" / repo_name / agent_name).resolve())
         hooks_dir = repo_dir / ".multiclaude"
+        _refuse_symlink(hooks_dir, ".multiclaude")
         hooks_dir.mkdir(parents=True, exist_ok=True)
+        _refuse_symlink(hooks_dir, ".multiclaude")
         hooks_file = hooks_dir / "hooks.json"
+        _refuse_symlink(hooks_file, ".multiclaude/hooks.json")
+        lock_file = hooks_dir / ".open-fleet-hooks.lock"
+        _refuse_symlink(lock_file, ".multiclaude/.open-fleet-hooks.lock")
         system_prompt = (
             "You are an open-fleet worker dispatched by the coordinator. Your assignment:\n\n" + task_prompt
         )
 
-        with open(hooks_dir / ".open-fleet-hooks.lock", "w") as lock:
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        try:
+            lock_fd = os.open(str(lock_file), os.O_WRONLY | os.O_CREAT | nofollow, 0o600)
+        except OSError as exc:
+            raise ProviderError("multiclaude_unsafe_path", f"multiclaude: refusing unsafe hooks lock ({lock_file}): {exc}") from exc
+        with os.fdopen(lock_fd, "w", encoding="utf-8") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            original_bytes = hooks_file.read_bytes() if hooks_file.is_file() else None
+            _refuse_symlink(hooks_dir, ".multiclaude")
+            _refuse_symlink(hooks_file, ".multiclaude/hooks.json")
+            original_bytes = _read_regular_nofollow(hooks_file, ".multiclaude/hooks.json")
             try:
                 original = json.loads(original_bytes) if original_bytes else None
             except json.JSONDecodeError:
                 original = None
             settings = merge_settings(worker_settings(profile, expected_wt), original)
-            hooks_file.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+            _write_regular_nofollow(
+                hooks_file,
+                (json.dumps(settings, indent=2) + "\n").encode("utf-8"),
+                ".multiclaude/hooks.json",
+            )
             try:
                 data = self._command(
                     "spawn_agent",
@@ -282,14 +348,31 @@ class MulticlaudeProvider(ExternalDispatchMixin, RuntimeProvider):
                 if original_bytes is None:
                     hooks_file.unlink(missing_ok=True)
                 else:
-                    hooks_file.write_bytes(original_bytes)
+                    _write_regular_nofollow(hooks_file, original_bytes, ".multiclaude/hooks.json")
 
         wt = real_worktree(require_id(data, "worktree_path", provider="multiclaude", what="worktree_path"))
+        installed_path = Path(wt, ".claude", "settings.json") if wt else None
         try:
-            installed = json.loads(Path(wt, ".claude", "settings.json").read_text(encoding="utf-8")) if wt else None
-        except (OSError, json.JSONDecodeError):
+            if wt and not Path(wt, ".claude").is_symlink() and installed_path is not None:
+                installed_raw = _read_regular_nofollow(installed_path, ".claude/settings.json")
+                installed = json.loads(installed_raw) if installed_raw is not None else None
+            else:
+                installed = None
+        except (OSError, json.JSONDecodeError, ProviderError):
             installed = None
-        if not wt or installed != settings:
+        guard_ok = bool(wt and installed == settings)
+        if guard_ok and profile != "ro" and installed_path is not None:
+            try:
+                verify_installed_guard(
+                    wt,
+                    "claude",
+                    profile,
+                    {"claude": str(installed_path), "deny_hook": str(DENY_HOOK)},
+                    str(DENY_HOOK),
+                )
+            except ProviderError:
+                guard_ok = False
+        if not guard_ok:
             try:
                 teardown: dict[str, Any] = self._stop_upstream(repo_name, agent_name, wt)
             except ProviderError as exc:

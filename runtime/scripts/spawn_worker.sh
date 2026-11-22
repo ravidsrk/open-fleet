@@ -203,6 +203,10 @@ if ! ORCA_BIN="$(python3 -I "$HERE/orca_cli.py")"; then
   echo "SPAWN=REFUSED task=? the runtime CLI could not be resolved (OPEN_FLEET_RUNTIME / OPEN_FLEET_CLI_COMMAND / ORCA_CLI_COMMAND; see runtime/scripts/orca_cli.py)" >&2
   exit 2
 fi
+_orca_bin_is_shim=0
+if [ "$(python3 -I -c 'import os, sys; print(1 if os.path.realpath(sys.argv[1]) == os.path.realpath(sys.argv[2]) else 0)' "$ORCA_BIN" "$HERE/orca_cli.py" 2>/dev/null || echo 0)" = "1" ]; then
+  _orca_bin_is_shim=1
+fi
 step=parse-args
 
 # inert_text: stdin as ONE inert line, every unprintable character (line breaks, ESC, CR, bidi)
@@ -551,6 +555,16 @@ fi
 # starts claude through its own adapter (and Orca's lanes are interactive TUIs), so there a set
 # cap is a NOTE naming the runtime, never a silent claim. A malformed value refuses on every
 # runtime; OPEN_FLEET_REQUIRE_BUDGET=1 refuses a claude spawn the cap does not reach.
+_req_budget_raw="${OPEN_FLEET_REQUIRE_BUDGET:-}"
+_req_budget_norm=$(printf '%s' "$_req_budget_raw" | tr '[:upper:]' '[:lower:]')
+case "$_req_budget_norm" in
+  ""|0|false|no|off) _require_budget=0 ;;
+  1|true|yes|on) _require_budget=1 ;;
+  *)
+    _req_budget_inert=$(printf '%s' "$_req_budget_raw" | inert_text)
+    echo "SPAWN=REFUSED task=${tname} OPEN_FLEET_REQUIRE_BUDGET=${_req_budget_inert} is not a recognized boolean (use 1/true/yes/on or 0/false/no/off)" >&2
+    exit 2 ;;
+esac
 _budget="${OPEN_FLEET_MAX_BUDGET_USD:-}"
 _budget_re='^(0|[1-9][0-9]{0,5})(\.[0-9]{1,4})?$'
 if [ -n "$_budget" ]; then
@@ -559,21 +573,23 @@ if [ -n "$_budget" ]; then
     exit 2
   fi
 fi
+_cap_reaches=0
 if [ "$agent" = "claude" ]; then
-  _cap_reaches=0
-  case "$ACTIVE_RUNTIME" in
-    posix|worktrunk) [ -z "${CLAUDE_CMD:-}${WORKER_CMD:-}" ] && _cap_reaches=1 ;;
-  esac
-  if [ "${OPEN_FLEET_REQUIRE_BUDGET:-0}" = "1" ] && { [ -z "$_budget" ] || [ "$_cap_reaches" = "0" ]; }; then
+  if [ "$_orca_bin_is_shim" = "1" ]; then
+    case "$ACTIVE_RUNTIME" in
+      posix|worktrunk) [ -z "${CLAUDE_CMD:-}${WORKER_CMD:-}" ] && _cap_reaches=1 ;;
+    esac
+  fi
+  if [ "$_require_budget" = "1" ] && { [ -z "$_budget" ] || [ "$_cap_reaches" = "0" ]; }; then
     if [ -z "$_budget" ]; then
-      echo "SPAWN=REFUSED task=${tname} no spend cap: OPEN_FLEET_REQUIRE_BUDGET=1 and OPEN_FLEET_MAX_BUDGET_USD is unset — export a per-dispatch dollar cap" >&2
+      echo "SPAWN=REFUSED task=${tname} no spend cap: OPEN_FLEET_REQUIRE_BUDGET is enabled and OPEN_FLEET_MAX_BUDGET_USD is unset — export a per-dispatch dollar cap" >&2
     else
-      echo "SPAWN=REFUSED task=${tname} no spend cap reaches this worker: OPEN_FLEET_REQUIRE_BUDGET=1, but the ${ACTIVE_RUNTIME} launch (or a CLAUDE_CMD/WORKER_CMD override) does not carry --max-budget-usd — use the posix or worktrunk runtime, or unset the requirement and bound it by the dispatch timebox" >&2
+      echo "SPAWN=REFUSED task=${tname} no spend cap reaches this worker: OPEN_FLEET_REQUIRE_BUDGET is enabled, but the ${ACTIVE_RUNTIME} launch (or an override / external CLI) does not carry --max-budget-usd — use the posix or worktrunk runtime through orca_cli.py, or unset the requirement and bound it by the dispatch timebox" >&2
     fi
     exit 2
   fi
   if [ -n "$_budget" ] && [ "$_cap_reaches" = "0" ]; then
-    echo "SPAWN=NOTE task=${tname} OPEN_FLEET_MAX_BUDGET_USD is not carried on the ${ACTIVE_RUNTIME} launch (or an override); the dispatch timebox bounds this worker" >&2
+    echo "SPAWN=NOTE task=${tname} OPEN_FLEET_MAX_BUDGET_USD is not carried on the ${ACTIVE_RUNTIME} launch (or an override / external CLI); the dispatch timebox bounds this worker" >&2
   fi
 fi
 # The parent profile a child must not exceed is the MOST restrictive of every source that
@@ -1432,30 +1448,6 @@ cls = getattr(importlib.import_module(mod_name, package="runtime.providers"), cl
 print(1 if cls.worktree_create is not prov.RuntimeProvider.worktree_create else 0)
 PY
 )
-  case "$sel" in
-    new-*)
-      if [ -n "$_bl" ] && [ "$PROFILE" = "ro" ] && [ "$custom_lane" = "0" ] && [ "$_standalone_wc" = "1" ]; then
-        step=worktree-create
-        _wc=$(mktemp)
-        orca_json "$_wc" worktree create --name "$safe_title" --repo "$_repo_top" ${ROUTE_ARGS[@]+"${ROUTE_ARGS[@]}"}
-        _launch_wt=$(pyjson "$_wc" <<'PY'
-import json, sys
-d = strict_load(sys.argv[1])
-r = d.get("result", d) if isinstance(d, dict) else {}
-wt = (r.get("worktree") or {}) if isinstance(r, dict) else {}
-p = wt.get("path") if isinstance(wt, dict) else None
-if not p or not isinstance(p, str):
-    print("worktree create returned no path", file=sys.stderr)
-    raise SystemExit(1)
-print(p)
-PY
-)
-        rm -f "$_wc"
-        sel="path:${_launch_wt}"
-        echo "SPAWN=NOTE task=${tname} worktree ${_launch_wt} created for the ${ACTIVE_RUNTIME} ro launch" >&2
-        _bl=$(base_launch "$_launch_wt")
-      fi ;;
-  esac
   cmd_default=$(printf '%s\n' "$_bl" | sed -n '1p')
   base_profile_flag=$(printf '%s\n' "$_bl" | sed -n '2p')
 fi
@@ -1615,15 +1607,15 @@ PY
     # deferral, so REQUIRE could not stop a launch the provider never verified.
     echo "SPAWN=REFUSED task=${task} deny-hook arming UNVERIFIED for PROFILE=${PROFILE} on runtime ${ACTIVE_RUNTIME}: OPEN_FLEET_REQUIRE_DENY_HOOK is set and ORCA_DENY_HOOK_SETTINGS is unset, so the PreToolUse guard this tier's safety story names is not verified here: no opt-out is honoured, and no provider deferral either (W4-06). Wire it (deny-hook.sh --settings <worktree>) and name it with ORCA_DENY_HOOK_SETTINGS." >&2
     exit 2
-  elif [ "$ACTIVE_RUNTIME" = "posix" ] || [ "$ACTIVE_RUNTIME" = "openhands" ]; then
+  elif [ "$_orca_bin_is_shim" = "1" ] && { [ "$ACTIVE_RUNTIME" = "posix" ] || [ "$ACTIVE_RUNTIME" = "openhands" ]; }; then
     # These providers install the deny-hook registration and verify it before the agent starts
     # (W4-06): posix inside worker-start (posix.verify_installed_guard), openhands on the
     # hook_config the agent-server runs, before the conversation's /run (verify_conversation_guard).
     # A new-child spawn has no worktree and no settings file at this pre-launch gate, so the gate
     # cannot and need not check one; it defers to that enforcement rather than demand an opt-out
-    # for ordinary dispatch.
+    # for ordinary dispatch — ONLY when ORCA_BIN actually resolves to orca_cli.py (#775).
     echo "spawn_worker: NOTE deny-hook arming is verified by the ${ACTIVE_RUNTIME} provider inside worker-start for PROFILE=${PROFILE} (ORCA_DENY_HOOK_SETTINGS unset); the agent does not start unless its installed registration is armed (W4-06)" >&2
-  elif [ "$ACTIVE_RUNTIME" != "orca" ]; then
+  elif [ "$_orca_bin_is_shim" = "1" ] && [ "$ACTIVE_RUNTIME" != "orca" ]; then
     # Every other non-Orca provider installs the registration but does not re-verify it before
     # the agent starts, so the deferral is named for what it is; OPEN_FLEET_REQUIRE_DENY_HOOK=1
     # (above) refuses it.
@@ -1788,6 +1780,37 @@ case "$status" in
     ;;
 esac
 
+# Deferred ro new-* worktree pre-creation (#788): only runs AFTER SW_PRINT_LAUNCH,
+# deny-hook-arming, reserve-launch, and verify-task-ready have all succeeded so refused spawns
+# and dry-runs never leak orphaned worktrees.
+if [ "$ACTIVE_RUNTIME" != "orca" ]; then
+  case "$sel" in
+    new-*)
+      if [ -n "${_bl:-}" ] && [ "$PROFILE" = "ro" ] && [ "$custom_lane" = "0" ] && [ "${_standalone_wc:-0}" = "1" ]; then
+        step=worktree-create
+        _wc=$(mktemp)
+        orca_json "$_wc" worktree create --name "$safe_title" --repo "$_repo_top" ${ROUTE_ARGS[@]+"${ROUTE_ARGS[@]}"}
+        _launch_wt=$(pyjson "$_wc" <<'PY'
+import json, sys
+d = strict_load(sys.argv[1])
+r = d.get("result", d) if isinstance(d, dict) else {}
+wt = (r.get("worktree") or {}) if isinstance(r, dict) else {}
+p = wt.get("path") if isinstance(wt, dict) else None
+if not p or not isinstance(p, str):
+    print("worktree create returned no path", file=sys.stderr)
+    raise SystemExit(1)
+print(p)
+PY
+)
+        rm -f "$_wc"
+        sel="path:${_launch_wt}"
+        echo "SPAWN=NOTE task=${tname} worktree ${_launch_wt} created for the ${ACTIVE_RUNTIME} ro launch" >&2
+        _bl=$(base_launch "$_launch_wt")
+        base_profile_flag=$(printf '%s\n' "$_bl" | sed -n '2p')
+      fi ;;
+  esac
+fi
+
 # --- spawn lanes ---------------------------------------------------------------
 # Lane selection:
 #   override set (WORKER_CMD/legacy)      → custom-argv lane (opt-in checked above)
@@ -1847,11 +1870,16 @@ if [ "$custom_lane" = "0" ]; then
   # openhands agent's toolset token comes from its provider for every profile (#596).
   if [ "$PROFILE" = "ro" ] || [ "$agent" = "openhands" ]; then profile_flag="$base_profile_flag"; fi
 
+  _expected_budget_flag=""
+  if [ "$agent" = "claude" ] && [ "${_cap_reaches:-0}" = "1" ] && [ -n "${_budget:-}" ]; then
+    _expected_budget_flag="--max-budget-usd ${_budget}"
+  fi
+
   step=read-start-receipt
   # Line 1 is the machine verdict; the remaining stdout lines are the caller-facing receipt
   # fields. nextSteps / nextCommands go to stderr verbatim — they are the runtime's own
   # recovery text, not ours to paraphrase.
-  ws_out=$(pyjson "$ws" "$profile_flag" "$ws_handle" <<'PY'
+  ws_out=$(pyjson "$ws" "$profile_flag" "$ws_handle" "$_expected_budget_flag" <<'PY'
 import json, sys
 
 # Every typed preflight refusal is a POLICY/usage answer, not a transport failure: the
@@ -1964,7 +1992,8 @@ eff = launch.get("effective") if "effective" in launch else None
 # and the profile was advisory (#298). Checked only when the host reports the field:
 # an absent one is unverifiable, and is said so rather than guessed at.
 want = sys.argv[2].split() if len(sys.argv) > 2 else []
-if want:
+want_budget = sys.argv[4].split() if len(sys.argv) > 4 else []
+if want or want_budget:
     # An ABSENT launch.effective is not a pass. sandbox-policy.md:18 makes this field THE way to
     # tell an autonomous worker from a prompting one — "neither is knowable from source: read
     # launch.effective off the start receipt" — and it is in the documented receipt shape
@@ -1973,10 +2002,13 @@ if want:
     #
     # Both of these are UNUSABLE, not FAILED: state said ready, so a worker IS live. It cannot do
     # the work the profile grants, and it must be STOPPED — never respawned beside.
+    toks = _launch_tokens(eff) if eff is not None else []
     if eff is None:
         why = "LAUNCH_EFFECTIVE_ABSENT=1"
-    elif not _contains_seq(_launch_tokens(eff), want):
+    elif want and not _contains_seq(toks, want):
         why = "LAUNCH_FLAG_MISSING=" + _f(" ".join(want))
+    elif want_budget and not _contains_seq(toks, want_budget):
+        why = "LAUNCH_BUDGET_MISSING=" + _f(" ".join(want_budget))
     else:
         why = ""
     if why:
@@ -2129,6 +2161,8 @@ PY
       case "$verdict_line" in
         *LAUNCH_EFFECTIVE_ABSENT*)
           _why="its receipt carries no launch.effective at all, so what the host applied cannot be read (sandbox-policy.md: that field is the only way to tell an autonomous worker from a prompting one)" ;;
+        *LAUNCH_BUDGET_MISSING*)
+          _why="the host's launch.effective does not carry '--max-budget-usd ${_budget}'" ;;
         *)
           _why="the host's launch.effective does not carry '${profile_flag}'" ;;
       esac

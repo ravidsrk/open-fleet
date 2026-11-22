@@ -70,7 +70,12 @@ receipts, drain. Every command prints one JSON object.
 Exit: 0 ok · 1 blocked (frozen, ack owed, retest, returned to review, offline, in flight) ·
 2 usage or refused input · 3 not the owner (fenced, lease held, unknown token).
 """
-from __future__ import annotations
+import sys
+
+if (__name__ == "__main__" and not getattr(sys.flags, "safe_path", False) and sys.path
+        and ("os" not in sys.modules or sys.modules["os"].path.realpath(sys.path[0])
+             == sys.modules["os"].path.dirname(sys.modules["os"].path.realpath(__file__)))):
+    del sys.path[0]
 
 import argparse
 import contextlib
@@ -88,7 +93,6 @@ import socket
 import sqlite3
 import stat
 import subprocess
-import sys
 import tempfile
 import time
 import urllib.parse
@@ -375,7 +379,7 @@ class Store:
         named = {r["repo"].split("/", 1)[0] for r in conn.execute("SELECT repo FROM mq_queues WHERE mode = 'gh'")}
         return self.github_hosts | frozenset(named)
 
-    def _normalize_identities(self, conn: sqlite3.Connection, held: list[EffectLock]) -> None:
+    def _normalize_identities(self, conn: sqlite3.Connection, held: list["EffectLock"]) -> None:
         """Respell an identity an older store holds the way `normalize_identity` does (PR #647).
 
         Every table that carries the identity moves together, so a lease never splits from its
@@ -1780,8 +1784,8 @@ class MergeQueue:
 
     @classmethod
     def _analyze_arith_body(cls, arith_body: str) -> tuple[list[str], list[str]]:
-        """Validate a `$(( ... ))` arithmetic body, extracting inner `$(...)`, `$((...))`, and `` `...` ``
-        substitutions while rejecting variable, parameter (`${x}` / `$x`), indirect, quoted, or mutating forms."""
+        """Validate a `$(( ... ))` arithmetic body, rejecting command substitutions (`$(...)` / `` `...` ``),
+        variable, parameter (`${x}` / `$x`), indirect, quoted, or mutating forms fail-closed."""
         arith_body = cls._fold_line_continuations(arith_body)
         subs: list[str] = []
         problems: list[str] = []
@@ -1801,29 +1805,15 @@ class MergeQueue:
                         const_buf.append(" 0 ")
                         i = ic + 2
                         continue
-                ec, ep = cls._find_matching_paren(arith_body, i + 2)
-                if ec < 0:
-                    return subs, problems + ep
-                subs.append(arith_body[i + 2:ec])
-                const_buf.append(" 0 ")
-                i = ec + 1
-                continue
+                problems.append(
+                    "command substitution inside arithmetic expansion cannot be statically fingerprinted"
+                )
+                return subs, problems
             if ch == "`":
-                bt = i + 1
-                buf: list[str] = []
-                while bt < n and arith_body[bt] != "`":
-                    if arith_body[bt] == "\\" and bt + 1 < n and arith_body[bt + 1] in ("\\", "`", "$", '"'):
-                        buf.append(arith_body[bt + 1])
-                        bt += 2
-                        continue
-                    buf.append(arith_body[bt])
-                    bt += 1
-                if bt >= n:
-                    return subs, problems + ["unterminated backtick command substitution"]
-                subs.append("".join(buf))
-                const_buf.append(" 0 ")
-                i = bt + 1
-                continue
+                problems.append(
+                    "command substitution inside arithmetic expansion cannot be statically fingerprinted"
+                )
+                return subs, problems
             if ch not in cls._ARITH_SAFE_CHARS:
                 problems.append(
                     "variable, indirect, or mutating expression inside arithmetic expansion cannot be statically fingerprinted"
@@ -1844,13 +1834,39 @@ class MergeQueue:
 
     @classmethod
     def _find_matching_paren(cls, cmd: str, start: int, *, in_arith: bool = False) -> tuple[int, list[str]]:
-        """Find the index of `)` matching the `(` at `start - 1`, respecting shell quotes, comments, and nesting."""
+        """Find the index of `)` matching the `(` at `start - 1`, respecting shell quotes, comments, case syntax, and nesting."""
         n = len(cmd)
         j = start
         at_tok = True
+        case_stack: list[str] = []
+        expect_cmd = True
+        in_for_header = False
+        expect_func_name = False
+        skip_redir_word = False
+        in_redir_word = False
+
+        def _mark_non_plain_word() -> None:
+            nonlocal expect_cmd, expect_func_name, skip_redir_word, in_redir_word
+            if in_arith:
+                return
+            if skip_redir_word:
+                skip_redir_word = False
+                in_redir_word = True
+                return
+            if in_redir_word:
+                return
+            if expect_func_name:
+                expect_func_name = False
+                expect_cmd = True
+                return
+            if case_stack and case_stack[-1] == "pattern_start":
+                case_stack[-1] = "pattern_bare"
+            expect_cmd = False
+
         while j < n:
             c = cmd[j]
             if c == "\\":
+                _mark_non_plain_word()
                 j += 2
                 at_tok = False
                 continue
@@ -1863,6 +1879,7 @@ class MergeQueue:
             if c == "$" and j + 1 < n and cmd[j + 1] == "[":
                 return -1, ["legacy $[...] arithmetic expansion cannot be statically fingerprinted"]
             if c == "'":
+                _mark_non_plain_word()
                 j += 1
                 while j < n and cmd[j] != "'":
                     j += 1
@@ -1872,6 +1889,7 @@ class MergeQueue:
                 at_tok = False
                 continue
             if c == '"':
+                _mark_non_plain_word()
                 j += 1
                 while j < n and cmd[j] != '"':
                     if cmd[j] == "\\":
@@ -1913,6 +1931,7 @@ class MergeQueue:
                 at_tok = False
                 continue
             if c == "`":
+                _mark_non_plain_word()
                 j += 1
                 while j < n and cmd[j] != "`":
                     j += 2 if (cmd[j] == "\\" and j + 1 < n and cmd[j + 1] in ("\\", "`", "$", '"')) else 1
@@ -1922,6 +1941,7 @@ class MergeQueue:
                 at_tok = False
                 continue
             if c == "$" and j + 1 < n and cmd[j + 1] == "{":
+                _mark_non_plain_word()
                 nj, _ns, np = cls._consume_param_expansion(cmd, j)
                 if nj < 0:
                     return -1, np
@@ -1929,6 +1949,7 @@ class MergeQueue:
                 at_tok = False
                 continue
             if c == "$" and j + 1 < n and cmd[j + 1] == "(":
+                _mark_non_plain_word()
                 if j + 2 < n and cmd[j + 2] == "(":
                     ic_s, ip_s = cls._find_matching_paren(cmd, j + 3, in_arith=True)
                     if ic_s < 0:
@@ -1943,17 +1964,171 @@ class MergeQueue:
                 j = ec + 1
                 at_tok = False
                 continue
+            if not in_arith and c in ("<", ">") and j + 1 < n and cmd[j + 1] == "(":
+                _mark_non_plain_word()
+                ec, ep = cls._find_matching_paren(cmd, j + 2)
+                if ec < 0:
+                    return -1, ep
+                j = ec + 1
+                at_tok = False
+                continue
             if c == "(":
+                if not in_arith and case_stack and case_stack[-1] == "pattern_start":
+                    case_stack[-1] = "pattern_paren"
+                    in_redir_word = False
+                    at_tok = True
+                    j += 1
+                    continue
                 ec, ep = cls._find_matching_paren(cmd, j + 1, in_arith=in_arith)
                 if ec < 0:
                     return -1, ep
+                if not in_arith:
+                    was_empty = cmd[j + 1:ec].strip() == ""
+                    expect_cmd = was_empty
+                    in_for_header = False
+                    expect_func_name = False
+                    in_redir_word = False
                 j = ec + 1
                 at_tok = True
                 continue
             if c == ")":
+                if not in_arith and case_stack:
+                    top = case_stack[-1]
+                    if top == "pattern_paren":
+                        case_stack[-1] = "body"
+                        expect_cmd = True
+                        in_redir_word = False
+                        at_tok = True
+                        j += 1
+                        continue
+                    if top == "pattern_bare":
+                        return -1, ["unparenthesized case pattern inside $(...) cannot be statically fingerprinted"]
+                    return -1, ["unclosed case statement inside $(...) cannot be statically fingerprinted"]
                 return j, []
-            at_tok = c in " \t\n;|&()><"
-            j += 1
+            if in_arith:
+                at_tok = c in " \t\n;|&()><"
+                j += 1
+                continue
+            if c in (" ", "\t"):
+                in_redir_word = False
+                at_tok = True
+                j += 1
+                continue
+            if c == "\n":
+                in_redir_word = False
+                at_tok = True
+                if not (case_stack and case_stack[-1] in ("pattern_start", "pattern_paren", "pattern_bare")):
+                    in_for_header = False
+                    expect_cmd = True
+                    expect_func_name = False
+                j += 1
+                continue
+            if c == ";":
+                in_redir_word = False
+                at_tok = True
+                if cmd.startswith(";;&", j):
+                    op_len = 3
+                    is_case_term = True
+                elif cmd.startswith((";;", ";&"), j):
+                    op_len = 2
+                    is_case_term = True
+                else:
+                    op_len = 1
+                    is_case_term = False
+                if is_case_term:
+                    if case_stack and case_stack[-1] == "body":
+                        case_stack[-1] = "pattern_start"
+                    in_for_header = False
+                    expect_cmd = False
+                    expect_func_name = False
+                else:
+                    in_for_header = False
+                    expect_cmd = True
+                    expect_func_name = False
+                j += op_len
+                continue
+            matched_redir = next((op for op in cls._REDIR_OPS if cmd.startswith(op, j)), None)
+            if matched_redir:
+                in_redir_word = False
+                skip_redir_word = True
+                at_tok = True
+                j += len(matched_redir)
+                continue
+            if c in ("|", "&"):
+                in_redir_word = False
+                at_tok = True
+                if cmd.startswith(("&&", "||", "|&"), j):
+                    in_for_header = False
+                    expect_cmd = True
+                    expect_func_name = False
+                    j += 2
+                    continue
+                if c == "|" and case_stack and case_stack[-1] in ("pattern_start", "pattern_paren", "pattern_bare"):
+                    if case_stack[-1] == "pattern_start":
+                        case_stack[-1] = "pattern_bare"
+                    j += 1
+                    continue
+                in_for_header = False
+                expect_cmd = True
+                expect_func_name = False
+                j += 1
+                continue
+            if c == "$":
+                _mark_non_plain_word()
+                j += 1
+                at_tok = False
+                continue
+            # Ordinary word characters
+            k = j
+            while k < n and cmd[k] not in " \t\n;|&()<>#\\'\"`$":
+                k += 1
+            if at_tok and not in_redir_word:
+                is_plain = k == n or cmd[k] in " \t\n;|&()<>#"
+                w = cmd[j:k]
+                if skip_redir_word:
+                    skip_redir_word = False
+                    in_redir_word = not is_plain
+                elif w.isdigit() and k < n and cmd[k] in ("<", ">"):
+                    pass
+                elif expect_func_name:
+                    expect_func_name = False
+                    expect_cmd = True
+                elif case_stack and case_stack[-1] == "header":
+                    if is_plain and w == "in":
+                        case_stack[-1] = "pattern_start"
+                    expect_cmd = False
+                elif case_stack and case_stack[-1] == "pattern_start":
+                    if is_plain and w == "esac":
+                        case_stack.pop()
+                        expect_cmd = False
+                    else:
+                        case_stack[-1] = "pattern_bare"
+                        expect_cmd = False
+                elif case_stack and case_stack[-1] in ("pattern_paren", "pattern_bare"):
+                    expect_cmd = False
+                elif in_for_header:
+                    if is_plain and w == "do":
+                        in_for_header = False
+                        expect_cmd = True
+                elif expect_cmd:
+                    if is_plain and w == "case":
+                        case_stack.append("header")
+                        expect_cmd = False
+                    elif is_plain and w == "esac" and case_stack and case_stack[-1] == "body":
+                        case_stack.pop()
+                        expect_cmd = False
+                    elif is_plain and w in ("for", "select"):
+                        in_for_header = True
+                        expect_cmd = False
+                    elif is_plain and w == "function":
+                        expect_func_name = True
+                        expect_cmd = False
+                    elif is_plain and w in cls._COMPOUND_PREFIX_KEYWORDS:
+                        expect_cmd = True
+                    else:
+                        expect_cmd = False
+            j = k
+            at_tok = False
         return -1, ["unterminated $(...) command substitution"]
 
     @classmethod
@@ -2253,8 +2428,10 @@ class MergeQueue:
         case_depth = 0
         paren_depth = 0
         in_case_pattern = False
+        after_case_pipe = False
+        case_pattern_started = False
         in_double_bracket = False
-        defined_funcs: set[str] = set()
+        defined_funcs_stack: list[set[str]] = [set()]
         idx, total = 0, len(lex_tokens)
 
         while idx < total:
@@ -2289,21 +2466,32 @@ class MergeQueue:
                         problems.append(f"unmatched {tok!r} outside case statement")
                     else:
                         in_case_pattern = True
+                        after_case_pipe = False
+                        case_pattern_started = False
                         expect_cmd = False
                         in_for_header = False
                 elif tok == "(" and in_case_pattern:
-                    pass
+                    case_pattern_started = True
+                    after_case_pipe = False
+                elif tok == "|" and in_case_pattern:
+                    after_case_pipe = True
+                    case_pattern_started = True
                 elif tok == ")" and in_case_pattern:
                     in_case_pattern = False
+                    after_case_pipe = False
+                    case_pattern_started = False
                     expect_cmd = True
                 elif tok == "(":
                     paren_depth += 1
+                    defined_funcs_stack.append(set(defined_funcs_stack[-1]))
                     in_for_header = False
                     expect_cmd = True
                 elif tok == ")":
                     paren_depth -= 1
                     if paren_depth < 0:
                         problems.append("unmatched ')' in gate command")
+                    elif len(defined_funcs_stack) > 1:
+                        defined_funcs_stack.pop()
                     in_for_header = False
                     expect_cmd = False
                 else:
@@ -2314,6 +2502,9 @@ class MergeQueue:
 
             # kind == "word"
             if in_for_header:
+                if is_unquoted(flag) and tok == "do":
+                    in_for_header = False
+                    expect_cmd = True
                 idx += 1
                 continue
             if in_case_header:
@@ -2321,13 +2512,19 @@ class MergeQueue:
                     in_case_header = False
                     case_depth += 1
                     in_case_pattern = True
+                    after_case_pipe = False
+                    case_pattern_started = False
                 idx += 1
                 continue
             if in_case_pattern:
-                if is_unquoted(flag) and tok == "esac" and case_depth > 0:
+                if (is_unquoted(flag) and tok == "esac" and case_depth > 0
+                        and not after_case_pipe and not case_pattern_started):
                     case_depth -= 1
                     in_case_pattern = False
                     expect_cmd = False
+                else:
+                    after_case_pipe = False
+                    case_pattern_started = True
                 idx += 1
                 continue
             if not expect_cmd:
@@ -2384,7 +2581,7 @@ class MergeQueue:
             if is_unquoted(flag) and tok == "function":
                 idx += 1
                 if idx < total and lex_tokens[idx][0] == "word":
-                    defined_funcs.add(lex_tokens[idx][1])
+                    defined_funcs_stack[-1].add(lex_tokens[idx][1])
                     idx += 1
                 if idx + 1 < total and lex_tokens[idx][:2] == ("op", "(") and lex_tokens[idx + 1][:2] == ("op", ")"):
                     idx += 2
@@ -2392,7 +2589,7 @@ class MergeQueue:
             # POSIX function definition `fname () { ... }`
             if (is_unquoted(flag) and idx + 2 < total
                     and lex_tokens[idx + 1][:2] == ("op", "(") and lex_tokens[idx + 2][:2] == ("op", ")")):
-                defined_funcs.add(tok)
+                defined_funcs_stack[-1].add(tok)
                 idx += 3
                 expect_cmd = True
                 continue
@@ -2447,7 +2644,7 @@ class MergeQueue:
                     not force_external
                     and "/" not in cw
                     and (
-                        (cw in defined_funcs and not skip_funcs)
+                        (cw in defined_funcs_stack[-1] and not skip_funcs)
                         or cw in cls._SHELL_BUILTINS
                         or cw in ("command", "builtin", "exec", ".", "source", "eval")
                         or (is_unquoted(cflag) and cw in cls._SHELL_KEYWORDS)
@@ -2993,7 +3190,7 @@ class MergeQueue:
                     if _exec_tokens is not None:
                         _exec_tokens.add(final_word)
                     is_ext_exec = True
-            elif final_word in defined_funcs and not skip_funcs:
+            elif final_word in defined_funcs_stack[-1] and not skip_funcs:
                 executables.append(f"__func__:{final_word}")
             elif final_word and not (
                 final_word in cls._SHELL_BUILTINS
@@ -4176,18 +4373,18 @@ class MergeQueue:
                 if not s_real:
                     items.append({"tok": tok, "shadowed": None})
                     continue
-                if tok.startswith("__opt_builtin__:"):
-                    s_real_base = Path(s_real).name
-                    eff_s_base = (
-                        fn_name
-                        if (self._MULTICALL_BOX_RE.fullmatch(s_real_base) and not self._MULTICALL_BOX_RE.fullmatch(fn_name))
-                        else s_real_base
+                s_real_base = Path(s_real).name
+                eff_s_base = (
+                    fn_name
+                    if (self._MULTICALL_BOX_RE.fullmatch(s_real_base) and not self._MULTICALL_BOX_RE.fullmatch(fn_name))
+                    else s_real_base
+                )
+                s_fam = self._exec_family(eff_s_base)
+                if s_fam is not None:
+                    kind_label = "optional builtin" if tok.startswith("__opt_builtin__:") else "shell function"
+                    problems.append(
+                        f"{fn_name}: {kind_label} shadows external {s_real!r} ({s_fam}) on gate PATH"
                     )
-                    s_fam = self._exec_family(eff_s_base)
-                    if s_fam is not None:
-                        problems.append(
-                            f"{fn_name}: optional builtin shadows external {s_real!r} ({s_fam}) on gate PATH"
-                        )
                 try:
                     s_st = os.stat(s_real)
                     if not stat.S_ISREG(s_st.st_mode):
@@ -4200,7 +4397,7 @@ class MergeQueue:
                         fn_name,
                         clean_path,
                         ro_binds=ro_binds,
-                        analyze_body=tok.startswith("__opt_builtin__:"),
+                        analyze_body=True,
                         cwd=cwd,
                         commit=commit,
                         gate_depth=_depth,
@@ -4902,6 +5099,9 @@ class MergeQueue:
         repository is not the PR's: PR #647), and only that branch. A PR GitHub has not yet
         marked merged is `final: False`: the teardown stays owed and is retried.
         """
+        if e["branch"] in (cfg["default_branch"], cfg["base"]):
+            return {"branch": e["branch"], "headRepository": None, "delete": False, "final": True,
+                    "outcome": "retained: protected branch"}
         st = self._unit_state(cfg, e)
         out = {"branch": e["branch"], "headRepository": st.get("headRepository"), "delete": False, "final": True}
         if st["state"] == "OPEN" and st["baseRefName"] == cfg["base"]:
@@ -4988,6 +5188,8 @@ class MergeQueue:
         (`delete` -> `deleting`, fenced) immediately before the receipt and the send; a command
         that loses the claim sends nothing (PR #647).
         """
+        if e["branch"] in (cfg["default_branch"], cfg["base"]):
+            return "retained: protected branch", True, None
         remote = self._bound_remote(cfg)
         if lock.fd is None:
             raise QueueError("merge_in_flight", "a branch deletion needs the held merge boundary")

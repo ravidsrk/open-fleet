@@ -156,10 +156,56 @@ except Exception:
   [ "${#_sha}" -eq 40 ] || [ "${#_sha}" -eq 64 ] || return 1
   printf '%s' "$_sha"
 }
-# _dgit — git in the target repo for key DISCOVERY, with replacement objects and grafts off (the
-# object-identity floor verify.py and gitexec.py read under): `git replace <reviewed> <other>`
-# made `cat-file -e <ref>:.orca/dispatch-pubkey` see a pin the reviewed commit does not carry.
-_dgit() { GIT_NO_REPLACE_OBJECTS=1 GIT_GRAFT_FILE=/dev/null "$GIT_BIN" -C "$TOP" "$@"; }
+# _hgit / _dgit — git for key DISCOVERY under a hardened custody floor mirroring wtree.sh (#766):
+# drops inherited repository selectors and exec env vars, disables global/system config and
+# attributes, disables lazy fetch and non-file protocols, disables replacement objects and grafts,
+# and applies the fixed command-channel GIT_CONFIG_COUNT floor above repo-local config.
+_hgit() {
+  (
+    unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+      GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_ATTR_SOURCE GIT_NAMESPACE GIT_CEILING_DIRECTORIES \
+      GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT \
+      GIT_EXEC_PATH GIT_TEMPLATE_DIR GIT_SSH GIT_SSH_COMMAND GIT_ASKPASS GIT_EXTERNAL_DIFF \
+      GIT_PAGER GIT_PROXY_COMMAND
+    GIT_TERMINAL_PROMPT=0
+    GIT_NO_REPLACE_OBJECTS=1
+    GIT_GRAFT_FILE=/dev/null
+    GIT_NO_LAZY_FETCH=1
+    GIT_ALLOW_PROTOCOL=file
+    GIT_ATTR_NOSYSTEM=1
+    GIT_CONFIG_GLOBAL=/dev/null
+    GIT_CONFIG_NOSYSTEM=1
+    GIT_CONFIG_COUNT=16
+    GIT_CONFIG_KEY_0=core.fsmonitor;          GIT_CONFIG_VALUE_0=false
+    GIT_CONFIG_KEY_1=core.hooksPath;          GIT_CONFIG_VALUE_1=/dev/null
+    GIT_CONFIG_KEY_2=protocol.ext.allow;      GIT_CONFIG_VALUE_2=never
+    GIT_CONFIG_KEY_3=safe.directory;          GIT_CONFIG_VALUE_3='*'
+    GIT_CONFIG_KEY_4=diff.external;           GIT_CONFIG_VALUE_4=
+    GIT_CONFIG_KEY_5=core.alternateRefsCommand; GIT_CONFIG_VALUE_5='exit 0'
+    GIT_CONFIG_KEY_6=submodule.recurse;       GIT_CONFIG_VALUE_6=false
+    GIT_CONFIG_KEY_7=fetch.recurseSubmodules; GIT_CONFIG_VALUE_7=false
+    GIT_CONFIG_KEY_8=status.submoduleSummary; GIT_CONFIG_VALUE_8=false
+    GIT_CONFIG_KEY_9=log.showSignature;       GIT_CONFIG_VALUE_9=false
+    GIT_CONFIG_KEY_10=gpg.program;            GIT_CONFIG_VALUE_10=/dev/null
+    GIT_CONFIG_KEY_11=gpg.openpgp.program;    GIT_CONFIG_VALUE_11=/dev/null
+    GIT_CONFIG_KEY_12=gpg.x509.program;       GIT_CONFIG_VALUE_12=/dev/null
+    GIT_CONFIG_KEY_13=gpg.ssh.program;        GIT_CONFIG_VALUE_13=/dev/null
+    GIT_CONFIG_KEY_14=maintenance.auto;       GIT_CONFIG_VALUE_14=false
+    GIT_CONFIG_KEY_15=gc.auto;                GIT_CONFIG_VALUE_15=0
+    export GIT_TERMINAL_PROMPT GIT_NO_REPLACE_OBJECTS GIT_GRAFT_FILE GIT_NO_LAZY_FETCH \
+      GIT_ALLOW_PROTOCOL GIT_ATTR_NOSYSTEM GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM GIT_CONFIG_COUNT \
+      GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_KEY_1 GIT_CONFIG_VALUE_1 \
+      GIT_CONFIG_KEY_2 GIT_CONFIG_VALUE_2 GIT_CONFIG_KEY_3 GIT_CONFIG_VALUE_3 \
+      GIT_CONFIG_KEY_4 GIT_CONFIG_VALUE_4 GIT_CONFIG_KEY_5 GIT_CONFIG_VALUE_5 \
+      GIT_CONFIG_KEY_6 GIT_CONFIG_VALUE_6 GIT_CONFIG_KEY_7 GIT_CONFIG_VALUE_7 \
+      GIT_CONFIG_KEY_8 GIT_CONFIG_VALUE_8 GIT_CONFIG_KEY_9 GIT_CONFIG_VALUE_9 \
+      GIT_CONFIG_KEY_10 GIT_CONFIG_VALUE_10 GIT_CONFIG_KEY_11 GIT_CONFIG_VALUE_11 \
+      GIT_CONFIG_KEY_12 GIT_CONFIG_VALUE_12 GIT_CONFIG_KEY_13 GIT_CONFIG_VALUE_13 \
+      GIT_CONFIG_KEY_14 GIT_CONFIG_VALUE_14 GIT_CONFIG_KEY_15 GIT_CONFIG_VALUE_15
+    exec "$GIT_BIN" "$@" </dev/null
+  )
+}
+_dgit() { _hgit -C "$TOP" "$@"; }
 # _remote_target REF — REF followed through any symbolic chain to its FINAL target, printed only
 # when every hop is a remote-tracking ref that EXISTS under exactly its name (W3-07: the rule
 # gitexec.remote_tracking_commit holds for decisions.py, gate-batch.py, run_report.py and
@@ -185,7 +231,7 @@ _remote_target() {
       *) echo "verify-gate: NOTE — $1 points at '$_t', which is not a remote-tracking ref; no key is read there (a local branch is the graded worker's to move)." >&2
          return 1 ;;
     esac
-    if ! "$GIT_BIN" check-ref-format "$_t" 2>/dev/null; then
+    if ! _hgit check-ref-format "$_t" 2>/dev/null; then
       echo "verify-gate: NOTE — '$_t' is not a valid ref name (a revision suffix such as ~1 or @{1} names an older commit, not a ref); no key is read there." >&2
       return 1
     fi
@@ -217,12 +263,19 @@ _remote_target() {
 KEY_BASE="$BASE"
 [ -n "$KEY_BASE" ] || [ "${GITHUB_ACTIONS:-}" != "true" ] || KEY_BASE="${GITHUB_BASE_REF:-}"
 if [ -z "$PUBKEY" ] && [ -n "$GIT_BIN" ]; then
-  TOP="$("$GIT_BIN" rev-parse --show-toplevel 2>/dev/null || true)"
+  TOP="$(_hgit rev-parse --show-toplevel 2>/dev/null || true)"
   if [ -n "$TOP" ]; then
     PR_BASE="$(_gh_pr_base || true)"
     DEF_REF="$(_remote_target refs/remotes/origin/HEAD || true)"
     BASE_REF=""
-    [ -z "$KEY_BASE" ] || BASE_REF="$(_remote_target "refs/remotes/origin/$KEY_BASE" || true)"
+    if [ -n "$KEY_BASE" ]; then
+      case "$KEY_BASE" in
+        refs/remotes/*) _kb_ref="$KEY_BASE" ;;
+        origin/*)       _kb_ref="refs/remotes/origin/${KEY_BASE#origin/}" ;;
+        *)              _kb_ref="refs/remotes/origin/$KEY_BASE" ;;
+      esac
+      BASE_REF="$(_remote_target "$_kb_ref" || true)"
+    fi
     if [ -n "$DEF_REF" ] && _dgit cat-file -e "$DEF_REF:.orca/dispatch-pubkey" 2>/dev/null; then
       PUBKEY=".orca/dispatch-pubkey@$DEF_REF"
     elif [ -n "$BASE_REF" ] && _dgit cat-file -e "$BASE_REF:.orca/dispatch-pubkey" 2>/dev/null; then

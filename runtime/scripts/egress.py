@@ -100,6 +100,15 @@ How to wire
     --payload-class pr-body --payload-file /tmp/body.md --consent
     grant:pr-open-on-base && gh pr create --body-file /tmp/body.md``
 """
+import sys
+
+# W3-01: drop the script's own directory from sys.path before any non-builtin import so a
+# planted sibling named like a stdlib module cannot shadow the stdlib when run without -I.
+if (__name__ == "__main__" and not getattr(sys.flags, "safe_path", False) and sys.path
+        and ("os" not in sys.modules or sys.modules["os"].path.realpath(sys.path[0])
+             == sys.modules["os"].path.dirname(sys.modules["os"].path.realpath(__file__)))):
+    del sys.path[0]
+
 import argparse
 import fcntl
 import hashlib
@@ -107,7 +116,6 @@ import json
 import os
 import re
 import stat
-import sys
 import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
@@ -639,17 +647,43 @@ def _anchored_value(raw):
     return "" if want == "(empty)" else want
 
 
+def _valid_anchor_value(raw):
+    """True when `raw` is either literal `(empty)` or a 64-character lowercase hex sha256."""
+    if not isinstance(raw, str):
+        return False
+    cleaned = raw.strip().lower()
+    return cleaned == "(empty)" or _is_sha256(cleaned)
+
+
+def _anchor_arg(value):
+    if not _valid_anchor_value(value):
+        raise argparse.ArgumentTypeError(
+            f"anchor must be a 64-character hex sha256 or '(empty)', got {value!r}")
+    return value.strip().lower()
+
+
 def _tamper(path, broken, reason, count):
     _print(f"egress: TAMPER at {path}:{broken} — {reason} ({count} line(s) read)", file=sys.stderr)
     return EXIT_FAIL_CLOSED
 
 
 def _anchors_fail(args, path, exists, receipts):
-    """EXIT_FAIL_CLOSED, said, when an anchor `args` names (--expect-ancestor, --expect-head) does
-    not match the chain; None when every requested anchor holds (or none was requested). One check
-    for every command that answers from the chain: `verify` and `grants` (re-attack of 2d254d0f,
-    W5-04: `grants` took no anchor, so a consent rewritten since the last close printed with rc 0
-    while `verify --expect-ancestor` said TAMPER)."""
+    """EXIT_USAGE when an anchor argument is empty/malformed, EXIT_FAIL_CLOSED when a valid
+    anchor `args` names (--expect-ancestor, --expect-head) does not match the chain; None when
+    every requested anchor holds (or none was requested). One check for every command that
+    answers from the chain: `verify` and `grants` (re-attack of 2d254d0f, W5-04)."""
+    ancestors = getattr(args, "expect_ancestor", None)
+    if ancestors is not None:
+        for raw in ancestors:
+            if not _valid_anchor_value(raw):
+                _print(f"egress: invalid --expect-ancestor value {raw!r}: must be a 64-character "
+                       "hex sha256 or '(empty)'", file=sys.stderr)
+                return EXIT_USAGE
+    expected = getattr(args, "expect_head", None)
+    if expected is not None and not _valid_anchor_value(expected):
+        _print(f"egress: invalid --expect-head value {expected!r}: must be a 64-character "
+               "hex sha256 or '(empty)'", file=sys.stderr)
+        return EXIT_USAGE
     head = sha256_hex(receipts[-1][1]) if receipts else ""
     shown = head or "(empty)"
     # A receipt is named by its line's digest (what `head` printed) or by its id (what `write`
@@ -658,7 +692,6 @@ def _anchors_fail(args, path, exists, receipts):
     # Both anchors may be requested together; each requested check runs —
     # returning after the ancestor leg would silently skip an exact-head
     # check the caller asked for (PR #567 review, P2).
-    ancestors = getattr(args, "expect_ancestor", None)
     if ancestors is not None:
         for want in (_anchored_value(a) for a in ancestors):
             if want and want not in known:
@@ -668,7 +701,6 @@ def _anchors_fail(args, path, exists, receipts):
                       f"({gone}). Appends since the anchor are fine; this is what an anchor kept off "
                       "the writer catches (#312)", file=sys.stderr)
                 return EXIT_FAIL_CLOSED
-    expected = getattr(args, "expect_head", None)
     if expected is not None:
         want = _anchored_value(expected)
         last = {head, receipts[-1][2]["id"]} if receipts else {""}
@@ -706,6 +738,8 @@ def cmd_verify(args):
     # --allow-empty, or a sealed empty head (--expect-head "(empty)"). The result line goes to
     # stdout as every verify result does; the failure and what to do about it go to stderr.
     sealed_empty = expected is not None and _anchored_value(expected) == ""
+    real_head = expected is not None and _is_sha256(_anchored_value(expected))
+    real_ancestors = [v for v in (_anchored_value(a) for a in (ancestors or ())) if _is_sha256(v)]
     if count == 0 and not sealed_empty:
         if not getattr(args, "allow_empty", False):
             _print(f"egress: NO RECEIPTS, 0 receipt(s) in {where} — nothing was verified")
@@ -714,10 +748,10 @@ def cmd_verify(args):
             return EXIT_NO_RECEIPTS
         _print(f"egress: NO RECEIPTS, 0 receipt(s) in {where} — none expected (--allow-empty)")
         return EXIT_OK
-    if expected is not None:
+    if real_head or (sealed_empty and count == 0):
         _print(f"egress: chain intact and anchored, {count} receipt(s) in {where} — head {shown}")
         return EXIT_OK
-    if ancestors is not None:
+    if real_ancestors:
         _print(f"egress: chain intact, anchored receipt(s) present, {count} receipt(s) "
               f"in {where} — head {shown}")
         return EXIT_OK
@@ -752,7 +786,12 @@ def cmd_grants(args):
     failed = _anchors_fail(args, path, exists, receipts)
     if failed is not None:
         return failed
-    anchored = getattr(args, "expect_ancestor", None) is not None or getattr(args, "expect_head", None) is not None
+    ancestors = getattr(args, "expect_ancestor", None)
+    expected = getattr(args, "expect_head", None)
+    real_ancestors = [v for v in (_anchored_value(a) for a in (ancestors or ())) if _is_sha256(v)]
+    real_head = expected is not None and _is_sha256(_anchored_value(expected))
+    sealed_empty = expected is not None and _anchored_value(expected) == "" and len(receipts) == 0
+    anchored = bool(real_ancestors) or real_head or sealed_empty
     grants = {}
     for _lineno, _raw, record in receipts:
         key = record["consent"]
@@ -793,13 +832,15 @@ def build_parser():
         description="Content-free hash-chained receipts for off-repo sends.",
         epilog="exit 0 ok / 2 usage / 3 fail-closed (receipt unwritable, or chain tampered) / 4 verify found "
                "no receipts (pass --allow-empty when none were sent)",
+        allow_abbrev=False,
     )
     p.add_argument("--ledger", default=None,
                    help=f"ledger path (default ${PRIMARY_LEDGER_ENV}, ${LEDGER_ENV}, or "
                         f"<repository root>/{DEFAULT_LEDGER})")
     sub = p.add_subparsers(dest="command", required=True)
 
-    w = sub.add_parser("write", help="append one receipt BEFORE the send; prints its id, an anchor")
+    w = sub.add_parser("write", help="append one receipt BEFORE the send; prints its id, an anchor",
+                       allow_abbrev=False)
     w.add_argument("--sink", required=True, help="which fleet component is sending, e.g. pr-open")
     w.add_argument("--host", required=True, help="destination host[:port]")
     w.add_argument("--payload-class", required=True, dest="payload_class",
@@ -812,7 +853,7 @@ def build_parser():
     w.add_argument("--ts", default=None, type=_ts_arg,
                    help="ISO-8601 instant with offset, e.g. 2026-01-02T03:04:05Z (default: now, UTC)")
 
-    v = sub.add_parser("verify", help="recompute the hash chain")
+    v = sub.add_parser("verify", help="recompute the hash chain", allow_abbrev=False)
     v.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
     _anchor_arguments(v)
     v.add_argument("--allow-empty", action="store_true", dest="allow_empty",
@@ -822,10 +863,12 @@ def build_parser():
                    help="the default since no receipts exits 4; kept so a close written for the "
                         "opt-in form still runs")
 
-    sub.add_parser("head", help="verify, then print the chain head to anchor off the writer")
+    sub.add_parser("head", help="verify, then print the chain head to anchor off the writer",
+                   allow_abbrev=False)
 
     g = sub.add_parser("grants", help="verify (with verify's anchors), then list the standing consents "
-                                      "the ledger records")
+                                      "the ledger records",
+                       allow_abbrev=False)
     g.add_argument("--json", action="store_true", help="emit JSON")
     _anchor_arguments(g)
     return p
@@ -833,11 +876,12 @@ def build_parser():
 
 def _anchor_arguments(p):
     p.add_argument("--expect-head", default=None, dest="expect_head", metavar="SHA256",
+                   type=_anchor_arg,
                    help="the head digest (or last receipt id) last recorded OFF this writer; the "
                         "ledger must END exactly there. Without any anchor the chain is only checked "
                         "against itself, which a wholesale rewrite satisfies (#312)")
     p.add_argument("--expect-ancestor", default=None, action="append", dest="expect_ancestor",
-                   metavar="SHA256",
+                   metavar="SHA256", type=_anchor_arg,
                    help="a head digest recorded OFF this writer at an earlier close, or a receipt id "
                         "`write` printed; that line must still be IN the chain, byte for byte. "
                         "Repeatable. Receipts appended since are expected — this is the "

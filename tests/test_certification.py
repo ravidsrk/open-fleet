@@ -155,7 +155,7 @@ class TestRecordValidates(Tripwired):
     def test_only_bound_run_reports_carry_live_witnessed(self):
         _errors, _stale, cells = certification.validate(ROOT)
         live = {(c["name"], c["profile"], c["harness"]) for c in cells if c["tier"] == "live-witnessed"}
-        self.assertEqual(live, {("orca", "ro", "claude"), ("orca", "rw", "claude"), ("posix", "ro", "claude"), ("posix", "rw", "claude"), ("claude", "ro", "claude"), ("claude", "rw", "claude")})
+        self.assertEqual(live, {("orca", "ro", "claude"), ("posix", "ro", "claude"), ("posix", "rw", "claude"), ("claude", "ro", "claude"), ("claude", "rw", "claude")})
         unknown = [c for c in cells if c["kind"] == "provider" and c["name"] not in ("orca", "posix")]
         self.assertTrue(unknown and all(certification.version_label(c["upstream"]) == "unknown" for c in unknown),
                         "an external adapter's upstream version was never recorded: it must read unknown")
@@ -1324,8 +1324,31 @@ class TestLiveRouteIsIdentified(Tripwired):
 
     @staticmethod
     def live(rec, profile):
-        return next(g for g in rec["providers"]["orca"]["routes"]
-                    if g["tier"] == "live-witnessed" and g["profiles"] == [profile])
+        live = next((g for g in rec["providers"]["orca"]["routes"]
+                     if g["tier"] == "live-witnessed" and g["profiles"] == [profile]), None)
+        if live is not None:
+            return live
+        if profile != "rw":
+            raise AssertionError(f"no live Orca {profile} route")
+        routes = rec["providers"]["orca"]["routes"]
+        index = next(i for i, g in enumerate(routes)
+                     if g["profiles"] == ["rw"] and g["harnesses"] == ["claude"])
+        group = copy.deepcopy(routes[index])
+        routes[index] = group
+        group["tier"] = "live-witnessed"
+        group["witnessed"] = {
+            "upstream_version": "orca-ide 1.4.224",
+            "harness_version": "Claude Code 2.1.296",
+            "host": "Ubuntu 24.04.5 LTS arm64 (OrbStack VM)",
+            "date": "2026-10-13",
+            "route": [
+                {"path": "docs/runs/2026-10-13-ship-it-mdtoc/stage-build.py",
+                 "lines": ['WORKER_CMD="claude --dangerously-skip-permissions",']},
+                {"path": "docs/runs/2026-10-13-ship-it-mdtoc/ledger.md",
+                 "lines": ["Substrate: Linux witness VM (Ubuntu 24.04.5 arm64, orca-ide 1.4.224 serve,"]},
+            ],
+        }
+        return group
 
     @staticmethod
     def move_codex_rw_to(rec, group):
@@ -1381,7 +1404,7 @@ class TestLiveRouteIsIdentified(Tripwired):
         self.assertEqual(p.returncode, 0, p.stderr)
         _errors, _stale, cells = certification.validate(ROOT)
         live = {(c["name"], c["profile"], c["harness"]) for c in cells if c["effective"] == "live-witnessed"}
-        self.assertEqual(live, {("orca", "ro", "claude"), ("orca", "rw", "claude"), ("posix", "ro", "claude"), ("posix", "rw", "claude"), ("claude", "ro", "claude"), ("claude", "rw", "claude")})
+        self.assertEqual(live, {("orca", "ro", "claude"), ("posix", "ro", "claude"), ("posix", "rw", "claude"), ("claude", "ro", "claude"), ("claude", "rw", "claude")})
 
 
 class TargetRepo(Tripwired):
@@ -1698,6 +1721,99 @@ class TestTheBoundFirstRunsAreLive(unittest.TestCase):
         p = self.check_with(lambda rec: rec["harnesses"]["claude"]["upstream"].update(version="2.1.305"))
         self.assertEqual(p.returncode, 1, p.stdout)
         self.assertIn("is not the witnessed harness version", p.stderr)
+
+
+class TestSecurityHardening782(unittest.TestCase):
+    """Regression tests for #782 hardening in certification.py."""
+
+    REPORT = "docs/runs/2026-10-24-review-it-first-run.md"
+
+    def _validate_with(self, mutate=None):
+        rec = json.loads(RECORD.read_text(encoding="utf-8"))
+        if mutate is not None:
+            mutate(rec)
+        tmp = Path(tempfile.mkdtemp(prefix="of-cert-782-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        path = tmp / "record.json"
+        path.write_text(json.dumps(rec), encoding="utf-8")
+        return certification.validate(ROOT, record_path=path)
+
+    def test_fixture_marker_in_unquoted_bound_artifact_is_refused(self):
+        real_bound = certification._bound_artifacts
+        for marker in ("worker=inert", "tier=fixture-tested",
+                       '"worker": "inert"', '"tier": "fixture-tested"', "(inert "):
+            with self.subTest(marker=marker):
+                def poisoned(rel, root, marker=marker):
+                    arts = dict(real_bound(rel, root))
+                    if rel == self.REPORT:
+                        arts["docs/runs/2026-10-24-review-it-first-run/extra.log"] = (
+                            f"unquoted line with {marker} marker",
+                        )
+                    return arts
+                with mock.patch.object(certification, "_bound_artifacts", side_effect=poisoned):
+                    errors, _, _ = self._validate_with()
+                self.assertTrue(any("fixture run" in e for e in errors), errors)
+
+    def test_structural_first_run_receipt_validation_catches_non_live_or_no_go(self):
+        real_bound = certification._bound_artifacts
+        cases = (
+            ("non-live worker", {"route": {"worker": "standin"}}, "route.worker="),
+            ("fixture tier", {"tier": "fixture-tested"}, "fixture"),
+            ("quoted NO-GO", {"verdict": "NO-GO"}, "must be 'GO'"),
+        )
+        for label, patch, needle in cases:
+            with self.subTest(case=label):
+                def tampered(rel, root, patch=patch):
+                    arts = dict(real_bound(rel, root))
+                    if rel == self.REPORT:
+                        for k, lines in list(arts.items()):
+                            if k.endswith("mac-ro/receipt.json"):
+                                obj = json.loads("\n".join(lines))
+                                obj.update(patch)
+                                arts[k] = tuple(ln.strip() for ln in json.dumps(obj, indent=2).splitlines())
+                    return arts
+                with mock.patch.object(certification, "_bound_artifacts", side_effect=tampered):
+                    errors, _, _ = self._validate_with()
+                self.assertTrue(any(needle in e for e in errors), errors)
+
+    def test_inert_in_harness_or_upstream_version_is_refused(self):
+        def set_inert_harness(rec):
+            live = next(g for g in rec["providers"]["posix"]["routes"]
+                        if g["tier"] == "live-witnessed")
+            live["witnessed"]["harness_version"] = "inert-claude 1.0"
+
+        errors, _, _ = self._validate_with(set_inert_harness)
+        self.assertTrue(any("inert" in e.lower() for e in errors), errors)
+        errors2, _, _ = self._validate_with(
+            lambda rec: rec["harnesses"]["claude"]["upstream"].update(version="inert-2.1.304")
+        )
+        self.assertTrue(any("inert" in e.lower() for e in errors2), errors2)
+
+    def test_pinned_provider_upstream_version_mismatch_is_checked_and_surfaced(self):
+        def disclosed_mismatch(rec):
+            orca_ro = next(
+                g for g in rec["providers"]["orca"]["routes"]
+                if g["tier"] == "live-witnessed" and g["profiles"] == ["ro"]
+            )
+            orca_ro["witnessed"]["upstream_version"] = "orca-ide 1.4.224"
+            orca_ro["limitations"] = ["Source delta reviewed from 1.4.224 to v1.4.239"]
+
+        errors, _, _ = self._validate_with(disclosed_mismatch)
+        self.assertTrue(any("does not match pinned upstream.version" in e for e in errors), errors)
+        errors, _, _ = self._validate_with()
+        self.assertEqual(errors, [], "the downgraded source-only record must be valid")
+
+        p = cert_main("matrix", "--json")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        orca_rw_cell = next(
+            c for c in data
+            if c["name"] == "orca" and c["profile"] == "rw" and c["harness"] == "claude"
+        )
+        self.assertEqual(orca_rw_cell["tier"], "source-only")
+        self.assertEqual(orca_rw_cell["effective"], "source-only")
+        self.assertEqual(orca_rw_cell["upstream"], "v1.4.239 (47f77cf7018e)")
+        self.assertNotIn("witness_matches_pin", orca_rw_cell)
 
 
 if __name__ == "__main__":

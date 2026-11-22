@@ -424,5 +424,32 @@ class DangerousSchemesInACellAreRefused(unittest.TestCase):
                 self.assertEqual(self.errors(text), [])
 
 
+class YesRowsMustActuallyBind(unittest.TestCase):
+    """Regression pin for #784: a row claiming `binds: yes...` must actually bind under
+    `run_report.check_report()`, and 2026-10-25-wip-curve-604-live.json must record its honest
+    non-binding state."""
+
+    def test_wip_curve_604_live_row_records_non_binding_wtree(self):
+        data = json.loads(
+            (ROOT / "docs" / "runs" / "index" / "2026-10-25-wip-curve-604-live.json").read_text(encoding="utf-8")
+        )
+        self.assertTrue(data["binds"].startswith("no "), data["binds"])
+        self.assertIn("14df5c90150c", data["binds"])
+        self.assertNotIn("summary", data)
+
+    def test_check_bindings_rejects_a_yes_row_that_does_not_bind(self):
+        with tempfile.TemporaryDirectory(prefix="ri-bind-784-") as tmp:
+            root = make_root(tmp, reports=("2026-01-02-demo-it-self-run.md",))
+            (root / "runtime" / "scripts").mkdir(parents=True)
+            for name in ("run_report.py", "inventory.py", "gitexec.py", "dispatch-sign.py", "ed25519.py"):
+                shutil.copy2(ROOT / "runtime" / "scripts" / name, root / "runtime" / "scripts" / name)
+            write_row(root, row("2026-01-02-demo-it-self-run.md", binds="yes — claims to bind"))
+            errors = ri.check_rows(root)
+            self.assertTrue(
+                any("binds claims 'yes'" in e and "fails run_report" in e for e in errors),
+                errors,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

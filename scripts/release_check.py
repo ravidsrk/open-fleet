@@ -57,6 +57,7 @@ if (__name__ == "__main__" and not getattr(sys.flags, "safe_path", False) and sy
     del sys.path[0]
 
 import argparse
+import datetime
 import json
 import os
 import re
@@ -163,7 +164,7 @@ class Context:
         script = self.repo / tool
         if not script.is_file():
             return Result(None, "", f"{tool}: not in this checkout", missing=True)
-        return self.run([sys.executable, str(script), *args], timeout=timeout)
+        return self.run([sys.executable, "-I", str(script), *args], timeout=timeout)
 
     def read(self, rel):
         """Text of a checkout file, or None when it is not there."""
@@ -866,7 +867,10 @@ def check_workflows_mention(ctx, name, patterns, landed):
     `$GITHUB_ENV` written by an earlier step), an earlier step, or the runner.
     """
     wf_dir = ctx.repo / ".github" / "workflows"
-    files = sorted(p for p in wf_dir.iterdir() if p.is_file()) if wf_dir.is_dir() else []
+    files = sorted(
+        p for p in wf_dir.iterdir()
+        if p.is_file() and p.suffix in (".yml", ".yaml")
+    ) if wf_dir.is_dir() else []
     hits, unread = [], []
     for path in files:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -942,6 +946,38 @@ def gate4(ctx):
 # Gate 5 — runtime re-pinned, chaining exercised (epic DoD 5)
 # ---------------------------------------------------------------------------
 
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_NON_REPORT_RUN_NAMES = frozenset({"README.MD", "TEMPLATE.MD"})
+
+
+def _parse_iso_date(value):
+    """Strict YYYY-MM-DD calendar date via datetime.date.fromisoformat (#788)."""
+    if not isinstance(value, str) or not _ISO_DATE_RE.fullmatch(value):
+        return None
+    try:
+        return datetime.date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _is_valid_live_receipt_run(ctx, run):
+    """Require a real markdown run report under docs/runs/ (not README/TEMPLATE/dotfiles) (#788)."""
+    if not isinstance(run, str) or not run.startswith("docs/runs/"):
+        return False
+    parts = run.split("/")
+    if any(not part or part in (".", "..") or part.startswith(".") for part in parts):
+        return False
+    filename = parts[-1]
+    if filename.upper() in _NON_REPORT_RUN_NAMES or not filename.endswith(".md"):
+        return False
+    target = ctx.repo / run
+    try:
+        target.resolve().relative_to((ctx.repo / "docs" / "runs").resolve())
+    except (OSError, ValueError):
+        return False
+    return target.is_file() and ctx.read(run) is not None
+
+
 def check_orca_pin(ctx):
     name = "gate5/orca-pin-live"
     text = ctx.read("runtime/pins.json")
@@ -950,11 +986,14 @@ def check_orca_pin(ctx):
     try:
         orca = json.loads(text)["orca"]
         witness = orca.get("witness")
-        witnessed = str(orca.get("witnessed", ""))
+        witnessed_raw = orca.get("witnessed")
+        witnessed = str(witnessed_raw if witnessed_raw is not None else "")
         version = orca.get("version")
     except (ValueError, KeyError, TypeError, AttributeError) as e:
         return (name, FAIL, f"runtime/pins.json: no readable orca entry ({type(e).__name__}: {e})")
-    if witness == "live" and witnessed >= PIN_MIN_WITNESSED:
+    min_date = _parse_iso_date(PIN_MIN_WITNESSED)
+    witnessed_date = _parse_iso_date(witnessed_raw)
+    if witness == "live" and witnessed_date is not None and witnessed_date >= min_date:
         return (name, PASS, f"orca {version} witnessed {witnessed} live (fresh: >= {PIN_MIN_WITNESSED})")
     # A source-delta re-pin stands on the last LIVE replay it carries: `live_receipts` names that
     # witness's version, date and run record, which must exist under docs/runs/ and clear the same
@@ -962,14 +1001,15 @@ def check_orca_pin(ctx):
     # pins.json once labelled the v1.4.229 source re-pin "live" and this gate passed on the label
     # (2026-10-23 review, P2-41); the carried receipts are now a field the gate reads, not a word.
     carried = orca.get("live_receipts") if isinstance(orca, dict) else None
-    if witness == "source" and isinstance(carried, dict):
-        live_on = str(carried.get("witnessed", ""))
-        run = str(carried.get("run", ""))
-        recorded = (run.startswith("docs/runs/") and ".." not in run.split("/")
-                    and ctx.read(run) is not None)
-        if live_on >= PIN_MIN_WITNESSED and live_on <= witnessed and recorded:
+    if witness == "source" and isinstance(carried, dict) and witnessed_date is not None:
+        live_on_raw = carried.get("witnessed")
+        live_on_date = _parse_iso_date(live_on_raw)
+        run = carried.get("run")
+        recorded = _is_valid_live_receipt_run(ctx, run)
+        if (live_on_date is not None and live_on_date >= min_date
+                and live_on_date <= witnessed_date and recorded):
             return (name, PASS, f"orca {version} source re-pin {witnessed} carrying live receipts "
-                                f"from {carried.get('version')} witnessed {live_on} ({run})")
+                                f"from {carried.get('version')} witnessed {live_on_raw} ({run})")
     return (name, FAIL, f"orca {version}: witness={witness!r} witnessed={witnessed!r}; the gate "
                         f"needs witness 'live' and witnessed >= {PIN_MIN_WITNESSED}, or a source "
                         f"re-pin whose live_receipts were witnessed >= {PIN_MIN_WITNESSED} and "

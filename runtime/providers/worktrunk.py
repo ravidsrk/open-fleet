@@ -29,8 +29,11 @@ max-sixty/worktrunk `src/cli/mod.rs`, `src/cli/step.rs`, `src/cli/config.rs`):
 """
 from __future__ import annotations
 
+import fnmatch
+import json
 import os
 import re
+import shlex
 import uuid
 from pathlib import Path
 from typing import Any, Callable
@@ -40,6 +43,7 @@ from .base import (
     ProviderError,
     RuntimeProvider,
     build_harness_command,
+    check_env_keys,
     check_monotonic_profile,
     fence_state,
     normalize_read,
@@ -49,6 +53,43 @@ from .base import (
 from ._external import release_claim_on_failure
 from ._external import call_runner, foreign_dirty_paths, insert_dispatch, load_dispatch, local_worker_list, preserve_worker_head, record_fence, run_cli_text, show_from_row
 from .local_state import LocalStateStore
+from .posix import (
+    CANONICAL_DENY_HOOK,
+    WORKER_ENV_DENYLIST,
+    strip_denied_env,
+    verify_installed_guard,
+    worker_env_deny_patterns,
+)
+
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _validate_wt_arg(value: str, label: str, *, code: str = "invalid_argument") -> str:
+    if not value or value.startswith("-") or "\x00" in value or any(c.isspace() for c in value):
+        raise ProviderError(
+            code,
+            f"worktrunk: unsafe {label} {value!r} (must not be empty, start with '-', or contain whitespace/NUL)",
+        )
+    return value
+
+
+def _tmux_scrubbed_shell(launch: dict[str, Any], unset_keys: list[str]) -> str:
+    """Render `launch` as a POSIX shell line that unsets denied keys from tmux's global env first."""
+    env_map = launch.get("env") or {}
+    check_env_keys(env_map)
+    valid_unset = [k for k in sorted(set(unset_keys)) if _ENV_KEY_RE.fullmatch(k) and k not in env_map]
+    unset_flags = " ".join(f"-u {shlex.quote(k)}" for k in valid_unset)
+    env_prefix = " ".join(f"{k}={shlex.quote(str(v))}" for k, v in sorted(env_map.items()))
+    argv = " ".join(shlex.quote(str(a)) for a in launch.get("argv") or [])
+    parts = ["env"]
+    if unset_flags:
+        parts.append(unset_flags)
+    if env_prefix:
+        parts.append(env_prefix)
+    parts.append(argv)
+    line = " ".join(p for p in parts if p)
+    cwd = launch.get("cwd")
+    return f"cd {shlex.quote(str(cwd))} && {line}" if cwd else line
 
 def _is_placeholder_worktree(worktree: str | None) -> bool:
     return not worktree or worktree.startswith(("new-", "current", "active"))
@@ -81,7 +122,7 @@ class WorktrunkProvider(RuntimeProvider):
         self.call_log: list[Any] = []
 
     def _default_runner(self, argv: list[str], **kwargs: Any) -> str:
-        return run_cli_text(argv, self.name, timeout=int(kwargs.get("timeout", 60)))
+        return run_cli_text(argv, self.name, timeout=int(kwargs.get("timeout", 60)), env=kwargs.get("env"))
 
     def _run(self, argv: list[str], **kwargs: Any) -> str:
         self.call_log.append(list(argv))
@@ -107,21 +148,25 @@ class WorktrunkProvider(RuntimeProvider):
         copy_ignored: bool = True,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        safe_name = _validate_wt_arg(str(name), "name")
+        safe_base = _validate_wt_arg(str(base), "base") if base else None
         # --no-hooks, never -y: -y would auto-approve repo-defined hook commands on the host.
-        argv = ["wt", "switch", "--create", str(name), "--no-cd", "--no-hooks", "--format=json"]
-        if base:
-            argv += ["--base", str(base)]
+        argv = ["wt", "switch", "--create", safe_name, "--no-cd", "--no-hooks", "--format=json"]
+        if safe_base:
+            argv += ["--base", safe_base]
         raw = self._run_json(argv)
         wt_path = require_id(raw, "path", provider=self.name, what="worktree path")
+        if wt_path.startswith("-") or "\x00" in wt_path:
+            raise ProviderError("invalid_argument", f"worktrunk: unsafe worktree path {wt_path!r}")
         copied: Any = None
         if copy_ignored:
             copied = self._run_json(["wt", "step", "copy-ignored", "--to", wt_path, "--format=json"])
         return {
             "worktree": {
-                "name": name,
-                "branch": raw.get("branch") or name,
+                "name": safe_name,
+                "branch": raw.get("branch") or safe_name,
                 "path": wt_path,
-                "base": base,
+                "base": safe_base,
                 "copyIgnored": copy_ignored,
             },
             "upstream": raw,
@@ -162,25 +207,37 @@ class WorktrunkProvider(RuntimeProvider):
         it = self._find_worktree(selector)
         return {"worktree": {"branch": it["branch"], "path": it["path"]}, "upstream": it["raw"]}
 
+    def _run_owns_branch_or_worktree(self, bound: str, selector: str) -> bool:
+        sel_check = os.path.realpath(selector) if os.path.isabs(selector) else selector
+        with self.state._connect() as conn:
+            rows = conn.execute(
+                "SELECT dispatch_id, worktree, launch_effective FROM dispatches WHERE backend = ? AND run_id = ?",
+                (self.name, bound),
+            ).fetchall()
+        for r in rows:
+            if r["dispatch_id"] == selector or r["worktree"] in (selector, sel_check):
+                return True
+            try:
+                eff = json.loads(r["launch_effective"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                eff = {}
+            if isinstance(eff, dict) and eff.get("branch") == selector:
+                return True
+        return False
+
     def worktree_rm(self, *, selector: str = "", force: bool = False, **kwargs: Any) -> dict[str, Any]:
         if not selector:
             # `wt remove` with no target removes the CURRENT worktree — never a default here.
             raise ProviderError("invalid_selector", "worktrunk worktree rm requires an explicit branch or path")
+        safe_selector = _validate_wt_arg(str(selector), "selector", code="invalid_selector")
         bound = self.state._worker_bound_run()
-        if bound:
-            sel_check = os.path.realpath(selector) if os.path.isabs(selector) else selector
-            with self.state._connect() as conn:
-                owned = conn.execute(
-                    "SELECT 1 FROM dispatches WHERE backend = ? AND (dispatch_id = ? OR worktree = ? OR worktree = ?) AND run_id = ? LIMIT 1",
-                    (self.name, selector, selector, sel_check, bound),
-                ).fetchone()
-            if owned is None:
-                raise ProviderError("cross_run_access", f"worktrunk worktree {selector!r} is not owned by run {bound!r}")
-        argv = ["wt", "remove", str(selector), "--reap", "--foreground", "--format=json"]
+        if bound and not self._run_owns_branch_or_worktree(bound, safe_selector):
+            raise ProviderError("cross_run_access", f"worktrunk worktree {safe_selector!r} is not owned by run {bound!r}")
+        argv = ["wt", "remove", safe_selector, "--reap", "--foreground", "--format=json"]
         if force:
             argv.append("--force")
         raw = self._run_json(argv)
-        return {"removed": True, "selector": selector, "upstream": raw}
+        return {"removed": True, "selector": safe_selector, "upstream": raw}
 
     def _predict_conflicts(self, item: dict[str, Any], branch: str, target: str | None) -> bool:
         """True/False conflict prediction for merging `branch` into `target` (default branch if None)."""
@@ -207,19 +264,15 @@ class WorktrunkProvider(RuntimeProvider):
 
     def predict_and_merge(self, branch: str, *, target: str | None = None, **kwargs: Any) -> dict[str, Any]:
         """Refuse a dirty worktree or a predicted conflict, else `wt merge` (squash+rebase, keeps the worktree)."""
+        safe_branch = _validate_wt_arg(str(branch), "branch")
+        safe_target = _validate_wt_arg(str(target), "target") if target else None
         bound = self.state._worker_bound_run()
-        if bound:
-            with self.state._connect() as conn:
-                owned = conn.execute(
-                    "SELECT 1 FROM dispatches WHERE backend = ? AND dispatch_id = ? AND run_id = ? LIMIT 1",
-                    (self.name, branch, bound),
-                ).fetchone()
-            if owned is None:
-                raise ProviderError("cross_run_access", f"worktrunk branch {branch!r} is not owned by run {bound!r}")
+        if bound and not self._run_owns_branch_or_worktree(bound, safe_branch):
+            raise ProviderError("cross_run_access", f"worktrunk branch {safe_branch!r} is not owned by run {bound!r}")
         items, _ = self._list_items()
-        item = next((it for it in items if it["branch"] == branch), None)
+        item = next((it for it in items if it["branch"] == safe_branch), None)
         if item is None:
-            raise ProviderError("worktree_not_found", f"worktrunk: no worktree for branch {branch!r}; cannot check it before merging")
+            raise ProviderError("worktree_not_found", f"worktrunk: no worktree for branch {safe_branch!r}; cannot check it before merging")
         # `wt merge` commits (or squash-stages) uncommitted changes by default: never merge dirt.
         dirty = foreign_dirty_paths(self._run, str(item["path"]))
         if dirty:
@@ -228,21 +281,21 @@ class WorktrunkProvider(RuntimeProvider):
                 f"worktree {item['path']!r} has uncommitted changes wt merge would commit: {', '.join(dirty[:10])}",
                 {"dirty": dirty},
             )
-        predicted = self._predict_conflicts(item, branch, target)
+        predicted = self._predict_conflicts(item, safe_branch, safe_target)
         if predicted:
             raise ProviderError(
                 "merge_conflict_predicted",
-                f"{branch!r} is predicted to conflict with {target or 'the default branch'!r}; resolve before merging",
+                f"{safe_branch!r} is predicted to conflict with {safe_target or 'the default branch'!r}; resolve before merging",
             )
         argv = ["wt", "merge"]
-        if target:
-            argv.append(str(target))
-        argv += ["--branch", str(branch), "--no-remove", "--format=json"]
+        if safe_target:
+            argv.append(safe_target)
+        argv += ["--branch", safe_branch, "--no-remove", "--format=json"]
         raw = self._run_json(argv)
         return {
             "merged": True,
-            "branch": branch,
-            "target": raw.get("target", target) if isinstance(raw, dict) else target,
+            "branch": safe_branch,
+            "target": raw.get("target", safe_target) if isinstance(raw, dict) else safe_target,
             "predictedConflicts": predicted,
             "upstream": raw,
         }
@@ -291,11 +344,60 @@ class WorktrunkProvider(RuntimeProvider):
                 raise ProviderError("worktree_detached", f"worktree {wt_path!r} has no branch; worktrunk keys workers by branch")
 
         hooks = self._hooks(wt_path, agent, profile)
-        harness = build_harness_command(agent, profile, wt_path, prompt=task_prompt)
+        hook_script = (hooks or {}).get("deny_hook") or str(CANONICAL_DENY_HOOK)
+        harness = build_harness_command(
+            agent,
+            profile,
+            wt_path,
+            prompt=task_prompt,
+            deny_hook_path=hook_script,
+            bridge_dir=str(Path(wt_path) / ".open-fleet" / "bridges"),
+            environ=self.env,
+        )
+        if hooks:
+            verify_installed_guard(wt_path, agent, profile, hooks, hook_script)
         dispatch_id = f"wt_dsp_{uuid.uuid4().hex[:10]}"
         # One session per DISPATCH: two dispatches on one branch must never share (or kill) one.
         session = _tmux_session_name(f"{branch}-{dispatch_id}")
         handle = f"tmux:{session}"
+
+        eff_run = self.state._resolve_caller_run(run, default_run=None)
+        if not eff_run and task_id:
+            with self.state._connect() as conn:
+                t_row = conn.execute("SELECT run_id FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if t_row and t_row["run_id"]:
+                eff_run = str(t_row["run_id"])
+        eff_run = eff_run or "default"
+
+        host_env = dict(os.environ if self.env is None else self.env)
+        deny_patterns = worker_env_deny_patterns(host_env)
+        scrubbed_proc_env = strip_denied_env(host_env, deny_patterns)
+        unset_keys = sorted(
+            set(WORKER_ENV_DENYLIST)
+            | {
+                k
+                for k in (*host_env.keys(), *os.environ.keys())
+                if any(fnmatch.fnmatchcase(k, pat) for pat in deny_patterns)
+            }
+        )
+        identity_env: dict[str, str] = {
+            "OPEN_FLEET_DISPATCH_ID": dispatch_id,
+            "ORCA_DISPATCH_ID": dispatch_id,
+            "OPEN_FLEET_RUN_ID": eff_run,
+            "ORCA_RUN_ID": eff_run,
+            "OPEN_FLEET_TERMINAL_HANDLE": handle,
+            "ORCA_TERMINAL_HANDLE": handle,
+            "OPEN_FLEET_DENY_HOOK": hook_script,
+            "ORCA_DENY_HOOK_PATH": hook_script,
+            "OPEN_FLEET_STATE_DB": str(self.state.db_path),
+            "ORCA_FLEET_STATE_DB": str(self.state.db_path),
+            "OPEN_FLEET_PARENT_PROFILE": profile,
+            "ORCA_PARENT_PROFILE": profile,
+            **({"OPEN_FLEET_HOOK_READONLY": "1", "ORCA_HOOK_READONLY": "1"} if profile == "ro" else {}),
+        }
+        worker_env = {**strip_denied_env(dict(harness.get("env") or {}), deny_patterns), **identity_env}
+        launch_spec = {**harness, "env": worker_env}
+        scrubbed_shell = _tmux_scrubbed_shell(launch_spec, unset_keys)
 
         marker: Any
         try:
@@ -308,9 +410,9 @@ class WorktrunkProvider(RuntimeProvider):
             "agent": agent,
             "profile": profile,
             "command": harness["command"],
-            "shell": harness["shell"],
+            "shell": scrubbed_shell,
             "argv": harness["argv"],
-            "env": harness["env"],
+            "env": worker_env,
             "profile_flag": harness["profile_flag"],
             "branch": branch,
             "worktree": wt_path,
@@ -324,7 +426,7 @@ class WorktrunkProvider(RuntimeProvider):
             self.state,
             dispatch_id=dispatch_id,
             task_id=task_id,
-            run=run,
+            run=eff_run,
             worktree=wt_path,
             agent=agent,
             profile=profile,
@@ -332,9 +434,9 @@ class WorktrunkProvider(RuntimeProvider):
             backend=self.name,
             effective=effective,
         )
-        launch_argv = ["tmux", "new-session", "-d", "-s", session, "-c", wt_path, harness["shell"]]
+        launch_argv = ["tmux", "new-session", "-d", "-s", session, "-c", wt_path, scrubbed_shell]
         try:
-            self._run(launch_argv)
+            self._run(launch_argv, env=scrubbed_proc_env)
         except ProviderError:
             with self.state._connect() as conn:
                 conn.execute("DELETE FROM dispatches WHERE dispatch_id = ?", (dispatch_id,))

@@ -1070,6 +1070,7 @@ class TheBrokerHoldsTheTokenAndTheCap(unittest.TestCase):
 
     def body(self, **extra):
         return {"model": "claude-haiku-5-5", "max_tokens": 1000, "stream": True,
+                "service_tier": "standard_only",
                 "messages": [{"role": "user", "content": "Reply with the single word ok"}], **extra}
 
     def events(self):
@@ -1427,7 +1428,17 @@ class TheBrokerHoldsTheTokenAndTheCap(unittest.TestCase):
 
     def test_a_handler_fault_is_recorded_in_the_ledger_not_lost(self):
         self.broker()
-        with mock.patch.object(lb, "terms", side_effect=RuntimeError(f"boom {self.token}")):
+        (self.tmp / "sitecustomize.py").write_text(
+            "import json\n"
+            "_loads = json.loads\n"
+            "def fault(raw, *args, **kwargs):\n"
+            "    if isinstance(raw, (bytes, bytearray)) and b'\"max_tokens\": 1000' in raw:\n"
+            "        raise RuntimeError('boom redacted')\n"
+            "    return _loads(raw, *args, **kwargs)\n"
+            "json.loads = fault\n",
+            encoding="utf-8",
+        )
+        with mock.patch.dict(os.environ, {"PYTHONPATH": str(self.tmp)}):
             conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
             conn.request("POST", "/v1/messages", body=json.dumps(self.body()).encode(),
                          headers={"Content-Type": "application/json"})
@@ -1736,7 +1747,8 @@ class TheBrokerHoldsTheTokenAndTheCap(unittest.TestCase):
         stalled.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
                         b"Content-Length: %d\r\n\r\n{" % lb.MAX_BODY)  # one byte of a max-size body
         time.sleep(0.3)
-        head = b'{"model":"claude-haiku-5-5","max_tokens":10,"messages":[{"role":"user","content":"'
+        head = (b'{"service_tier":"standard_only","model":"claude-haiku-5-5","max_tokens":10,'
+                b'"messages":[{"role":"user","content":"')
         end = b'"}]}'
         body = head + b"a" * (lb.MAX_BODY - len(head) - len(end)) + end
         started = time.monotonic()
@@ -2011,7 +2023,8 @@ class TheBrokerHoldsTheTokenAndTheCap(unittest.TestCase):
         # several at once. Parent and parse child together stay under the container's memory.
         if not sys.platform.startswith("linux"):
             return  # the broker runs in a Linux container; VmHWM is Linux's
-        head = b'{"model":"claude-haiku-5-5","max_tokens":10,"messages":[{"role":"user","content":"'
+        head = (b'{"service_tier":"standard_only","model":"claude-haiku-5-5","max_tokens":10,'
+                b'"messages":[{"role":"user","content":"')
         end = b'"}]}'
 
         def body(tail):
@@ -2504,6 +2517,428 @@ class TheArmsClaudeTalksToTheBroker(unittest.TestCase):
             self.assertEqual(reopened.cap, 1.0)
             self.assertIsNone(reopened.reserve("claude-haiku-5-5", 1.50))
             self.assertEqual(reopened.refused.get("cap"), 1)
+
+
+class LiveBrokerHardening770_778_785(unittest.TestCase):
+    """Regression tests for #770 (W3-01 guard), #778 (cap/pricing/JSON/NaN-Inf bypasses),
+    and #785 (fork pipe inheritance, FD leak, evict/reclaim races, SIGTERM flush)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="live-broker-hardening-")).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.token = "sk-ant-oat01-fixture-" + os.urandom(8).hex()
+        self.api = StandInAPI(self)
+        self.ledger_path = self.tmp / "spend.jsonl"
+
+    def broker(self, cap=5.0):
+        server, ledger = lb.serve(self.token, self.ledger_path, cap, port=0, upstream=self.api.url)
+        self.addCleanup(ledger.fh.close)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.port = server.server_address[1]
+        return ledger
+
+    def served_broker(self, upstream=None):
+        server, ledger = lb.serve(self.token, self.ledger_path, 5.0, port=0, upstream=upstream or self.api.url)
+        self.addCleanup(ledger.fh.close)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.port = server.server_address[1]
+        return server
+
+    def post(self, path="/v1/messages?beta=true", doc=None, raw=None, headers=None):
+        body = raw if raw is not None else json.dumps(doc if doc is not None else self.body()).encode()
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
+        conn.request("POST", path, body=body, headers={"Content-Type": "application/json", "anthropic-version": "2023-06-01",
+                                                       "Authorization": "Bearer open-fleet-live-broker",
+                                                       "x-api-key": "not-a-key", **(headers or {})})
+        resp = conn.getresponse()
+        data = resp.read()
+        conn.close()
+        return resp.status, data
+
+    def body(self, **extra):
+        return {"model": "claude-haiku-5-5", "max_tokens": 1000, "stream": True,
+                "messages": [{"role": "user", "content": "Reply with the single word ok"}], **extra}
+
+    def events(self):
+        return [json.loads(line) for line in self.ledger_path.read_text(encoding="utf-8").splitlines()]
+
+    def test_w301_canonical_guard_on_broker_and_container_770(self):
+        import ast
+        guard_test = importlib.import_module("tests.test_entrypoint_guard")
+        want = ast.dump(ast.parse(guard_test.CANONICAL_GUARD).body[0])
+        for rel in ("scripts/live_broker.py", "scripts/live_container.py"):
+            with self.subTest(rel=rel):
+                tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"), filename=rel)
+                body = list(tree.body)
+                if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
+                        and isinstance(body[0].value.value, str):
+                    body = body[1:]
+                self.assertTrue(isinstance(body[0], ast.Import) and [a.name for a in body[0].names] == ["sys"])
+                self.assertEqual(ast.dump(body[1]), want)
+                futures = [n.lineno for n in ast.walk(tree)
+                           if isinstance(n, ast.ImportFrom) and n.module == "__future__"]
+                self.assertEqual(futures, [])
+        # Behavioural check with planted stdlib shadows next to both scripts.
+        tree_dir = self.tmp / "w301"
+        shutil.copytree(ROOT / "scripts", tree_dir / "scripts",
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        shutil.copytree(ROOT / "runtime", tree_dir / "runtime",
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        for mod in ("json", "math", "os", "re", "argparse"):
+            (tree_dir / "scripts" / f"{mod}.py").write_text(guard_test.PLANT, encoding="utf-8")
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("PYTHON", "ORCA_", "OPEN_FLEET_"))}
+        for rel in ("scripts/live_broker.py", "scripts/live_container.py"):
+            with self.subTest(behavioural=rel):
+                proc = subprocess.run([sys.executable, str(tree_dir / rel), "--help"],
+                                      cwd=tree_dir, env=env, capture_output=True, text=True, timeout=60)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(list((tree_dir / "scripts").glob("PLANT-*")), [])
+
+    def test_header_allowlist_betas_and_query_allowlist_778_1(self):
+        self.broker()
+        # Unknown headers are dropped while allowlisted headers pass through.
+        status, _ = self.post(headers={"x-evil-header": "smuggled", "x-app": "cli",
+                                       "user-agent": "test-ua", "anthropic-beta": "claude-code-20250219"})
+        self.assertEqual(status, 200)
+        hdrs = {k.lower(): v for k, v in self.api.requests[-1]["headers"].items()}
+        self.assertNotIn("x-evil-header", hdrs)
+        self.assertEqual(hdrs.get("x-app"), "cli")
+        self.assertEqual(hdrs.get("user-agent"), "test-ua")
+        self.api.requests.clear()
+        # Billing-altering betas are refused with HTTP 400.
+        for bad_beta in ("context-1m-2025-08-07", "fast-mode-2026-02-01", "mcp-client-2025-04-04",
+                         "code-execution-2025-05-22", "files-api-2025-04-14", "pdfs-2024-09-25"):
+            with self.subTest(beta=bad_beta):
+                status, _ = self.post(headers={"anthropic-beta": bad_beta})
+                self.assertEqual(status, 400)
+        # Duplicate anthropic-beta headers: second header cannot smuggle a disallowed beta.
+        raw_body = json.dumps(self.body()).encode()
+        sock = socket.create_connection(("127.0.0.1", self.port), timeout=10)
+        self.addCleanup(sock.close)
+        sock.sendall(
+            b"POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n"
+            b"anthropic-beta: claude-code-20250219\r\n"
+            b"anthropic-beta: context-1m-2025-08-07\r\n"
+            b"Content-Length: %d\r\n\r\n%s" % (len(raw_body), raw_body)
+        )
+        reply = sock.recv(4096)
+        self.assertIn(b" 400 ", reply.split(b"\r\n", 1)[0])
+        # Unallowed query parameters are refused with HTTP 400.
+        for bad_path in ("/v1/messages?foo=bar", "/v1/messages?beta=true&extra=1",
+                         "/v1/messages/count_tokens?foo=1"):
+            with self.subTest(path=bad_path):
+                self.assertEqual(self.post(path=bad_path)[0], 400)
+        self.assertEqual(self.api.requests, [])
+
+    def test_count_tokens_rejects_unbounded_sources_and_long_context_tier_778_1(self):
+        self.broker()
+        for doc in (
+            {"model": "claude-haiku-5-5", "messages": [{"role": "user", "content": [
+                {"type": "image", "source": {"type": "url", "url": "https://x.invalid/a.png"}}]}]},
+            {"model": "claude-haiku-5-5", "messages": [{"role": "user", "content": [
+                {"type": "document", "source": {"type": "file", "file_id": "file_1"}}]}]},
+            {"model": "claude-haiku-5-5", "messages": [{"role": "user", "content": [
+                {"type": "document", "source": {"type": "base64", "media_type": "application/pdf",
+                                                "data": "JVBERi0="}}]}]},
+        ):
+            with self.subTest(doc=doc):
+                self.assertEqual(self.post(path="/v1/messages/count_tokens", doc=doc)[0], 400)
+        self.assertEqual(self.api.requests, [])
+        # >200K prompt tokens on non-TIERED model uses long-context tier in both priced() and reservation().
+        base_price = lb.priced({"input_tokens": 100_000, "output_tokens": 1000}, "claude-opus-5-5")
+        long_price = lb.priced({"input_tokens": 250_000, "output_tokens": 1000}, "claude-opus-5-5")
+        self.assertAlmostEqual(long_price, (250_000 * 8.0 + 1000 * 30.0) / 1e6)
+        self.assertGreater(long_price / 250_000, base_price / 100_000)
+        long_res = lb.reservation(250_000, 1000, "claude-opus-5-5")
+        self.assertAlmostEqual(long_res, ((250_000 + lb.FRAMING_TOKENS) * 8.0 * lb.WRITE_1H + 1000 * 30.0) / 1e6)
+
+    def test_media_type_normalization_778_2(self):
+        self.broker()
+        for pdf_mt in ("Application/PDF", "application/pdf; charset=utf-8", " APPLICATION/PDF ; name=x "):
+            with self.subTest(pdf_mt=pdf_mt):
+                doc = self.body(messages=[{"role": "user", "content": [
+                    {"type": "document", "source": {"type": "base64", "media_type": pdf_mt, "data": "JVBERi0="}}]}])
+                self.assertEqual(self.post(doc=doc)[0], 400)
+        for img_mt in ("IMAGE/PNG", "image/jpeg; charset=utf-8", " Image/WebP "):
+            with self.subTest(img_mt=img_mt):
+                doc = self.body(messages=[{"role": "user", "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": img_mt, "data": "iVBORw0="}}]}],
+                    inference_geo="global")
+                self.assertEqual(lb.terms(doc), (None, 1.0, 1))
+        self.assertEqual(self.api.requests, [])
+
+    def test_omitted_service_tier_is_pinned_before_pricing_and_forwarding_778_3(self):
+        self.broker()
+        self.assertEqual(self.post()[0], 200)
+        omitted = json.loads(self.api.requests[-1]["body"])
+        self.assertEqual(omitted["service_tier"], "standard_only")
+
+        explicit_doc = self.body(service_tier="standard_only")
+        raw = (" \n" + json.dumps(explicit_doc)).encode()
+        self.assertEqual(self.post(raw=raw)[0], 200)
+        forwarded = self.api.requests[-1]["body"]
+        self.assertEqual(forwarded, raw, "an explicit standard tier must not be rewritten or duplicated")
+        self.assertEqual(forwarded.count(b'"service_tier"'), 1)
+        self.assertEqual(json.loads(forwarded), explicit_doc)
+
+    def test_max_size_body_without_service_tier_is_refused_778_3(self):
+        self.broker()
+        head = b'{"model":"claude-haiku-5-5","max_tokens":10,"messages":[{"role":"user","content":"'
+        end = b'"}]}'
+        raw = head + b"a" * (lb.MAX_BODY - len(head) - len(end)) + end
+        self.assertEqual(len(raw), lb.MAX_BODY)
+        self.assertEqual(self.post(raw=raw)[0], 413)
+        self.assertEqual(self.api.requests, [])
+
+    def test_non_standard_service_tier_settles_fail_closed_778_3(self):
+        self.assertEqual(lb.merged_usage({}, {"service_tier": "priority"})["service_tier"], "priority")
+        with self.assertRaises(ValueError):
+            lb.settle_mult({"inference_geo": "global", "service_tier": "priority"}, False)
+        self.broker()
+        self.api.replies.append((200, "text/event-stream",
+                                 usage_events({**USAGE, "service_tier": "priority"}, {"output_tokens": 4})))
+        status, _ = self.post()
+        self.assertEqual(status, 200)
+        start, settle = [e for e in self.events() if e["event"] in ("start", "settle")]
+        self.assertEqual(settle["cost_usd"], start["reserved_usd"],
+                         "non-standard service_tier did not fail closed to worst-case reservation")
+
+    def test_duplicate_json_keys_refused_778_4(self):
+        self.broker()
+        dup = b'{"model":"claude-haiku-5-5","max_tokens":10,"messages":[],"model":"claude-fable-5-1"}'
+        nested_dup = b'{"model":"claude-haiku-5-5","max_tokens":10,"messages":[{"role":"user","content":"a","role":"user"}]}'
+        for raw in (dup, nested_dup):
+            with self.subTest(raw=raw):
+                self.assertEqual(self.post(raw=raw)[0], 400)
+        self.assertEqual(self.api.requests, [])
+
+    def test_nonfinite_cap_ledger_and_max_tokens_bounds_778_5(self):
+        # CLI refuses non-finite --cap-usd.
+        tok = self.tmp / "tok"
+        tok.write_text(self.token + "\n", encoding="utf-8")
+        for bad in ("inf", "nan", "-inf"):
+            with self.subTest(cli_cap=bad), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as cm:
+                    lb.main(["--token-file", str(tok), "--ledger", str(self.tmp / "l.jsonl"), "--cap-usd", bad])
+                self.assertEqual(cm.exception.code, 2)
+        # Ledger refuses non-finite cap and NaN/Infinity lines on recovery.
+        for bad in (float("inf"), float("nan"), -1.0):
+            with self.assertRaises(ValueError):
+                lb.Ledger(self.tmp / "bad-cap.jsonl", bad)
+        for line in (
+            '{"event":"open","cap_usd":Infinity}\n',
+            '{"event":"start","call":1,"reserved_usd":NaN}\n',
+            '{"event":"start","call":1,"reserved_usd":1.0}\n{"event":"settle","call":1,"cost_usd":Infinity}\n',
+        ):
+            p = self.tmp / f"corrupt-{abs(hash(line))}.jsonl"
+            p.write_text(line, encoding="utf-8")
+            with self.assertRaises(ValueError):
+                lb.Ledger(p, 5.0)
+        # terms() caps max_tokens and reservation() rejects non-finite mult.
+        self.assertIsNotNone(lb.terms(self.body(max_tokens=10**20))[0])
+        with self.assertRaises(ValueError):
+            lb.reservation(100, 10, "claude-haiku-5-5", mult=float("inf"))
+
+    def test_concurrent_exec_workers_no_pipe_hang_and_no_fd_leak_on_spawn_error_785_1(self):
+        # A sitecustomize in the exec'd workers delays only the slow parse; the parent is untouched.
+        (self.tmp / "sitecustomize.py").write_text(
+            "import json, time\n"
+            "_loads = json.loads\n"
+            "def delayed(raw, *args, **kwargs):\n"
+            "    if isinstance(raw, (bytes, bytearray)) and b'\"max_tokens\": 777' in raw:\n"
+            "        time.sleep(1.5)\n"
+            "    return _loads(raw, *args, **kwargs)\n"
+            "json.loads = delayed\n",
+            encoding="utf-8",
+        )
+        slow_body = json.dumps(self.body(max_tokens=777)).encode()
+        fast_body = json.dumps(self.body(max_tokens=10)).encode()
+        timings = {}
+
+        def run_one(name, body):
+            t0 = time.monotonic()
+            res = lb._parse_in_child(body, 32 << 20)
+            timings[name] = (time.monotonic() - t0, res)
+
+        with mock.patch.dict(os.environ, {"PYTHONPATH": str(self.tmp)}), \
+                mock.patch.object(lb.os, "fork", side_effect=AssertionError("threaded os.fork called")):
+            t_slow = threading.Thread(target=run_one, args=("slow", slow_body))
+            t_fast = threading.Thread(target=run_one, args=("fast", fast_body))
+            t_slow.start()
+            time.sleep(0.15)
+            t_fast.start()
+            t_fast.join(5)
+            t_slow.join(5)
+        self.assertEqual(timings["fast"][1]["max_tokens"], 10)
+        self.assertLess(timings["fast"][0], 1.0,
+                        f"fast parse blocked on slow sibling worker ({timings['fast'][0]:.2f}s)")
+        before = len(os.listdir("/proc/self/fd")) if os.path.isdir("/proc/self/fd") else None
+        with mock.patch.object(lb.subprocess, "Popen", side_effect=OSError("EAGAIN")):
+            for _ in range(10):
+                with self.assertRaises(OSError):
+                    lb._parse_in_child(fast_body, 16 << 20)
+        if before is not None:
+            after = len(os.listdir("/proc/self/fd"))
+            self.assertEqual(after, before, f"FDs leaked on spawn error: before={before} after={after}")
+
+    def test_parse_worker_timeout_is_killed_reaped_and_fd_clean_785_1(self):
+        (self.tmp / "sitecustomize.py").write_text(
+            "import json, time\n"
+            "_loads = json.loads\n"
+            "def delayed(raw, *args, **kwargs):\n"
+            "    if isinstance(raw, (bytes, bytearray)) and b'\"max_tokens\": 777' in raw:\n"
+            "        time.sleep(5)\n"
+            "    return _loads(raw, *args, **kwargs)\n"
+            "json.loads = delayed\n",
+            encoding="utf-8",
+        )
+        body = json.dumps(self.body(max_tokens=777)).encode()
+        before = len(os.listdir("/proc/self/fd")) if os.path.isdir("/proc/self/fd") else None
+        with mock.patch.dict(os.environ, {"PYTHONPATH": str(self.tmp)}), \
+                mock.patch.object(lb, "PARSE_SECONDS", 0.2):
+            started = time.monotonic()
+            facts = lb._parse_in_child(body, 32 << 20)
+            elapsed = time.monotonic() - started
+        self.assertEqual(facts, {"timeout": True})
+        self.assertLess(elapsed, 2.0, "the timed-out worker was not killed and reaped")
+        if before is not None:
+            after = len(os.listdir("/proc/self/fd"))
+            self.assertEqual(after, before, f"FDs leaked on timeout: before={before} after={after}")
+
+    def test_evict_vs_track_and_reclaim_vs_request_read_races_785_2(self):
+        server = self.served_broker()
+        fake_sock = mock.Mock()
+        # Race 1: evicted before track() -> track returns False and cancels ticket.
+        with server.state:
+            server.evicted.add(fake_sock)
+        t1 = lb._Ticket(fake_sock, 100)
+        self.assertFalse(server.track(fake_sock, t1))
+        self.assertTrue(t1.cancelled)
+        server.done(fake_sock)
+        # Race 2: _reclaim cancels ticket before reclaimed() updates server.evicted -> request_read returns False.
+        t2 = lb._Ticket(fake_sock, 100)
+        with server.state:
+            server.reading[fake_sock] = time.monotonic()
+        t2.cancelled = True
+        self.assertFalse(server.request_read(fake_sock, t2))
+        self.assertTrue(server.was_evicted(fake_sock))
+        server.done(fake_sock)
+
+    def test_sigterm_flushes_pending_tally_and_exits_zero_785_3(self):
+        tok = self.tmp / "tok"
+        tok.write_text(self.token + "\n", encoding="utf-8")
+        ledger_p = self.tmp / "sigterm-spend.jsonl"
+        port = free_port()
+        proc = subprocess.Popen(
+            [sys.executable, str(ROOT / "scripts" / "live_broker.py"),
+             "--token-file", str(tok), "--ledger", str(ledger_p),
+             "--cap-usd", "5.0", "--port", str(port), "--upstream", self.api.url],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        self.addCleanup(lambda: proc.poll() is None and proc.kill())
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+                conn.request("GET", "/health")
+                if conn.getresponse().status == 200:
+                    conn.close()
+                    break
+            except OSError:
+                time.sleep(0.05)
+        # Trigger two quick refusals of the same kind so the second schedules a pending catch-up tally.
+        for _ in range(2):
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request("GET", "/forbidden")
+            conn.getresponse().read()
+            conn.close()
+        proc.send_signal(signal.SIGTERM)
+        _stdout, stderr = proc.communicate(timeout=10)
+        self.assertEqual(proc.returncode, 0, stderr)
+        events = [json.loads(ln) for ln in ledger_p.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(events[-1]["event"], "tally")
+        self.assertEqual(events[-1]["refused"]["path"], 2)
+
+
+class LiveContainerHardening778_785(Harness):
+    """Regression tests for live_container.py (#778 finite flags, #785 stop-before-kill,
+    teardown signal masking, corrupt spend reporting) and claude wrapper (#778 finite budget)."""
+
+    def test_nonfinite_cap_per_call_and_timeout_refused_778(self):
+        for kwargs in ({"cap": "inf"}, {"timeout": "inf"}, {"timeout": "nan"}, {"timeout": "0"}):
+            with self.subTest(kwargs=kwargs):
+                rc, err = self.launch(**kwargs)
+                self.assertEqual(rc, 2, err)
+        for bad in ("inf", "nan"):
+            with self.subTest(per_call=bad):
+                rc, err = self.launch("--per-call-usd", bad)
+                self.assertEqual(rc, 2, err)
+        self.assertEqual(self.calls(), [])
+
+    def test_destroy_kills_arm_then_stops_broker_before_kill_785(self):
+        rc, err = self.launch()
+        self.assertEqual(rc, 0, err)
+        argvs = [c["argv"] for c in self.calls()]
+        self.assertIn(["stop", "-t", "5", BID], argvs)
+        self.assertLess(argvs.index(["kill", CID]), argvs.index(["stop", "-t", "5", BID]))
+        self.assertLess(argvs.index(["stop", "-t", "5", BID]), argvs.index(["kill", BID]))
+
+    def test_second_signal_during_teardown_does_not_abort_destroy_or_receipt_785(self):
+        self.scenario({"sleep": 60})
+        real_destroy = lc.destroy
+        teardown_masked = []
+
+        def spy_destroy(ids, nonce):
+            # Inside teardown, SIGTERM/SIGHUP/SIGINT must be masked to SIG_IGN.
+            teardown_masked.append({s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)})
+            os.kill(os.getpid(), signal.SIGTERM)  # must be ignored, not abort teardown
+            return real_destroy(ids, nonce)
+
+        def interrupt():
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                if any(c["argv"][:2] == ["start", "--attach"] for c in self.calls(partial=True)):
+                    os.kill(os.getpid(), signal.SIGTERM)
+                    return
+                time.sleep(0.05)
+
+        prior_term = signal.getsignal(signal.SIGTERM)
+        thread = threading.Thread(target=interrupt)
+        thread.start()
+        try:
+            with mock.patch.object(lc, "destroy", spy_destroy), self.assertRaises(SystemExit) as raised:
+                self.launch()
+        finally:
+            thread.join()
+        self.assertEqual(raised.exception.code, 128 + signal.SIGTERM)
+        self.assertTrue(teardown_masked)
+        for snap in teardown_masked:
+            for sig, handler in snap.items():
+                self.assertEqual(handler, signal.SIG_IGN, f"{sig} was not masked during teardown")
+        self.assertEqual(signal.getsignal(signal.SIGTERM), prior_term, "prior SIGTERM handler not restored")
+        r = self.receipt()
+        self.assertIs(r["destroyed"]["verified"], True)
+
+    def test_spend_reports_corrupt_lines_and_read_false_785(self):
+        p = self.tmp / "corrupt-spend.jsonl"
+        p.write_text('{"event":"open","cap_usd":5.0}\nnot-json\n{"event":"start","call":1,"reserved_usd":NaN}\n',
+                     encoding="utf-8")
+        summary = lc.spend(p)
+        self.assertIs(summary["read"], False)
+        self.assertEqual(summary["corrupt_lines"], 2)
+
+    def test_claude_wrapper_budget_flag_rejects_nonfinite_and_bool_778(self):
+        wrapper = load_wrapper()
+        for content in ('{"max_budget_usd": "inf"}', '{"max_budget_usd": "-inf"}',
+                        '{"max_budget_usd": "nan"}', '{"max_budget_usd": Infinity}',
+                        '{"max_budget_usd": true}'):
+            with self.subTest(content=content):
+                p = self.tmp / "claude.json"
+                p.write_text(content, encoding="utf-8")
+                with mock.patch.object(wrapper, "SETTINGS", str(p)):
+                    self.assertIsNone(wrapper.budget_flag(["-p", "hi"]))
 
 
 if __name__ == "__main__":

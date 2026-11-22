@@ -48,8 +48,8 @@ class Classify(unittest.TestCase):
             self.assertEqual(pr.classify(path), "permission-surface", path)
 
     def test_hook_and_installer_tokens_spare_tests_and_prose(self):
-        for path, klass in (("test/autoplan-publication-hook.test.ts", "code"),
-                            ("test/helpers/install-fixture.ts", "code"),
+        for path, klass in (("test/autoplan-publication-hook.test.ts", "permission-surface"),
+                            ("test/helpers/install-fixture.ts", "permission-surface"),
                             ("docs/install.md", "instruction"),
                             ("qa/sections/browser-setup.md.tmpl", "instruction")):
             self.assertEqual(pr.classify(path), klass, path)
@@ -389,6 +389,89 @@ class ArtifactKind(unittest.TestCase):
             self.bump_text(span=False), "demo-x.md", self.BUMP))
         self.assertTrue(pr.artifact_kind_problems(
             self.bump_text(new="d" * 40), "demo-x.md", self.BUMP))
+
+
+class SecurityHardening787(unittest.TestCase):
+    """Regression tests for #766 + #787 hardening in pin_review.py."""
+
+    def test_test_paths_with_hook_or_install_tokens_are_permission_surface(self):
+        for path in ("test/autoplan-publication-hook.test.ts",
+                     "tests/helpers/install-fixture.py",
+                     "fixtures/pre-hook.sh",
+                     "tests/setup-tool.ts"):
+            self.assertEqual(pr.classify(path), "permission-surface", path)
+        for path in ("test/math.test.ts", "tests/test_parser.py", "fixtures/sample.py"):
+            self.assertEqual(pr.classify(path), "code", path)
+
+    def test_permission_keys_handles_bom_trailing_spaces_and_quoted_delimiters(self):
+        bom_and_spaces = (
+            "\ufeff---   \n"
+            "name: demo\n"
+            "description: \"first line\n---\nsecond line\"\n"
+            "note: 'another\n---\nquoted line'\n"
+            "summary: user's guide\n"
+            "tools:\n  - Bash\n"
+            "permissionMode: bypassPermissions\n"
+            "mcpServers:\n  evil: {}\n"
+            "hooks:\n  PreToolUse: []\n"
+            "---  \n"
+            "# body\n"
+            "allowed-tools: [NotFrontmatter]\n"
+        )
+        found = pr.permission_keys(bom_and_spaces)
+        self.assertEqual(set(found), {"tools", "permissionMode", "mcpServers", "hooks"})
+        self.assertNotIn("allowed-tools", found)
+
+    def test_frontmatter_permission_changes_covers_commands_agents_and_templates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, base = make_pack(Path(tmp))
+            files = {
+                ".claude/commands/run.md": "---\nname: run\ntools:\n  - Bash\n---\n# cmd\n",
+                ".claude/agents/reviewer.md": "---\nname: rev\npermissionMode: acceptEdits\n---\n# ag\n",
+                "skills/demo/SKILL.md.tmpl": "---\nname: demo\nmcpServers:\n  srv: {}\n---\n# tmpl\n",
+                "docs/notes.md": "---\nhooks: ignored-non-surface-doc\n---\n# note\n",
+            }
+            for rel, content in files.items():
+                p = repo / rel
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(content, encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "-c", "user.name=t",
+                            "-c", "user.email=t@t.invalid", "add", "-A"], check=True)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.name=t",
+                            "-c", "user.email=t@t.invalid", "commit", "-q", "-m", "fm"], check=True)
+            head = pr.resolve(repo, "HEAD")
+            changes = pr.changed_paths(repo, base, head)
+            entries = pr.frontmatter_permission_changes(repo, base, head, changes)
+            self.assertIn("A .claude/commands/run.md (frontmatter: tools)", entries)
+            self.assertIn("A .claude/agents/reviewer.md (frontmatter: permissionMode)", entries)
+            self.assertIn("A skills/demo/SKILL.md.tmpl (frontmatter: mcpServers)", entries)
+            self.assertFalse(any("docs/notes.md" in e for e in entries), entries)
+
+    def test_git_and_show_route_through_gitexec_custody(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, head = make_pack(Path(tmp))
+            seen = []
+            real_run = pr.subprocess.run
+
+            def spy(argv, *args, **kwargs):
+                seen.append((list(argv), dict(kwargs)))
+                return real_run(argv, *args, **kwargs)
+
+            pr.subprocess.run = spy
+            try:
+                pr._git(repo, "rev-parse", "HEAD")
+                blob = pr._show(repo, head, "SKILL.md")
+            finally:
+                pr.subprocess.run = real_run
+            self.assertIsNotNone(blob)
+            self.assertEqual(len(seen), 2)
+            for argv, kwargs in seen:
+                self.assertEqual(argv[0], str(pr.gitexec.GIT))
+                self.assertEqual(kwargs.get("stdin"), subprocess.DEVNULL)
+                env = kwargs.get("env") or {}
+                self.assertEqual(env.get("GIT_CONFIG_NOSYSTEM"), "1")
+                self.assertEqual(env.get("GIT_NO_REPLACE_OBJECTS"), "1")
+                self.assertIn("core.hooksPath", env.values())
 
 
 if __name__ == "__main__":

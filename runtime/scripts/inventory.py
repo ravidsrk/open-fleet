@@ -180,23 +180,43 @@ def repo_root(start):
     return Path(r.stdout.strip())
 
 
+_FENCE_OPEN = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})(.*)$")
+
+
 def find_blocks(lines):
     """[(start, end)] for EVERY inventory block body, exclusive of the heading. Each block runs to
     the next heading of any depth or EOF.
 
     Every, not the first (#315). Reading only the first left a second block in the same document
     unhashed and uncompared, so a report could carry one inventory a tool checks and another a
-    human reads. A document's integrity claim is all of the claims it makes."""
+    human reads. A document's integrity claim is all of the claims it makes.
+
+    Tracks Markdown fenced code blocks (`` ``` `` / ``~~~``): headings inside an open fence are
+    literal code, never block boundaries, and an unclosed fence fails closed (#784)."""
     blocks = []
+    current_start = None
+    fence = None  # (char, length)
     for i, line in enumerate(lines):
-        if not HEADING.match(line):
+        if fence is not None:
+            ch, flen = fence
+            if re.match(rf"^[ \t]{{0,3}}{re.escape(ch)}{{{flen},}}[ \t]*$", line):
+                fence = None
             continue
-        end = len(lines)
-        for j in range(i + 1, len(lines)):
-            if NEXT_HEADING.match(lines[j]):
-                end = j
-                break
-        blocks.append((i, end))
+        m_fence = _FENCE_OPEN.match(line)
+        if m_fence and not (m_fence.group(1)[0] == "`" and "`" in m_fence.group(2)):
+            fence = (m_fence.group(1)[0], len(m_fence.group(1)))
+            continue
+        if HEADING.match(line):
+            if current_start is not None:
+                blocks.append((current_start, i))
+            current_start = i
+        elif current_start is not None and NEXT_HEADING.match(line):
+            blocks.append((current_start, i))
+            current_start = None
+    if fence is not None:
+        raise InventoryError("unclosed fenced code block in document")
+    if current_start is not None:
+        blocks.append((current_start, len(lines)))
     if not blocks:
         raise InventoryError("no '## … integrity inventory (sha256)' heading found")
     return blocks
@@ -231,19 +251,40 @@ def parse_entries(lines, start, end):
 def resolve(path_text, report, root):
     """Repo root first, then the report's own directory. Returns a Path or None.
 
-    An entry names a file UNDER one of those two roots: an absolute path or one climbing out
-    with `..` resolves to None here — a report must not point the audit at arbitrary local
-    files (#382)."""
+    An entry names a regular, symlink-free file UNDER one of those two roots: an absolute path,
+    one climbing out with `..`, any symlink (at the target or any intermediate component), or a
+    resolved path escaping its base root resolves to None here — a report must not point the audit
+    at arbitrary local files (#382, #784)."""
     p = Path(path_text)
     if p.is_absolute() or ".." in p.parts:
         return None
-    candidates = []
+    bases = []
     if root is not None:
-        candidates.append(root / path_text)
-    candidates.append(report.parent / path_text)
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
+        bases.append(Path(root))
+    bases.append(Path(report).parent)
+    for base in bases:
+        cur = base
+        has_symlink = False
+        for part in p.parts:
+            if part in ("", "."):
+                continue
+            cur = cur / part
+            if cur.is_symlink():
+                has_symlink = True
+                break
+        if has_symlink:
+            continue
+        candidate = base / p
+        if candidate.is_symlink() or not candidate.is_file():
+            continue
+        try:
+            resolved_cand = candidate.resolve(strict=True)
+            resolved_base = base.resolve(strict=True)
+        except OSError:
+            continue
+        if not resolved_cand.is_relative_to(resolved_base):
+            continue
+        return candidate
     return None
 
 

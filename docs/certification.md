@@ -48,9 +48,9 @@ recorded versions. A group that copies another route's witness is refused (#596 
   start. After the plan was approved in the pane, Write and Edit stayed out of the toolset.
   Route: the run manifest's `toolchain` line (`Orca 1.4.239`, `Claude Code 2.1.304`,
   `PROFILE=ro`). The 2026-10-13 Linux witness (Orca 1.4.224, the earlier row) stays on record.
-- `orca` `rw`/`claude`: Orca 1.4.224 (`orca-ide`, Ubuntu 24.04.5 arm64) and Claude Code
-  2.1.296, 2026-10-13, in the [ship-it mdtoc run](runs/2026-10-13-ship-it-mdtoc.md). The
-  v1.4.239 re-pin re-checked this cell by source delta only, with no live `rw` run.
+- Historical evidence for `orca` `rw`/`claude`: Orca 1.4.224 (`orca-ide`, Ubuntu 24.04.5 arm64)
+  and Claude Code 2.1.296, 2026-10-13, in the [ship-it mdtoc run](runs/2026-10-13-ship-it-mdtoc.md).
+  This is not a live witness at pinned v1.4.239; the cell is `source-only` until a matching run.
   Only the `WORKER_CMD` override lane was witnessed. On the witness host, the supervised
   `worker-start` lane reported `LAUNCHED_UNUSABLE`. Route: the run's dispatch script
   (`PROFILE="rw"`, `WORKER_CMD="claude --dangerously-skip-permissions"`) and its ledger
@@ -68,9 +68,9 @@ recorded versions. A group that copies another route's witness is refused (#596 
 
 The Orca pin is now v1.4.239: a source-delta re-witness whose `pins.json` `live_receipts` are
 1.4.239's own (the CLI capture and the `ro`/`claude` witness above). The `rw` cell's 1.4.224
-witness predates them, so its route was re-checked by source delta only. The record is
-certified against the pin's three-part fingerprint. No other provider and no other harness has a live
-witness.
+witness predates them, so that cell is `source-only` and its old run is historical evidence only.
+The record is certified against the pin's three-part fingerprint. No other provider and no other
+harness has a live witness.
 
 ## Fixture (mocked) results
 
@@ -91,7 +91,7 @@ harness behaves:
   them.
 
 <!-- BEGIN GENERATED: certification-matrix — runtime/scripts/certification.py markdown -->
-Record version 6 (2026-10-26). Counts are cells: one (provider, profile, harness) or (harness, profile) route each.
+Record version 7 (2026-11-19). Counts are cells: one (provider, profile, harness) or (harness, profile) route each.
 
 | Provider | Upstream certified against | live-witnessed | fixture-tested | source-only | unsupported | unavailable | stale |
 |---|---|---|---|---|---|---|---|
@@ -101,7 +101,7 @@ Record version 6 (2026-10-26). Counts are cells: one (provider, profile, harness
 | `jcode-swarm` | unknown |  | 1 |  |  |  |  |
 | `multiclaude` | unknown |  | 2 |  |  |  |  |
 | `openhands` | unknown |  | 2 |  |  |  |  |
-| `orca` | v1.4.239 (47f77cf7018e) | 2 | 2 | 13 | 16 |  |  |
+| `orca` | v1.4.239 (47f77cf7018e) | 1 | 2 | 14 | 16 |  |  |
 | `overstory` | unknown |  | 9 |  | 5 |  |  |
 | `paperclip` | unknown |  | 3 |  | 1 |  |  |
 | `posix` | in-repo | 2 | 27 |  | 1 |  |  |
@@ -130,7 +130,6 @@ Record version 6 (2026-10-26). Counts are cells: one (provider, profile, harness
 Live-witnessed cells (everything else is fixture, source or refusal evidence):
 
 - `orca` ro/claude: upstream Orca 1.4.239, Claude Code 2.1.304, macOS 27.0.1 arm64 (the dev Mac), 2026-10-26 — [2026-10-26-review-it-orca-ro-680.md](runs/2026-10-26-review-it-orca-ro-680.md)
-- `orca` rw/claude: upstream orca-ide 1.4.224, Claude Code 2.1.296, Ubuntu 24.04.5 LTS arm64 (OrbStack VM), 2026-10-13 — [2026-10-13-ship-it-mdtoc.md](runs/2026-10-13-ship-it-mdtoc.md)
 - `posix` ro/claude: upstream b96d47e3354564e1593d34182a817ae04e54545d, 2.1.304 (Claude Code), macOS 27.0.1 arm64 (dev Mac, isolation wrapper) and Ubuntu 24.04.5 aarch64 (fresh ubuntu:24.04 container on the same Mac's OrbStack), 2026-10-24 — [2026-10-24-review-it-first-run.md](runs/2026-10-24-review-it-first-run.md)
 - `posix` rw/claude: upstream b96d47e3354564e1593d34182a817ae04e54545d, 2.1.304 (Claude Code), macOS 27.0.1 arm64 (dev Mac, isolation wrapper) and Ubuntu 24.04.5 aarch64 (fresh ubuntu:24.04 container on the same Mac's OrbStack), 2026-10-24 — [2026-10-24-review-it-first-run.md](runs/2026-10-24-review-it-first-run.md)
 - `claude` ro/claude: upstream b96d47e3354564e1593d34182a817ae04e54545d, 2.1.304 (Claude Code), macOS 27.0.1 arm64 (dev Mac, isolation wrapper) and Ubuntu 24.04.5 aarch64 (fresh ubuntu:24.04 container on the same Mac's OrbStack), 2026-10-24 — [2026-10-24-review-it-first-run.md](runs/2026-10-24-review-it-first-run.md)

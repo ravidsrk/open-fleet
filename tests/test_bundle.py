@@ -680,5 +680,37 @@ class BundleClosureTests(unittest.TestCase):
                         self.assertEqual(result.returncode, 0, result.stderr)
 
 
+class BundleQuarantineTests(unittest.TestCase):
+    """Regression tests for #783: bundle.py ships and enforces runtime/quarantine.json."""
+
+    def test_quarantine_json_is_required_runtime(self):
+        self.assertIn("runtime/quarantine.json", bundle.REQUIRED_RUNTIME)
+
+    def test_bundle_refuses_when_mission_is_quarantined_or_deny_list_malformed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            entries, parse_errors = bundle._quarantine.parse_quarantine({"quarantined": [{
+                "component": "mission:ship-it",
+                "reason": "test quarantine",
+                "date": "2026-10-01",
+                "by": "human:test",
+                "issue": "#783",
+            }]})
+            self.assertEqual(parse_errors, [])
+            with mock.patch.object(bundle._quarantine, "load_quarantine",
+                                   return_value=(entries, [], True)):
+                built, problems = bundle.build(tmp)
+            self.assertEqual(built, 0)
+            self.assertTrue(any("mission:ship-it" in p for p in problems), problems)
+            self.assertFalse((Path(tmp) / "skills").exists())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(bundle._quarantine, "load_quarantine",
+                                   return_value=([], ["quarantine.json malformed"], True)):
+                built, problems = bundle.build(tmp)
+            self.assertEqual(built, 0)
+            self.assertTrue(any("quarantine.json malformed" in p for p in problems), problems)
+            self.assertFalse((Path(tmp) / "skills").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

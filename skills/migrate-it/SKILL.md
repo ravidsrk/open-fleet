@@ -60,7 +60,7 @@ compound-learn.md at VERDICT · liveness-resume.md on a stall/resume.
 ## Pipeline
 
 ```
-SELF-ORIENT → PLAN the TABLE SET and the phase list per table (one row per phase, with its down path), from the
+REFUSE-IF-QUARANTINED (runtime/scripts/preflight.py --mode readonly --mission migrate-it) → SELF-ORIENT → PLAN the TABLE SET and the phase list per table (one row per phase, with its down path), from the
   surface the code actually reads — a table nobody reads is not in the set.
 → FREEZE (decide-and-freeze, ONE-WAY): the human confirms the set and its ladder; headless/spawned
   publishes the proposal and PARKS. The set never grows mid-run (a new table is the NEXT run).

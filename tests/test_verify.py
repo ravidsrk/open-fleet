@@ -572,8 +572,8 @@ class NegativeControlCheck(RepoCase):
              "artifacts": [self.pin(rel)],
              "negative_control": {"tool": "revert", "result": "RED — mutant KILLED",
                                   "artifact": rel, "command": "true"},
-             "commands": [{"cmd": "true", "exit": 0,
-                           "wtree": self.git("rev-parse", "HEAD^{tree}")}]}
+             "commands": [{"cmd": "true", "cmd_sha256": hashlib.sha256(b"true").hexdigest(),
+                           "exit": 0, "wtree": self.git("rev-parse", "HEAD^{tree}")}]}
         for bad in ("", "pytest -k 'flaky"):
             with self.subTest(nc_command=bad):
                 errs = verify.check_commands(m, True, nc_command=bad)
@@ -2313,8 +2313,10 @@ class EndToEndMutationGreen(MutationFixture):
 
     def test_stale_commands_ledger_is_red(self):
         # A recorded run on OTHER content does not certify this head (audit §3 item 3).
-        path = self._manifest(commands=[{"label": "tests", "cmd": self.proof_cmd, "exit": 0,
-                                         "wtree": "0" * 40}])
+        path = self._manifest(commands=[{
+            "label": "tests", "cmd": self.proof_cmd,
+            "cmd_sha256": hashlib.sha256(self.proof_cmd.encode("utf-8")).hexdigest(),
+            "exit": 0, "wtree": "0" * 40}])
         rc, _out, err = self._run_main(path)
         self.assertEqual(rc, 2)
         self.assertIn("STALE evidence", err)
@@ -5836,10 +5838,10 @@ class GitLegsRunUnderAScrubbedEnvironment(MutationFixture):
     def test_git_and_gitleaks_see_the_allowlist_and_nothing_else(self):
         self._green_executed_run()
         belt = {"GIT_TERMINAL_PROMPT", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM",
-                "GIT_NO_REPLACE_OBJECTS", "GIT_GRAFT_FILE", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_KEY_2",
-                "GIT_CONFIG_VALUE_0", "GIT_CONFIG_VALUE_1", "GIT_CONFIG_VALUE_2",
-                # 2026-10-23 review, P1-2: the core.hooksPath=/dev/null pair.
-                "GIT_CONFIG_KEY_3", "GIT_CONFIG_VALUE_3"}
+                "GIT_NO_REPLACE_OBJECTS", "GIT_GRAFT_FILE", "GIT_NO_LAZY_FETCH",
+                "GIT_ALLOW_PROTOCOL", "GIT_ATTR_NOSYSTEM", "GIT_CONFIG_COUNT",
+                *(f"GIT_CONFIG_KEY_{i}" for i in range(16)),
+                *(f"GIT_CONFIG_VALUE_{i}" for i in range(16))}
         for log in (self.git_seen, self.gitleaks_seen):
             seen = set(log.read_text().split())
             self.assertTrue(seen, f"{log.name}: the wrapper was never launched")
@@ -5858,7 +5860,10 @@ class GitLegsRunUnderAScrubbedEnvironment(MutationFixture):
                                    "GIT_NO_REPLACE_OBJECTS": "1",
                                    "GIT_GRAFT_FILE": os.devnull,
                                    "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
-                                   "GIT_CONFIG_COUNT": "4",
+                                   "GIT_NO_LAZY_FETCH": "1",
+                                   "GIT_ALLOW_PROTOCOL": "file",
+                                   "GIT_ATTR_NOSYSTEM": "1",
+                                   "GIT_CONFIG_COUNT": "16",
                                    "GIT_CONFIG_KEY_0": "core.fsmonitor",
                                    "GIT_CONFIG_VALUE_0": "false",
                                    "GIT_CONFIG_KEY_1": "protocol.ext.allow",
@@ -5866,7 +5871,31 @@ class GitLegsRunUnderAScrubbedEnvironment(MutationFixture):
                                    "GIT_CONFIG_KEY_2": "safe.directory",
                                    "GIT_CONFIG_VALUE_2": "*",
                                    "GIT_CONFIG_KEY_3": "core.hooksPath",
-                                   "GIT_CONFIG_VALUE_3": os.devnull})
+                                   "GIT_CONFIG_VALUE_3": os.devnull,
+                                   "GIT_CONFIG_KEY_4": "diff.external",
+                                   "GIT_CONFIG_VALUE_4": "",
+                                   "GIT_CONFIG_KEY_5": "core.alternateRefsCommand",
+                                   "GIT_CONFIG_VALUE_5": "exit 0",
+                                   "GIT_CONFIG_KEY_6": "submodule.recurse",
+                                   "GIT_CONFIG_VALUE_6": "false",
+                                   "GIT_CONFIG_KEY_7": "fetch.recurseSubmodules",
+                                   "GIT_CONFIG_VALUE_7": "false",
+                                   "GIT_CONFIG_KEY_8": "status.submoduleSummary",
+                                   "GIT_CONFIG_VALUE_8": "false",
+                                   "GIT_CONFIG_KEY_9": "log.showSignature",
+                                   "GIT_CONFIG_VALUE_9": "false",
+                                   "GIT_CONFIG_KEY_10": "gpg.program",
+                                   "GIT_CONFIG_VALUE_10": os.devnull,
+                                   "GIT_CONFIG_KEY_11": "gpg.openpgp.program",
+                                   "GIT_CONFIG_VALUE_11": os.devnull,
+                                   "GIT_CONFIG_KEY_12": "gpg.x509.program",
+                                   "GIT_CONFIG_VALUE_12": os.devnull,
+                                   "GIT_CONFIG_KEY_13": "gpg.ssh.program",
+                                   "GIT_CONFIG_VALUE_13": os.devnull,
+                                   "GIT_CONFIG_KEY_14": "maintenance.auto",
+                                   "GIT_CONFIG_VALUE_14": "false",
+                                   "GIT_CONFIG_KEY_15": "gc.auto",
+                                   "GIT_CONFIG_VALUE_15": "0"})
         self.assertFalse({k for k in env if k.startswith(("GH_", "ORCA_"))}, env)
 
     def test_the_belt_closes_the_repo_local_fsmonitor_channel(self):
@@ -7663,3 +7692,220 @@ class TheToolchainIsHashedBeforeTheControlRuns(unittest.TestCase):
         rc, err, record = self._main(rewrite=False)
         self.assertEqual(rc, 0, err)
         self.assertEqual(record["toolchain"]["files"]["diff_scope.py"], self.original)
+
+
+class AdversarialVerifyCustodyAndSigHardening(MutationFixture):
+    """Regression pins for #766 (control_git_dir FIFO + partialClone/promisor refusals) and #768
+    (pre-classification git custody, _is_oracle_path fixes, commit gpgsig stripping, hand headerless
+    diff rejection & no-newline preservation, check_commands cmd_sha256 fail-closed, NO_COLOR=1,
+    and _verify_sig ANSI/stillborn hardening)."""
+
+    def test_control_git_dir_refuses_partial_clone_promisor_and_blocking_fifo(self):
+        verify._Authority.reset()
+        verify._Authority.pin_git()
+        # 1. remote.origin.promisor=true
+        self.git("config", "remote.origin.promisor", "true")
+        with self.assertRaises(OSError) as ctx:
+            with verify._Authority.control_git_dir(str(self.repo), self.head_sha):
+                pass
+        self.assertIn("partial clone", str(ctx.exception))
+        self.git("config", "--unset", "remote.origin.promisor")
+        # 2. extensions.partialClone
+        self.git("config", "core.repositoryformatversion", "1")
+        self.git("config", "extensions.partialClone", "origin")
+        with self.assertRaises(OSError) as ctx2:
+            with verify._Authority.control_git_dir(str(self.repo), self.head_sha):
+                pass
+        self.assertIn("partialclone", str(ctx2.exception).lower())
+        self.git("config", "--unset", "extensions.partialClone")
+        self.git("config", "core.repositoryformatversion", "0")
+        # 3. Blocking FIFO at .git/shallow
+        shallow = self.repo / ".git" / "shallow"
+        os.mkfifo(shallow)
+        self.addCleanup(lambda: shallow.unlink(missing_ok=True))
+        with self.assertRaises(OSError) as ctx3:
+            with verify._Authority.control_git_dir(str(self.repo), self.head_sha):
+                pass
+        self.assertIn("block", str(ctx3.exception).lower())
+
+    def test_worker_writable_git_is_never_executed_before_custody_check_on_sound_lane(self):
+        tmp = Path(tempfile.mkdtemp(prefix="orca-preclass-768-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        fired = tmp / "git-fired.log"
+        fake_git = tmp / "git"
+        fake_git.write_text(
+            f"#!/bin/sh\necho FIRED >> {shlex.quote(str(fired))}\nexit 0\n",
+            encoding="utf-8",
+        )
+        fake_git.chmod(0o755)
+        key = self.seed_file(bytes(range(1, 33)))
+        m_path = self._manifest()
+        env = {"PATH": f"{tmp}{os.pathsep}{os.environ.get('PATH', '')}"}
+        for extra in (
+            ("--provenance", "ci", "--git-dir", str(self.repo),
+             "--transcript-out", str(tmp / "t.json"), "--transcript-key", key),
+            ("--dispatch-record", "rec.json", "--dispatch-pubkey", f"pub@{self.head_sha}"),
+            ("--dispatch-record", "rec.json", "--dispatch-pubkey", "pub@refs/remotes/origin/main"),
+        ):
+            with self.subTest(extra=extra), mock.patch.dict(os.environ, env):
+                rc, _out, err = self._run_main(m_path, *extra)
+                self.assertEqual(rc, 2, err)
+                self.assertIn("is worker-writable", err)
+                self.assertFalse(fired.exists(), f"worker-writable git executed before custody gate: {extra}")
+
+    def test_is_oracle_path_covers_operand_dir_configs_pytest_toml_and_unittest_short_opts(self):
+        # 1. Directory operand `sub` discovers `sub/pytest.ini`
+        self.write("sub/pytest.ini", "[pytest]\npython_files = *_check.py\n")
+        self.write("sub/foo_check.py", "def test_x():\n    assert True\n")
+        # 2. Dedicated `.pytest.ini`, `pytest.toml`, `.pytest.toml` with top-level [pytest]
+        self.write("t1/pytest.toml", '[pytest]\npython_files = ["*_spec.py"]\n')
+        self.write("t1/bar_spec.py", "def test_y():\n    assert True\n")
+        self.write("t2/.pytest.toml", '[pytest]\npython_files = ["*_probe.py"]\n')
+        self.write("t2/baz_probe.py", "def test_z():\n    assert True\n")
+        self.write("t3/.pytest.ini", "[pytest]\npython_files = *_verify.py\n")
+        self.write("t3/qux_verify.py", "def test_q():\n    assert True\n")
+        # 3. Unittest attached short options `-s` / `-p` and long `=` options
+        self.write("checks/add_check.py", "import unittest\n")
+        head = self.commit("oracle discovery configs")
+        verify._is_oracle_path.discovery.clear()
+        for cfg in (".pytest.ini", "pytest.toml", ".pytest.toml", "sub/.pytest.ini", "t1/pytest.toml"):
+            self.assertTrue(verify._is_oracle_path(cfg), cfg)
+        self.assertTrue(verify._is_oracle_path("sub/foo_check.py", "pytest sub", head))
+        self.assertTrue(verify._is_oracle_path("t1/bar_spec.py", "pytest t1", head))
+        self.assertTrue(verify._is_oracle_path("t2/baz_probe.py", "pytest t2", head))
+        self.assertTrue(verify._is_oracle_path("t3/qux_verify.py", "pytest t3", head))
+        self.assertTrue(verify._is_oracle_path(
+            "checks/add_check.py", "python3 -m unittest discover -schecks -p*_check.py", head))
+        self.assertTrue(verify._is_oracle_path(
+            "checks/add_check.py",
+            "python3 -m unittest discover --start-directory=checks --pattern=*_check.py", head))
+
+    def test_execute_nc_strips_gpgsig_and_gpgsig_sha256_from_clean_and_control_commits(self):
+        # Craft a proof that passes ONLY if HEAD carries a `gpgsig` header (simulating a
+        # `git verify-commit HEAD` phase detector) and fails otherwise. Both clean and control
+        # commits must have gpgsig/gpgsig-sha256 stripped so the detector fails in clean phase too.
+        self.write(
+            "check.py",
+            "import subprocess\n"
+            "hdr = subprocess.check_output(['git', 'cat-file', 'commit', 'HEAD']).partition(b'\\n\\n')[0]\n"
+            "assert b'gpgsig' in hdr, 'unsigned commit'\n",
+        )
+        unsigned_head = self.commit("head commit")
+        raw = subprocess.check_output(
+            ["git", "cat-file", "commit", unsigned_head], cwd=self.repo,
+        )
+        hdr, sep, body = raw.partition(b"\n\n")
+        signed_raw = (
+            hdr
+            + b"\ngpgsig -----BEGIN PGP SIGNATURE-----\n fake-sig\n -----END PGP SIGNATURE-----"
+            + b"\ngpgsig-sha256 -----BEGIN PGP SIGNATURE-----\n fake-sig2\n -----END PGP SIGNATURE-----"
+            + sep
+            + body
+        )
+        signed_head = subprocess.check_output(
+            ["git", "hash-object", "-t", "commit", "-w", "--stdin"],
+            cwd=self.repo, input=signed_raw,
+        ).decode("ascii").strip()
+        self.git("reset", "--hard", "-q", signed_head)
+        self.head_sha = signed_head
+        self.head_tree = self.git("rev-parse", "HEAD^{tree}")
+        path = self._manifest(lighting="dark-eligible", nc=self._revert_nc())
+        rc, _out, err = self._run_main(
+            path, "--lighting", "dark-eligible", "--execute-nc", "--nc-command", self.proof_cmd,
+        )
+        self.assertEqual(rc, 2, err)
+        self.assertIn("at CLEAN head_sha", err)
+        self.assertIn("unsigned commit", err)
+        # Positive half: a real oracle asserting no gpgsig header in ANY phase passes clean and kills mutant.
+        self.write(
+            "check.py",
+            "import subprocess, app\n"
+            "hdr = subprocess.check_output(['git', 'cat-file', 'commit', 'HEAD']).partition(b'\\n\\n')[0]\n"
+            "assert b'gpgsig' not in hdr, 'sig leaked'\n"
+            "assert app.f() == 2, 'AC-1 violated'\n",
+        )
+        unsigned2 = self.commit("real oracle on signed commit")
+        raw2 = subprocess.check_output(["git", "cat-file", "commit", unsigned2], cwd=self.repo)
+        hdr2, sep2, body2 = raw2.partition(b"\n\n")
+        signed2 = subprocess.check_output(
+            ["git", "hash-object", "-t", "commit", "-w", "--stdin"],
+            cwd=self.repo,
+            input=(
+                hdr2
+                + b"\ngpgsig -----BEGIN PGP SIGNATURE-----\n fake-sig\n -----END PGP SIGNATURE-----"
+                + b"\ngpgsig-sha256 -----BEGIN PGP SIGNATURE-----\n fake-sig2\n -----END PGP SIGNATURE-----"
+                + sep2
+                + body2
+            ),
+        ).decode("ascii").strip()
+        self.git("reset", "--hard", "-q", signed2)
+        self.head_sha = signed2
+        self.head_tree = self.git("rev-parse", "HEAD^{tree}")
+        path2 = self._manifest(lighting="dark-eligible", nc=self._revert_nc())
+        rc2, out2, err2 = self._run_main(
+            path2, "--lighting", "dark-eligible", "--execute-nc", "--nc-command", self.proof_cmd,
+        )
+        self.assertEqual(rc2, 0, out2 + err2)
+        self.assertIn("negative control EXECUTED", out2)
+
+    def test_hand_headerless_diff_is_refused_and_no_newline_marker_is_preserved(self):
+        # Headerless diff cannot skip path/hunk binding on tool=='hand'.
+        art = "docs/reports/u/hand-headerless.txt"
+        self.write(art, "@@ -1,1 +1,1 @@\n-old\n+new\nthe suite went RED\n")
+        m = {
+            "unit": "u", "base_sha": self.base_sha, "head_sha": self.head_sha,
+            "artifacts": [self.pin(art)],
+            "negative_control": {"tool": "hand", "result": "RED", "artifact": art},
+        }
+        errs, _ = verify.check_negative_control(m, True, execute=False)
+        self.assertTrue(any("hand-written diff" in e for e in errs), errs)
+        # `\ No newline at end of file` must not truncate a unified diff in _extract_diff.
+        sample = (
+            "--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,2 @@\n"
+            "-def f(): return 2\n\\ No newline at end of file\n"
+            "+def f(): return 1\n\\ No newline at end of file\n"
+            "FAILED: AssertionError\n"
+        )
+        extracted = verify._extract_diff(sample)
+        self.assertIsNotNone(extracted)
+        self.assertIn("+def f(): return 1", extracted)
+        self.assertIn(r"\ No newline at end of file", extracted)
+
+    def test_check_commands_fails_closed_when_cmd_sha256_or_cmd_is_missing_or_non_string(self):
+        for bad_rec in (
+            {"label": "tests", "cmd": self.proof_cmd, "exit": 0, "wtree": self.head_tree},
+            {"label": "tests", "cmd": self.proof_cmd, "cmd_sha256": None, "exit": 0, "wtree": self.head_tree},
+            {"label": "tests", "cmd": self.proof_cmd, "cmd_sha256": 123, "exit": 0, "wtree": self.head_tree},
+            {"label": "tests", "cmd": "", "cmd_sha256": hashlib.sha256(b"").hexdigest(),
+             "exit": 0, "wtree": self.head_tree},
+        ):
+            with self.subTest(bad_rec=bad_rec):
+                errs = verify.check_commands({"head_sha": self.head_sha, "commands": [bad_rec]}, True)
+                self.assertTrue(errs, f"missing/invalid cmd_sha256 accepted: {bad_rec}")
+                self.assertFalse(errs[0].startswith("NOTE:"), errs)
+
+    def test_nc_env_sets_no_color_and_failure_signature_strips_ansi_and_blocks_cross_override(self):
+        with mock.patch.dict(os.environ, {"NO_COLOR": "0"}, clear=False):
+            self.assertEqual(verify._Authority.nc_env()["NO_COLOR"], "1")
+        # ANSI CSI + OSC escapes around stillborn markers must be stripped before matching.
+        ansi_syntax = "\x1b[31mSyntaxError\x1b[0m: invalid syntax\n1 failed\n"
+        ok, reason = verify._failure_signature(ansi_syntax, "")
+        self.assertFalse(ok)
+        self.assertIn("STILLBORN", reason)
+        osc_cargo = "\x1b]8;;https://example.invalid\x07\x1b[1;31merror\x1b[0m: could not compile `app`\x1b]8;;\x07\n"
+        ok2, reason2 = verify._failure_signature(osc_cargo, "")
+        self.assertFalse(ok2)
+        self.assertIn("STILLBORN", reason2)
+        # Unanchored ✗ / ✕ must NOT override STILLBORN_MARKERS (including cannot find module / could not compile).
+        for sample in (
+            "  ✗ loads module: unable to import foo\n",
+            "  ✕ add: cannot find module './missing'\n",
+            "  ✗ build: could not compile crate\n",
+        ):
+            with self.subTest(sample=sample):
+                ok_s, why_s = verify._failure_signature(sample, "")
+                self.assertFalse(ok_s, f"cross mark overrode stillborn marker: {sample!r}")
+                self.assertIn("STILLBORN", why_s)
+        # Genuine assertion failure using ✗ with no stillborn marker still passes.
+        ok_good, _ = verify._failure_signature("  ✗ add returns sum\n    Expected: 3\n    Received: 1\n", "")
+        self.assertTrue(ok_good)

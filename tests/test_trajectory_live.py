@@ -1988,5 +1988,84 @@ class AblationTrajectoryCells(SafetyNet):
                                  cell["arm"] / "trajectory.jsonl").is_file())
 
 
+class TrajectoryHarnessAndPreflightHardening766_788(SafetyNet):
+    """#766 custody env in live_git/_git; #788 O(N) Stream.take + spill/cap, preflight model/terminator."""
+
+    def test_stream_take_linear_on_long_newline_free_line_and_spills_with_cap_788(self):
+        harness = _load("trajectory_harness_stream_test", "scripts/trajectory_harness.py")
+        # Redirect stdout to /dev/null during Stream.take forwarding.
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        self.addCleanup(os.close, devnull)
+        with mock.patch.object(harness, "_forward", return_value=True):
+            stream = harness.Stream(-1, spill_bytes=4096, max_bytes=64 * 1024, max_line_bytes=8192)
+            self.addCleanup(stream.close)
+            t0 = time.monotonic()
+            # 2,000 small newline-free chunks would have been O(N^2) previously; now O(N).
+            for _ in range(500):
+                self.assertEqual(stream.take(b"a" * 32), [])
+            elapsed = time.monotonic() - t0
+            self.assertLess(elapsed, 2.0, f"Stream.take took {elapsed:.2f}s")
+            self.assertIsNotNone(stream._spill, "Stream did not spill past spill_bytes")
+            self.assertEqual(len(stream.read_kept()), 500 * 32)
+            # Trailing newline finishes the oversized line, then a normal JSON line still parses.
+            msg = json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "tu_1"}]}}).encode()
+            res = json.dumps({"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "tu_1"}]}}).encode()
+            got = stream.take(b"\n" + msg + b"\n" + res + b"\n")
+            self.assertEqual(got, ["tu_1"])
+            self.assertEqual(stream.started, ["tu_1"])
+            # Exceeding max_bytes marks truncated instead of growing unboundedly.
+            stream.take(b"z" * (64 * 1024))
+            self.assertTrue(stream.truncated)
+
+    def test_preflight_refuses_repeated_model_fallback_model_and_terminator_788(self):
+        bad_cmds = (
+            ("claude -p --model m1 --model m2", "disagrees"),
+            ("claude -p --model m1 --fallback-model m2", "--fallback-model"),
+            ("claude -p --model m1 --", "option terminator"),
+            ("python3 worker.py -- --flag", "option terminator"),
+        )
+        for cmd, needle in bad_cmds:
+            with self.subTest(cmd=cmd):
+                args = argparse.Namespace(
+                    trajectory=None, case="CL-01", all_live=False, cost_cap_usd=5.0,
+                    reserve_usd=1.0, limit_fraction=0.8, agent_cmd=cmd, model="m1",
+                    harness_version="1.0", agent_limit_flag="--max-budget-usd",
+                    allowlist_flag="--allowedTools", repeats=1, out=str(self.tmpdir() / "out"),
+                )
+                with self.assertRaises(live_mod.guard().Refused) as ctx:
+                    live_mod.preflight(args, eval_mod, SUITE)
+                self.assertIn(needle, str(ctx.exception))
+
+    def test_live_git_and_harness_git_use_custody_env_766(self):
+        harness = _load("trajectory_harness_git_test", "scripts/trajectory_harness.py")
+        seen = []
+        real_run = subprocess.run
+
+        def spy(cmd, *a, **kw):
+            seen.append((cmd, kw.get("env") or {}))
+            return real_run(cmd, *a, **kw)
+
+        ws = self.tmpdir() / "ws"
+        ws.mkdir()
+        with mock.patch.object(harness.subprocess, "run", side_effect=spy):
+            harness.prepare_workspace(ws)
+        self.assertTrue(seen)
+        for cmd, env in seen:
+            self.assertTrue(os.path.isabs(cmd[0]), f"bare git invoked: {cmd[0]}")
+            self.assertEqual(env.get("GIT_ALLOW_PROTOCOL"), "file")
+            self.assertEqual(env.get("GIT_NO_LAZY_FETCH"), "1")
+            self.assertEqual(env.get("GIT_ATTR_NOSYSTEM"), "1")
+        seen.clear()
+        with mock.patch.object(engine.subprocess, "run", side_effect=spy):
+            engine.live_git(ws)("rev-parse", "HEAD")
+        self.assertEqual(len(seen), 1)
+        cmd, env = seen[0]
+        self.assertTrue(os.path.isabs(cmd[0]))
+        self.assertEqual(env.get("GIT_ALLOW_PROTOCOL"), "file")
+        self.assertEqual(env.get("GIT_NO_LAZY_FETCH"), "1")
+
+
 if __name__ == "__main__":
     unittest.main()

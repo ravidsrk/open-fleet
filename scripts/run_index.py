@@ -26,12 +26,21 @@ Cells are the Markdown the table shows, relative to docs/runs/; no cell holds a 
 
 Exit: 0 every check holds, 1 a check failed, 2 the input could not be read.
 """
+import sys
+
+# W3-01: drop this script's own directory from sys.path before any other import, so a sibling
+# named like a stdlib module can never be the module imported here (tests/test_entrypoint_guard.py).
+if (__name__ == "__main__" and not getattr(sys.flags, "safe_path", False) and sys.path
+        and ("os" not in sys.modules or sys.modules["os"].path.realpath(sys.path[0])
+             == sys.modules["os"].path.dirname(sys.modules["os"].path.realpath(__file__)))):
+    del sys.path[0]
+
 import argparse
 import bisect
 import html
+import importlib.util
 import json
 import re
-import sys
 import urllib.parse
 from datetime import date
 from pathlib import Path
@@ -376,8 +385,62 @@ def load_rows(root=ROOT):
     return rows, errors
 
 
+_RUN_REPORT_CACHE = {}
+
+
+def _load_run_report(root):
+    """Load `runtime/scripts/run_report.py` from `root`, cached by path, or None when absent
+    (e.g. a bare fixture tree testing run_index.py standalone)."""
+    script = Path(root) / "runtime" / "scripts" / "run_report.py"
+    if not script.is_file():
+        return None
+    key = str(script.resolve())
+    if key not in _RUN_REPORT_CACHE:
+        spec = importlib.util.spec_from_file_location("_run_index_run_report", script)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _RUN_REPORT_CACHE[key] = mod
+    return _RUN_REPORT_CACHE[key]
+
+
+def check_bindings(root=ROOT, rows=None):
+    """Verify every row whose `binds` starts with `'yes'` actually passes `run_report.check_report()`
+    (#784). Returns [] when `runtime/scripts/run_report.py` is absent in `root` (standalone fixtures)."""
+    rr = _load_run_report(root)
+    if rr is None:
+        return []
+    if rows is None:
+        rows, _ = load_rows(root)
+    errors = []
+    root_path = Path(root)
+    for r in rows:
+        if not r["binds"].startswith("yes"):
+            continue
+        report = r["report"]
+        where = f"docs/runs/index/{row_key(report)}.json"
+        if report.endswith("/"):
+            errors.append(f"{where}: binds claims 'yes', but {report!r} is a directory rather than "
+                          "a bindable run report")
+            continue
+        rel = f"docs/runs/{report}"
+        try:
+            text = (root_path / rel).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as err:
+            errors.append(f"{where}: binds claims 'yes', but {rel} is unreadable ({err})")
+            continue
+        fields, err = rr.parse_run_header(text)
+        if err is not None:
+            errors.append(f"{where}: binds claims 'yes', but {rel} fails run_report: {err}")
+            continue
+        bind_errs = rr.check_report(rel, fields["mission"], fields["tier"], root=root_path)
+        if bind_errs:
+            errors.append(f"{where}: binds claims 'yes', but {rel} fails run_report: {bind_errs[0]}")
+    return errors
+
+
 def check_rows(root=ROOT):
-    """Row-file errors plus completeness: exactly one row per dated run report."""
+    """Row-file errors plus completeness: exactly one row per dated run report, and every `'yes'`
+    row verified against `run_report.check_report()` when the binder is present in `root`."""
     rows, errors = load_rows(root)
     named = {}
     for r in rows:
@@ -389,6 +452,7 @@ def check_rows(root=ROOT):
     for report, n in sorted(named.items()):
         if n > 1:
             errors.append(f"docs/runs/{report} has {n} rows")
+    errors += check_bindings(root, rows=rows)
     return errors
 
 

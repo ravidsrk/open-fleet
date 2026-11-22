@@ -69,7 +69,7 @@ DCO/CLA state is checked per PR; unsigned is `needs-contributor`, never a fleet 
 ## Pipeline
 
 ```
-SELF-ORIENT → ENUMERATE at T0: every open inbound PR, PAGINATED TO THE END (a truncated listing
+REFUSE-IF-QUARANTINED (runtime/scripts/preflight.py --mode readonly --mission absorb-it) → SELF-ORIENT → ENUMERATE at T0: every open inbound PR, PAGINATED TO THE END (a truncated listing
   silently fails the run), each with its linked issues. Re-run every loop; reconcile PRs opened or
   closed since T0.
 → CLASSIFY per PR: pin current main for the initial reproduction; APPEND its SHA + receipt as

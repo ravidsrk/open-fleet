@@ -648,12 +648,11 @@ def check_lower_layer_frontmatter(root=None):
             # Frontmatter is an opening `---` on line 1 and a closing one later. A horizontal
             # rule mid-document is not frontmatter, and neither is a `---` on line 1 with no
             # close — that is malformed, and calling it frontmatter would be a false red.
-            # parse_frontmatter is the repo's own reader, so "what counts as frontmatter" has
-            # exactly one definition — including its BOM and CRLF tolerance: a BOM (U+FEFF) before `---`
-            # opening used to fail a `startswith("---\n")` pre-check and escape this gate while a
-            # host that strips the BOM still indexed it (2026-10-23 review, §5).
-            block, err = parse_frontmatter(text)
-            if block is not None and not err:
+            # Check the fence framing directly (`_grammar.frontmatter_lines`) rather than
+            # requiring `_mapping()` to succeed: duplicate keys or YAML syntax quirks that raise
+            # FrontmatterError still carry frontmatter a host router may index (#783).
+            lines, _err = _grammar.frontmatter_lines(text)
+            if lines is not None:
                 offenders.append(str(md.relative_to(root)))
     return offenders
 

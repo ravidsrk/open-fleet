@@ -42,9 +42,9 @@ MIN_BODY_RATE, past BODY_GRACE_S, is stalled, and a request waiting for budget t
 itself, what a stalled body holds past its buffer, evicting it. A take that may wait waits up to
 BODY_WAIT_S for room and is otherwise refused (503, a "body-budget" refusal);
 a body whose bound could pass the whole budget, that nests past MAX_DEPTH, or whose pre-scan passes
-MAX_SCAN_STEPS is refused unparsed (413, a "body-parse" refusal). The parse itself runs in a forked
-child whose RLIMIT_DATA is that bound, so a parse that would pass it fails in the child and the body
-is refused (413): the broker never holds a parsed body. So what the slots hold, and their parses,
+MAX_SCAN_STEPS is refused unparsed (413, a "body-parse" refusal). The parse itself runs in an exec'd
+worker whose RLIMIT_DATA covers the body and that bound, so a parse that would pass it fails in the
+worker and the body is refused (413): the broker never holds a parsed body. So what the slots hold, and their parses,
 fit the broker's container memory. A connection past the bound with none to evict is closed
 unanswered. Every connection closed without an answer (evicted, past the bound, timed out,
 malformed, a body cut short, or closed before its request) is counted as a "drop" (W5-16).
@@ -78,9 +78,10 @@ with a priced model and a positive max_tokens, every field is one the broker pri
 tool is the client's own wherever it is defined (in `tools` or inside the content), and all content is inline and
 bounded by its bytes. So an image or
 document by URL or file id, a PDF, an advisor or other server-side tool, an MCP server,
-server-side compaction, a service tier, and an inference geography other than global or US are
-refused: each is billed beyond what the body's bytes bound. A call that names no geography
-reserves at the US premium, and every call settles at the geography the API reports.
+server-side compaction, a non-standard service tier, and an inference geography other than global
+or US are refused: each is billed beyond what the body's bytes bound. An omitted service tier is
+pinned to standard_only in the forwarded body. A call that names no geography reserves at the US
+premium, and every call settles at the geography the API reports.
 
 The ledger (--ledger, appended, mode 0600) is one JSON line per event: open, start, settle,
 refuse, free, drop, fault and tally (refusals, drops and faults counted per kind and written at
@@ -88,22 +89,27 @@ most once a DROP_RECORD_S per kind, their text bounded). It never holds the toke
 response. The launcher reads it after both
 containers are destroyed, into the receipt.
 """
-from __future__ import annotations
+import sys
+
+if (__name__ == "__main__" and not getattr(sys.flags, "safe_path", False) and sys.path
+        and ("os" not in sys.modules or sys.modules["os"].path.realpath(sys.path[0])
+             == sys.modules["os"].path.dirname(sys.modules["os"].path.realpath(__file__)))):
+    del sys.path[0]
 
 import argparse
 import contextlib
 import ctypes
-import gc
 import http.client
 import io
 import json
+import math
 import os
 import re
 import resource
-import select
 import signal
 import socket
-import sys
+import subprocess
+import tempfile
 import threading
 import time
 import traceback
@@ -125,6 +131,9 @@ PRICES = {
     "claude-haiku-5-5": (0.10, 0.50, 0.01), "claude-haiku-4-5": (1.0, 5.0, 0.10),
 }
 TIERED = {"claude-haiku-5-5": (100_000, (0.50, 2.50, 0.05))}
+LONG_CONTEXT_THRESHOLD = 200_000
+LONG_CONTEXT_MULT = (2.0, 1.5, 2.0)  # >200K input/cache-write, output, cache-read multipliers
+MAX_TOKENS_LIMIT = 1_000_000  # finite ceiling on max_tokens (above every model's max output)
 WRITE_5M, WRITE_1H, FAST = 1.25, 2.0, 2.0
 # inference_geo "us" is billed at 1.1x every token category. A request that names none runs in the
 # workspace's default geography, which may be US, so it reserves at the worst; a call settles at
@@ -157,10 +166,10 @@ MAX_BODY = 32_000_000
 # waits up to BODY_WAIT_S for room, as does the one body read in full that may wait for the rest
 # (_BodyBudget: any other is refused at once), else is refused (503) and counted, and a body whose
 # bound alone is past the budget is refused (413) unparsed and counted. The parse itself
-# runs in a forked child whose RLIMIT_DATA is that bound (_parse_in_child), so the bound is not an
-# estimate the container trusts: a parse that would pass it fails there, and the body is refused.
-# The worst body MAX_BODY can hold (13 times its bytes, see parse_cost) fits, and the budget leaves
-# the interpreter, its threads and PARSERS children room in the container's memory.
+# runs in an exec'd worker whose RLIMIT_DATA covers the body and that bound (_parse_in_child), so
+# the bound is not an estimate the container trusts: a parse that would pass it fails there, and
+# the body is refused. The worst body MAX_BODY can hold (13 times its bytes, see parse_cost) fits,
+# and the budget leaves the interpreter, its threads and PARSERS workers room in the container's memory.
 BODY_BUDGET = 400 << 20
 BODY_WAIT_S = 30
 # The most one parsed JSON value costs, its slot in its container included: measured at peak on
@@ -211,10 +220,64 @@ FREE_CALLS_MAX, FREE_BYTES_MAX = 5000, 2 << 30  # count_tokens per broker (W5-17
 FREE_RECORD_EVERY = 100  # a "free" tally event every this many count_tokens calls
 PRICED_PATH, FREE_PATH = "/v1/messages", "/v1/messages/count_tokens"
 DATED_RE = re.compile(r"-\d{8}$")
-# What the client sent that never reaches the API: its credential, and hop-by-hop headers.
-DROP = {"host", "authorization", "x-api-key", "content-length", "connection", "keep-alive", "proxy-authorization",
-        "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade", "accept-encoding", "cookie"}
+# Strict request header allowlist: only these headers are forwarded to the API; `anthropic-beta` is
+# validated separately against ALLOWED_BETAS, and Authorization / Accept-Encoding are broker-owned.
+ALLOWED_HEADERS = frozenset({"content-type", "anthropic-version", "x-app", "user-agent"})
+# Explicit allowlist of non-billing-altering Anthropic betas. Billing-altering betas (context-1m-*,
+# fast-mode-*, mcp-client-*, code-execution-*, files-api-*, pdfs-*, etc.) are refused with HTTP 400.
+ALLOWED_BETAS = frozenset({
+    OAUTH_BETA,
+    "claude-code-20250219",
+    "interleaved-thinking-2025-05-14",
+    "fine-grained-tool-streaming-2025-05-14",
+    "token-efficient-tools-2025-02-19",
+    "context-management-2025-06-27",
+    "extended-cache-ttl-2025-04-11",
+    "prompt-caching-scope-2026-01-05",
+    "prompt-caching-2024-07-31",
+    "structured-outputs-2025-11-13",
+    "effort-2025-11-24",
+    "output-128k-2025-02-19",
+    "adaptive-thinking-2026-01-28",
+    "redact-thinking-2026-02-12",
+    "inline-tools-2026-09-15",
+    "token-counting-2024-11-01",
+})
+ALLOWED_QUERIES = frozenset({"", "beta=true"})
 DROP_BACK = {"content-length", "transfer-encoding", "connection", "keep-alive", "content-encoding", "set-cookie"}
+
+
+class _DuplicateKeyError(ValueError):
+    """Raised when a JSON object contains duplicate keys."""
+
+
+def _no_duplicate_keys(pairs):
+    doc = {}
+    for key, value in pairs:
+        if key in doc:
+            raise _DuplicateKeyError("duplicate JSON key")
+        doc[key] = value
+    return doc
+
+
+def _reject_nonfinite(token):
+    raise ValueError(f"non-finite JSON constant: {token}")
+
+
+def _parse_betas(headers):
+    """Join all anthropic-beta header values, returning (betas_list, error_or_None)."""
+    betas, seen = [], set()
+    for header_val in headers.get_all("anthropic-beta") or []:
+        for raw in header_val.split(","):
+            beta = raw.strip()
+            if not beta:
+                continue
+            if beta not in ALLOWED_BETAS:
+                return None, "an unpriced or unknown anthropic-beta header"
+            if beta not in seen:
+                seen.add(beta)
+                betas.append(beta)
+    return betas, None
 
 
 def now():
@@ -238,18 +301,27 @@ def priced(usage, model, mult=1.0):
     """USD for one call's reported usage, as the API bills it: each cache write at its TTL's rate
     (the 1-hour rate when the report does not split them), at the tier its prompt reached."""
     key = model_key(model)
-    tokens = lambda key, doc=usage: max(int(doc.get(key) or 0), 0)
+    if key is None:
+        raise ValueError(f"unpriced model: {model!r}")
+    if not (isinstance(mult, (int, float)) and not isinstance(mult, bool) and math.isfinite(mult) and mult >= 0):
+        raise ValueError("non-finite price multiplier")
+    tokens = lambda k, doc=usage: max(int(doc.get(k) or 0), 0)
     prompt = tokens("input_tokens") + tokens("cache_creation_input_tokens") + tokens("cache_read_input_tokens")
     inp, out, read = PRICES[key]
     if key in TIERED and prompt > TIERED[key][0]:
         inp, out, read = TIERED[key][1]
+    elif key not in TIERED and prompt > LONG_CONTEXT_THRESHOLD:
+        inp, out, read = inp * LONG_CONTEXT_MULT[0], out * LONG_CONTEXT_MULT[1], read * LONG_CONTEXT_MULT[2]
     split = usage.get("cache_creation") if isinstance(usage.get("cache_creation"), dict) else {}
     w5, w1 = tokens("ephemeral_5m_input_tokens", split), tokens("ephemeral_1h_input_tokens", split)
     written = tokens("cache_creation_input_tokens")
     write = w5 * WRITE_5M + w1 * WRITE_1H if split and w5 + w1 == written else written * WRITE_1H
     usd = (tokens("input_tokens") * inp + write * inp + tokens("cache_read_input_tokens") * read
            + tokens("output_tokens") * out) / 1e6
-    return usd * mult
+    usd = usd * mult
+    if not math.isfinite(usd) or usd < 0:
+        raise ValueError("non-finite settled cost")
+    return usd
 
 
 def settled(usage, model, mult=1.0):
@@ -258,10 +330,17 @@ def settled(usage, model, mult=1.0):
     usd = priced(usage, model, mult)
     iterations = [it for it in usage.get("iterations") or [] if isinstance(it, dict)]
     if iterations:
+        for it in iterations:
+            tier = it.get("service_tier")
+            if tier is not None and tier not in ("standard", "standard_only"):
+                raise ValueError("unpriced service_tier in iteration usage")
         named = lambda it: it.get("model") if model_key(it.get("model")) else model if it.get("model") is None else COSTLIEST
         usd = max(usd, sum(priced(it, named(it), mult) for it in iterations))
     searches = (usage.get("server_tool_use") or {}).get("web_search_requests") or 0
-    return usd + max(int(searches), 0) * SEARCH_USD
+    total = usd + max(int(searches), 0) * SEARCH_USD
+    if not math.isfinite(total) or total < 0:
+        raise ValueError("non-finite settled cost")
+    return total
 
 
 def reservation(body_len, max_tokens, model, mult=1.0, images=0):
@@ -269,9 +348,27 @@ def reservation(body_len, max_tokens, model, mult=1.0, images=0):
     cache, plus the framing and IMAGE_TOKENS for each image, and every token of max_tokens an
     output token, at its model's highest tier."""
     key = model_key(model)
-    inp, out, _read = TIERED[key][1] if key in TIERED else PRICES[key]
-    usd = ((body_len + FRAMING_TOKENS + images * IMAGE_TOKENS) * inp * WRITE_1H + max_tokens * out) / 1e6
-    return usd * mult
+    if key is None:
+        raise ValueError(f"unpriced model: {model!r}")
+    for name, val in (("body_len", body_len), ("max_tokens", max_tokens), ("images", images)):
+        if not isinstance(val, int) or isinstance(val, bool) or val < 0:
+            raise ValueError(f"invalid {name}")
+    if not (isinstance(mult, (int, float)) and not isinstance(mult, bool) and math.isfinite(mult) and mult > 0):
+        raise ValueError("reservation multiplier must be positive and finite")
+    worst_prompt = body_len + FRAMING_TOKENS + images * IMAGE_TOKENS
+    if key in TIERED:
+        inp, out, _read = TIERED[key][1]
+    else:
+        inp, out, _read = PRICES[key]
+        if worst_prompt > LONG_CONTEXT_THRESHOLD:
+            inp, out = inp * LONG_CONTEXT_MULT[0], out * LONG_CONTEXT_MULT[1]
+    try:
+        usd = ((worst_prompt * inp * WRITE_1H + max_tokens * out) / 1e6) * mult
+    except OverflowError as err:
+        raise ValueError("reservation overflow") from err
+    if not math.isfinite(usd) or usd < 0:
+        raise ValueError("non-finite reservation")
+    return usd
 
 
 def content_problem(node, found):
@@ -294,12 +391,15 @@ def content_problem(node, found):
             return "a dated server tool is not the client's own: it is billed beyond the request's tokens"
         source = node.get("source")
         if isinstance(source, dict):
-            kind, media = source.get("type"), str(source.get("media_type") or "")
+            raw_kind = source.get("type")
+            kind = raw_kind.strip().lower() if isinstance(raw_kind, str) else raw_kind
+            raw_media = source.get("media_type")
+            media = raw_media.split(";", 1)[0].strip().lower() if isinstance(raw_media, str) else ""
             if kind in ("url", "file"):
                 return f"content by {kind} is billed by what it fetches, not by the request's bytes"
             if media == "application/pdf":
                 return "a PDF is billed per page, which its bytes do not bound"
-            if kind == "base64" and media.startswith("image/"):
+            if kind == "base64" and (media.startswith("image/") or node.get("type") == "image"):
                 found["images"] += 1
         for value in node.values():
             if why := content_problem(value, found):
@@ -343,23 +443,61 @@ def _frames(err):
 _PARSING = threading.BoundedSemaphore(PARSERS)
 
 
-def _parse_facts(body):
+def free_terms(doc):
+    """Why a /v1/messages/count_tokens body cannot be forwarded, or None."""
+    if not isinstance(doc, dict):
+        return "the body is not a JSON object"
+    for tool in doc.get("tools") or []:
+        kind = tool.get("type") if isinstance(tool, dict) else "malformed"
+        if kind not in (None, "custom"):
+            return "a server-defined or malformed tool is not the client's own: it is billed beyond the request's tokens"
+    found = {"images": 0}
+    if why := content_problem(doc, found):
+        return why
+    return None
+
+
+def _parse_facts(body, free=False):
     """What the broker needs of a body, read from json.loads(body): its terms (why, mult, images),
     and its model, max_tokens and speed. Run in the parse child."""
+    dup_key = False
     try:
-        doc = json.loads(body)
+        doc = json.loads(body, object_pairs_hook=_no_duplicate_keys, parse_constant=_reject_nonfinite)
+    except _DuplicateKeyError:
+        doc, dup_key = None, True
     except (ValueError, RecursionError):
         doc = None
+    if dup_key:
+        return {"why": "the body contains duplicate JSON keys", "mult": 1.0, "images": 0, "model": None,
+                "max_tokens": None, "fast": False}
+    if free:
+        why = free_terms(doc)
+        return {"why": why and short(why, 300), "mult": 1.0, "images": 0, "model": None,
+                "max_tokens": None, "fast": False}
     why, mult, images = terms(doc)
     facts = {"why": why and short(why, 300), "mult": mult, "images": images, "model": None, "max_tokens": None,
-             "fast": False}
+             "fast": False, "inject_service_tier": False}
     if isinstance(doc, dict):
         raw_model = doc.get("model")
         priced_model = raw_model if isinstance(raw_model, str) and model_key(raw_model) is not None else None
-        facts.update(model=priced_model, fast=doc.get("speed") == "fast")
+        facts.update(model=priced_model, fast=doc.get("speed") == "fast",
+                     inject_service_tier=not why and "service_tier" not in doc)
         if not why:
             facts["max_tokens"] = doc["max_tokens"]
     return facts
+
+
+STANDARD_TIER_INJECTION = b'"service_tier":"standard_only",'
+
+
+def _inject_standard_service_tier(body):
+    """Pin an omitted tier into the validated top-level object without re-serializing its JSON."""
+    at = 0
+    while at < len(body) and body[at] in b" \t\r\n":
+        at += 1
+    if at >= len(body) or body[at] != ord("{"):
+        raise ValueError("a validated request body is not a JSON object")
+    body[at + 1:at + 1] = STANDARD_TIER_INJECTION
 
 
 def _vm_data():
@@ -371,69 +509,67 @@ def _vm_data():
         return None
 
 
-def _parse_in_child(body, allowance):
-    """_parse_facts(body), computed in a forked child that may allocate `allowance` bytes (and
-    PARSE_SLACK) past what it inherited -- RLIMIT_DATA, which Linux, where the broker runs, enforces
-    on every private writable mapping -- so a parse past the bound parse_cost put on it fails in the
-    child, never in the broker. The child shares the body with the broker (copy-on-write), runs with
-    the garbage collector off (a collection would touch, and so copy, the broker's whole heap), and
-    hands back only the facts. At most PARSERS at once. Returns the facts; {"memory": True} when the
-    parse passed its bound; {"error": name, "frames": [...]} when it raised; {"timeout": True} past
-    PARSE_SECONDS."""
-    with _PARSING:
-        read_fd, write_fd = os.pipe()
-        pid = os.fork()
-        if pid == 0:  # the child: never returns, so no frame of the broker's runs here
-            code = 70
-            try:
-                os.close(read_fd)
-                gc.disable()
-                held = _vm_data()
-                if held is not None:
-                    soft, hard = resource.getrlimit(resource.RLIMIT_DATA)
-                    want = held + allowance + PARSE_SLACK
-                    resource.setrlimit(resource.RLIMIT_DATA, (want if hard == resource.RLIM_INFINITY
-                                                              else min(want, hard), hard))
-                try:
-                    facts = _parse_facts(body)
-                except MemoryError:
-                    facts = {"memory": True}
-                except Exception as exc:  # e.g. a fault in terms(): its name and frames, never its text
-                    facts = {"error": type(exc).__name__, "frames": _frames(exc)}
-                view = memoryview(json.dumps(facts).encode())
-                while view:
-                    view = view[os.write(write_fd, view):]
-                code = 0
-            except BaseException:
-                code = 71
-            finally:
-                os._exit(code)
-        os.close(write_fd)
-        chunks, deadline, timed_out = [], time.monotonic() + PARSE_SECONDS, False
-        try:
-            while True:
-                left = deadline - time.monotonic()
-                if left <= 0:
-                    timed_out = True
-                    break
-                if not select.select([read_fd], [], [], min(left, 1.0))[0]:
-                    continue
-                chunk = os.read(read_fd, 1 << 16)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-        finally:
-            os.close(read_fd)
-            if timed_out:
-                with contextlib.suppress(ProcessLookupError):
-                    os.kill(pid, signal.SIGKILL)
-            os.waitpid(pid, 0)
-    if timed_out:
-        return {"timeout": True}
+def _parse_worker(fd, nbytes, allowance, free):
+    """Exec-only parser worker: read one anonymous-file body and return its facts on stdout."""
     try:
-        facts = json.loads(b"".join(chunks))
+        held = _vm_data()
+        if held is not None:
+            soft, hard = resource.getrlimit(resource.RLIMIT_DATA)
+            want = held + nbytes + allowance + PARSE_SLACK
+            resource.setrlimit(resource.RLIMIT_DATA, (want if hard == resource.RLIM_INFINITY
+                                                      else min(want, hard), hard))
+        with os.fdopen(fd, "rb", closefd=True) as fh:
+            body = fh.read(nbytes + 1)
+        if len(body) != nbytes:
+            raise ValueError("parser worker received a short body")
+        try:
+            facts = _parse_facts(body, free=free)
+        except MemoryError:
+            facts = {"memory": True}
+        except Exception as exc:
+            facts = {"error": type(exc).__name__, "frames": _frames(exc)}
+    except MemoryError:
+        facts = {"memory": True}
+    except Exception as exc:
+        facts = {"error": type(exc).__name__, "frames": _frames(exc)}
+    try:
+        sys.stdout.buffer.write(json.dumps(facts, allow_nan=False).encode())
+        sys.stdout.buffer.flush()
+    except (OSError, ValueError):
+        return 71
+    return 0
+
+
+def _parse_in_child(body, allowance, free=False):
+    """Parse in an exec'd interpreter, never Python code running after a threaded os.fork().
+
+    The body travels through an anonymous temporary file inherited by the worker, so workers do
+    not inherit one another's result pipes. RLIMIT_DATA covers the body's bytes plus the parse
+    allowance. At most PARSERS workers run at once; a timeout kills the whole worker process.
+    """
+    with _PARSING:
+        with tempfile.TemporaryFile() as payload:
+            if payload.write(body) != len(body):
+                raise OSError("could not stage the parser body")
+            payload.seek(0)
+            proc = subprocess.Popen(
+                [sys.executable, os.path.abspath(__file__), "--parse-worker", str(payload.fileno()),
+                 str(len(body)), str(allowance), "1" if free else "0"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                pass_fds=(payload.fileno(),), close_fds=True,
+            )
+        try:
+            out, _ = proc.communicate(timeout=PARSE_SECONDS)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            return {"timeout": True}
+        if proc.returncode != 0:
+            return {"memory": True}
+    try:
+        facts = json.loads(out, parse_constant=_reject_nonfinite)
     except ValueError:
-        return {"memory": True}  # it died without a word: out of memory where nothing could be raised
+        return {"memory": True}
     return facts if isinstance(facts, dict) else {"memory": True}
 
 
@@ -518,8 +654,8 @@ def terms(doc):
     if model_key(doc.get("model")) is None:
         return f"no price for the requested model: the broker runs only {', '.join(sorted(PRICES))}", 1.0, 0
     max_tokens = doc.get("max_tokens")
-    if not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens <= 0:
-        return "the body carries no positive integer max_tokens", 1.0, 0
+    if not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or not 0 < max_tokens <= MAX_TOKENS_LIMIT:
+        return f"the body carries no positive integer max_tokens within {MAX_TOKENS_LIMIT}", 1.0, 0
     for tool in doc.get("tools") or []:
         kind = tool.get("type") if isinstance(tool, dict) else "malformed"
         if kind not in (None, "custom"):
@@ -545,8 +681,16 @@ def terms(doc):
 
 def settle_mult(usage, fast):
     """The price multiplier a finished call is billed at: the geography and speed the API reports
-    it ran at (the worst geography when it reports none), fast when either side says so."""
-    return GEO.get(usage.get("inference_geo"), GEO_WORST) * (FAST if fast or usage.get("speed") == "fast" else 1.0)
+    it ran at (the worst geography when it reports none), fast when either side says so. Any
+    non-standard service_tier or unknown speed reported by the API raises ValueError so relay()
+    fails closed to the call's full worst-case reservation."""
+    tier = usage.get("service_tier")
+    if tier is not None and tier not in ("standard", "standard_only"):
+        raise ValueError("unpriced service_tier in API usage")
+    speed = usage.get("speed")
+    if speed is not None and speed not in ("standard", "fast"):
+        raise ValueError("unpriced speed in API usage")
+    return GEO.get(usage.get("inference_geo"), GEO_WORST) * (FAST if fast or speed == "fast" else 1.0)
 
 
 def merged_usage(seen, usage):
@@ -559,8 +703,10 @@ def merged_usage(seen, usage):
             merged_usage(seen.setdefault(key, {}), value)
         elif key == "iterations" and isinstance(value, list):
             seen[key] = value
-        elif key in ("inference_geo", "speed") and isinstance(value, str):
+        elif key in ("inference_geo", "speed", "service_tier") and isinstance(value, str):
             seen[key] = value
+        elif key in ("speed", "service_tier") and value is not None:
+            seen[key] = "<invalid>"
     return seen
 
 
@@ -568,7 +714,10 @@ class Ledger:
     """The reservation ledger: settled spend, the calls in flight, and the append-only file."""
 
     def __init__(self, path, cap_usd):
-        self.cap, self.settled, self.inflight, self.n = cap_usd, 0.0, {}, 0
+        if not (isinstance(cap_usd, (int, float)) and not isinstance(cap_usd, bool)
+                and math.isfinite(cap_usd) and cap_usd > 0):
+            raise ValueError("cap_usd must be a positive finite number")
+        self.cap, self.settled, self.inflight, self.n = float(cap_usd), 0.0, {}, 0
         self.free_calls = self.free_bytes = 0
         self.dropped, self.faults, self.refused, self.written, self.catch_up = {}, {}, {}, {}, None
         self.lock = threading.Lock()
@@ -595,7 +744,7 @@ class Ledger:
         for raw in text[:-1].split("\n"):
             if not raw or raw != raw.strip():
                 raise ValueError("corrupt spend ledger: blank or padded line")
-            doc = json.loads(raw)
+            doc = json.loads(raw, parse_constant=_reject_nonfinite)
             if not isinstance(doc, dict) or not isinstance(doc.get("event"), str):
                 raise ValueError("corrupt spend ledger: line is not an event object")
             call = doc.get("call")
@@ -605,21 +754,24 @@ class Ledger:
             if ev == "open":
                 prior_cap = doc.get("cap_usd")
                 if prior_cap is not None:
-                    if not isinstance(prior_cap, (int, float)) or isinstance(prior_cap, bool) or prior_cap < 0:
+                    if (not isinstance(prior_cap, (int, float)) or isinstance(prior_cap, bool)
+                            or not math.isfinite(prior_cap) or prior_cap < 0):
                         raise ValueError("corrupt spend ledger: invalid cap_usd")
                     self.cap = min(self.cap, float(prior_cap))
             elif ev == "start":
                 if not isinstance(call, int) or isinstance(call, bool) or call <= 0 or call in starts:
                     raise ValueError("corrupt spend ledger: invalid or duplicate start call id")
                 res = doc.get("reserved_usd")
-                if not isinstance(res, (int, float)) or isinstance(res, bool) or res < 0:
+                if (not isinstance(res, (int, float)) or isinstance(res, bool)
+                        or not math.isfinite(res) or res < 0):
                     raise ValueError("corrupt spend ledger: invalid reserved_usd")
                 starts[call] = float(res)
             elif ev == "settle":
                 if not isinstance(call, int) or isinstance(call, bool) or call not in starts or call in settles:
                     raise ValueError("corrupt spend ledger: invalid or duplicate settle call id")
                 cost = doc.get("cost_usd")
-                if not isinstance(cost, (int, float)) or isinstance(cost, bool) or cost < 0:
+                if (not isinstance(cost, (int, float)) or isinstance(cost, bool)
+                        or not math.isfinite(cost) or cost < 0):
                     raise ValueError("corrupt spend ledger: invalid cost_usd")
                 settles[call] = float(cost)
             elif ev == "free":
@@ -647,6 +799,8 @@ class Ledger:
             settles[call] if call in settles else reserved
             for call, reserved in starts.items()
         )
+        if not math.isfinite(self.settled) or self.settled < 0:
+            raise ValueError("corrupt spend ledger: non-finite settled spend")
 
     def write(self, entry):
         tally = {"free_calls": self.free_calls, "free_bytes": self.free_bytes} if self.free_calls else {}
@@ -656,7 +810,7 @@ class Ledger:
             tally["faults"] = dict(self.faults)
         if self.refused:
             tally["refused"] = dict(self.refused)
-        self.fh.write(json.dumps({"at": now(), **entry, **tally}, sort_keys=True) + "\n")
+        self.fh.write(json.dumps({"at": now(), **entry, **tally}, sort_keys=True, allow_nan=False) + "\n")
         self.fh.flush()
         os.fsync(self.fh.fileno())
 
@@ -693,6 +847,16 @@ class Ledger:
             if not self.fh.closed:  # a broker shut down in-process (the tests) has closed it
                 self.write({"event": "tally"})
 
+    def flush_tally(self):
+        """Cancel any pending catch-up timer and write a final tally line immediately."""
+        with self.lock:
+            pending = self.catch_up is not None
+            if self.catch_up is not None:
+                self.catch_up.cancel()
+                self.catch_up = None
+            if pending and not self.fh.closed:
+                self.write({"event": "tally"})
+
     def drop(self, why):
         """A connection closed without an answer (evicted, slots full, a request past its deadline,
         a malformed one): counted, and written as a "drop" line at most every DROP_RECORD_S per
@@ -721,9 +885,12 @@ class Ledger:
 
     def reserve(self, model, usd):
         """A call id when the call fits under the cap with every call in flight, else None."""
+        if not (isinstance(usd, (int, float)) and not isinstance(usd, bool)
+                and math.isfinite(usd) and usd >= 0):
+            raise ValueError("reservation must be a non-negative finite number")
         with self.lock:
             committed = self.settled + sum(self.inflight.values())
-            if committed + usd > self.cap:
+            if not math.isfinite(committed + usd) or committed + usd > self.cap:
                 self._refuse("cap", "the cap", model, reserved_usd=round(usd, 6), committed_usd=round(committed, 6))
                 return None
             self.n += 1
@@ -750,7 +917,9 @@ class Ledger:
         """Release the call's reservation and settle `usd`, or the whole reservation when None."""
         with self.lock:
             reserved = self.inflight.pop(call, 0.0)
-            usd = reserved if usd is None else usd
+            if usd is None or not (isinstance(usd, (int, float)) and not isinstance(usd, bool)
+                                   and math.isfinite(usd) and usd >= 0):
+                usd = reserved
             self.settled += usd
             self.write({"event": "settle", "call": call, "cost_usd": round(usd, 6), "status": status, "usage": usage,
                         "complete": complete, "settled_usd": round(self.settled, 6)})
@@ -841,6 +1010,14 @@ class Broker(BaseHTTPRequestHandler):
         if path not in (PRICED_PATH, FREE_PATH):
             self.ledger.refuse("path", "POST to an unforwarded path")
             return self.fail(403, "permission_error", "only POST /v1/messages and /v1/messages/count_tokens are forwarded")
+        if target.query not in ALLOWED_QUERIES:
+            self.ledger.refuse("path", "an unallowed query parameter")
+            return self.fail(400, "invalid_request_error", "only ?beta=true is allowed on forwarded paths")
+        betas, beta_err = _parse_betas(self.headers)
+        if beta_err:
+            self.ledger.refuse("terms", beta_err)
+            return self.fail(400, "invalid_request_error", beta_err)
+        self._betas = betas
         try:
             length = int(self.headers.get("Content-Length", ""))
         except ValueError:
@@ -859,7 +1036,8 @@ class Broker(BaseHTTPRequestHandler):
                                                            "its memory")
         self.ticket = ticket = _Ticket(self.connection, length)
         self.body = None  # the body's one buffer, once read_body allocates it
-        self.server.track(self.connection, ticket)
+        if not self.server.track(self.connection, ticket):
+            return None  # evicted before track(): abort immediately
         try:
             # Budget goes only to a body that is arriving: its first byte must be here (a stalled
             # request waits for it holding no budget, and is evictable like any reader).
@@ -874,7 +1052,8 @@ class Broker(BaseHTTPRequestHandler):
                 self.ledger.refuse("body-budget", f"{length} body bytes and their parse past the {bodies.limit} "
                                                   "held at once")
                 return self.fail(503, "overloaded_error", "the broker holds as many request bodies as it can; retry")
-            ticket.since, ticket.arriving = time.monotonic(), True
+            if not bodies.begin_reading(ticket):
+                return None  # cancelled between take() and starting the body read
             self.answer_post(path, length)
         finally:
             # The charge for a body's bytes goes back only once its buffer is gone, on every way
@@ -902,9 +1081,8 @@ class Broker(BaseHTTPRequestHandler):
     def answer_post(self, path, length):
         """do_POST once the body's bytes are taken from the budget (BODY_BUDGET)."""
         body = self.read_body(length)
-        self.ticket.arriving = False  # read in full, or never: no longer a body that may stall
-        if not self.server.request_read(self.connection):
-            return  # evicted while it stalled: closed unanswered, and counted (W5-16)
+        if not self.server.request_read(self.connection, self.ticket):
+            return  # evicted while it stalled (or reclaimed by _BodyBudget): closed unanswered (W5-16)
         self.connection.settimeout(self.timeout)  # the answer's writes get the plain per-call timeout
         if body is None:
             # Already counted (a "body" fault, or a "body did not arrive" drop): a client that is
@@ -913,13 +1091,10 @@ class Broker(BaseHTTPRequestHandler):
                 self.fail(408, "invalid_request_error", f"the body did not arrive within {BODY_DEADLINE_S:g} s")
             return
         bodies, ticket = self.server.bodies, self.ticket
-        if path == FREE_PATH:  # relayed unparsed: only its bytes stay held
-            bodies.give(ticket, ticket.held - len(body))
-            if not self.ledger.free(len(body)):
-                return self.fail(403, "permission_error", "the count_tokens bound would be passed")
-            return self.relay(body, None, None, False)
         # What parsing may allocate is bounded BEFORE anything parses the body, and held in the same
         # budget as its bytes: holding the body once never bounded its parse (Codex rounds 7 and 9).
+        # Applies to both /v1/messages and /v1/messages/count_tokens so count_tokens is validated
+        # against file_id / url / file sources without risking OOM.
         cost = parse_cost(body, bodies.limit)
         if cost is None:
             self.ledger.refuse("body-parse", f"a {len(body)}-byte body whose parse could pass the "
@@ -937,14 +1112,48 @@ class Broker(BaseHTTPRequestHandler):
             bodies.give(ticket, ticket.held - len(body))  # its parse's share; its bytes' stays until they go
             self.ledger.refuse("body-budget", f"a parse of up to {cost} bytes past the {bodies.limit} held at once")
             return self.fail(503, "overloaded_error", "the broker holds as many request bodies as it can; retry")
+        if path == FREE_PATH:
+            return self.check_and_relay_free(body, cost - len(body))
         self.price_and_relay(body, cost - len(body))
+
+    def check_and_relay_free(self, body, allowance):
+        """Parse and validate a /v1/messages/count_tokens body in a child before forwarding."""
+        facts = _parse_in_child(body, allowance, free=True)
+        self.server.bodies.give(self.ticket, self.ticket.held - len(body))
+        if facts.get("error"):
+            self.ledger.fault_named("handler", short(str(facts["error"]), 80),
+                                    [short(str(f), 200) for f in facts.get("frames") or []][-12:])
+            self.close_connection = True
+            return None
+        if facts.get("memory") or facts.get("timeout"):
+            why = "its parse passed its bound" if facts.get("memory") else f"it did not parse in {PARSE_SECONDS} s"
+            self.ledger.refuse("body-parse", f"a {len(body)}-byte body: {why}")
+            return self.fail(413, "invalid_request_error", "the body's JSON could not be parsed within the "
+                                                           "broker's memory")
+        why = facts["why"]
+        if why:
+            self.ledger.refuse("terms", why)
+            return self.fail(400, "invalid_request_error", why)
+        if self.ticket.cancelled:
+            return None
+        if not self.ledger.free(len(body)):
+            return self.fail(403, "permission_error", "the count_tokens bound would be passed")
+        return self.relay(body, None, None, False)
 
     def price_and_relay(self, body, allowance):
         """Parse a body parse_cost has bounded, and whose bound is taken, in a child held to that
         bound; check its terms, reserve its worst case, and relay it. The broker never holds the
         parsed body."""
         facts = _parse_in_child(body, allowance)
+        if facts.get("inject_service_tier"):
+            if len(body) + len(STANDARD_TIER_INJECTION) > MAX_BODY:
+                self.server.bodies.give(self.ticket, self.ticket.held - len(body))
+                why = "a max-size body must explicitly name service_tier=standard_only"
+                self.ledger.refuse("terms", why, facts.get("model"))
+                return self.fail(413, "invalid_request_error", why)
+            _inject_standard_service_tier(body)
         # The parse child has exited: what its bound held goes back, and the body keeps its buffer.
+        # An injected tier remains charged until the enlarged buffer is dropped.
         self.server.bodies.give(self.ticket, self.ticket.held - len(body))
         if facts.get("error"):
             # A fault in the child (in terms(), say): recorded as a handler fault, and, as one
@@ -962,6 +1171,8 @@ class Broker(BaseHTTPRequestHandler):
         if why:
             self.ledger.refuse("terms", why, model)
             return self.fail(400, "invalid_request_error", why)
+        if self.ticket.cancelled:
+            return None
         call = self.ledger.reserve(model, reservation(len(body), facts["max_tokens"], model, facts["mult"],
                                                       facts["images"]))
         if call is None:
@@ -1006,11 +1217,17 @@ class Broker(BaseHTTPRequestHandler):
             up = urllib.parse.urlsplit(self.upstream)
             conn_cls = http.client.HTTPSConnection if up.scheme == "https" else http.client.HTTPConnection
             conn = conn_cls(up.hostname, up.port, timeout=UPSTREAM_TIMEOUT_S)
-            headers = {k: v for k, v in self.headers.items() if k.lower() not in DROP}
-            betas = [b.strip() for b in self.headers.get("anthropic-beta", "").split(",") if b.strip()]
-            headers = {k: v for k, v in headers.items() if k.lower() != "anthropic-beta"}
+            headers, seen_hdrs = {}, set()
+            for k, v in self.headers.items():
+                kl = k.lower()
+                if kl in ALLOWED_HEADERS and kl not in seen_hdrs:
+                    seen_hdrs.add(kl)
+                    headers[k] = v
+            betas = list(getattr(self, "_betas", ()))
+            if OAUTH_BETA not in betas:
+                betas.append(OAUTH_BETA)
             headers.update({"Authorization": f"Bearer {self.token}", "Accept-Encoding": "identity",
-                            "anthropic-beta": ",".join(betas + ([OAUTH_BETA] if OAUTH_BETA not in betas else []))})
+                            "anthropic-beta": ",".join(betas)})
             conn.request("POST", self.target, body=body, headers=headers)
             resp = conn.getresponse()
             status = resp.status
@@ -1036,7 +1253,7 @@ class Broker(BaseHTTPRequestHandler):
                     if not line.startswith(b"data:"):
                         continue
                     try:
-                        event = json.loads(line[5:])
+                        event = json.loads(line[5:], parse_constant=_reject_nonfinite)
                     except ValueError:
                         continue
                     if event.get("type") == "message_start":
@@ -1047,7 +1264,7 @@ class Broker(BaseHTTPRequestHandler):
                         complete = True
             if call is not None and not sse:
                 try:
-                    doc = json.loads(b"".join(whole))
+                    doc = json.loads(b"".join(whole), parse_constant=_reject_nonfinite)
                 except ValueError:
                     doc = None
                 if isinstance(doc, dict) and isinstance(doc.get("usage"), dict):
@@ -1206,6 +1423,20 @@ class _BodyBudget:
                 break
         return victims
 
+    def begin_reading(self, ticket):
+        """Mark `ticket` as an arriving body under the budget lock; False if already cancelled."""
+        with self.cond:
+            if ticket.cancelled:
+                return False
+            ticket.since, ticket.arriving = time.monotonic(), True
+            return True
+
+    def finish_reading(self, ticket):
+        """Stop treating `ticket` as an arriving body under the budget lock; False if cancelled."""
+        with self.cond:
+            ticket.arriving = False
+            return not ticket.cancelled
+
     def cancel(self, ticket):
         """An evicted request: its wait ends at once, and what it holds past its buffer is back."""
         with self.cond:
@@ -1244,6 +1475,8 @@ class BrokerServer(ThreadingHTTPServer):
         self.ledger, self.slots = ledger, threading.BoundedSemaphore(slots)
         self.bodies = _BodyBudget(BODY_BUDGET)
         self.reading, self.evicted, self.tickets, self.state = {}, set(), {}, threading.Lock()
+        self._active_reqs = set()
+        self._idle = threading.Condition(self.state)
         super().__init__(address, handler)
 
     def process_request(self, request, client_address):
@@ -1253,6 +1486,7 @@ class BrokerServer(ThreadingHTTPServer):
             return
         with self.state:
             self.reading[request] = time.monotonic()
+            self._active_reqs.add(request)
         try:
             super().process_request(request, client_address)
         except BaseException:
@@ -1291,14 +1525,28 @@ class BrokerServer(ThreadingHTTPServer):
 
     def track(self, request, ticket):
         with self.state:
+            if request in self.evicted:
+                ticket.cancelled = True
+                return False
             self.tickets[request] = ticket
+            return True
 
-    def request_read(self, request):
+    def request_read(self, request, ticket=None):
         """`request`'s whole request has arrived: from here it keeps its slot. False when it was
-        evicted first, and must then end without an answer."""
+        evicted first (including via _BodyBudget._reclaim before reclaimed() ran), and must then
+        end without an answer."""
+        if ticket is not None and not self.bodies.finish_reading(ticket):
+            with self.state:
+                self.reading.pop(request, None)
+                self.evicted.add(request)
+            return False
         with self.state:
             self.reading.pop(request, None)
-            return request not in self.evicted
+            if request in self.evicted:
+                return False
+            if ticket is not None and ticket.cancelled:
+                return False
+            return True
 
     def was_evicted(self, request):
         with self.state:
@@ -1309,6 +1557,20 @@ class BrokerServer(ThreadingHTTPServer):
             self.reading.pop(request, None)
             self.evicted.discard(request)
             self.tickets.pop(request, None)
+            self._active_reqs.discard(request)
+            if not self._active_reqs:
+                self._idle.notify_all()
+
+    def wait_idle(self, timeout=4.0):
+        """Wait up to `timeout` seconds for active handler threads to finish and settle."""
+        deadline = time.monotonic() + timeout
+        with self._idle:
+            while self._active_reqs:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return False
+                self._idle.wait(left)
+            return True
 
     def process_request_thread(self, request, client_address):
         try:
@@ -1353,17 +1615,38 @@ def main(argv=None):
     p.add_argument("--port", type=int, default=PORT)
     p.add_argument("--upstream", default=UPSTREAM, help=argparse.SUPPRESS)
     args = p.parse_args(argv)
-    if not args.cap_usd > 0:
-        p.error("--cap-usd must be a positive number of dollars")
-    server, _ledger = serve(read_token(args.token_file), args.ledger, args.cap_usd, args.port, args.upstream)
+    if not (math.isfinite(args.cap_usd) and args.cap_usd > 0):
+        p.error("--cap-usd must be a positive finite number of dollars")
+    server, ledger = serve(read_token(args.token_file), args.ledger, args.cap_usd, args.port, args.upstream)
     print(f"live_broker: listening on 127.0.0.1:{server.server_address[1]}, cap ${args.cap_usd:g}", file=sys.stderr)
+    stop = threading.Event()
+
+    def _on_signal(_signum, _frame):
+        stop.set()
+
+    prior = {}
+    if threading.current_thread() is threading.main_thread():
+        prior = {s: signal.signal(s, _on_signal) for s in (signal.SIGTERM, signal.SIGINT)}
     try:
-        while True:
-            time.sleep(3600)
+        while not stop.wait(3600):
+            pass
     except KeyboardInterrupt:
+        pass
+    finally:
+        for s, handler in prior.items():
+            signal.signal(s, handler)
         server.shutdown()
+        server.server_close()
+        while server.evict():
+            pass
+        server.wait_idle(timeout=4.0)
+        ledger.flush_tally()
+        if not ledger.fh.closed:
+            ledger.fh.close()
     return 0
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 6 and sys.argv[1] == "--parse-worker":
+        sys.exit(_parse_worker(int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), sys.argv[5] == "1"))
     sys.exit(main())

@@ -2894,5 +2894,42 @@ class GitexecCustody(unittest.TestCase):
         self.assertEqual(posix.GIT_SELECTOR_ENV, gitexec.SELECTOR_ENV)
 
 
+class HardenedFloorAndWtreeExactMatch(unittest.TestCase):
+    """Regression pins for #766 (gitexec.HARDENED floor promotion) and #788 (wtree.sh literal
+    declared-filter matching)."""
+
+    def test_hardened_and_env_pin_lazy_fetch_protocol_and_attr_nosystem(self):
+        self.assertEqual(gitexec.HARDENED["GIT_NO_LAZY_FETCH"], "1")
+        self.assertEqual(gitexec.HARDENED["GIT_ALLOW_PROTOCOL"], "file")
+        self.assertEqual(gitexec.HARDENED["GIT_ATTR_NOSYSTEM"], "1")
+        env = gitexec.env({
+            "PATH": os.environ.get("PATH", ""),
+            "GIT_NO_LAZY_FETCH": "0",
+            "GIT_ALLOW_PROTOCOL": "ssh:https",
+            "GIT_ATTR_NOSYSTEM": "0",
+        })
+        self.assertEqual(env["GIT_NO_LAZY_FETCH"], "1")
+        self.assertEqual(env["GIT_ALLOW_PROTOCOL"], "file")
+        self.assertEqual(env["GIT_ATTR_NOSYSTEM"], "1")
+
+    def test_wtree_wildcard_filter_attribute_does_not_glob_match_declared_filter(self):
+        tmp = tempfile.mkdtemp(prefix="wtree-glob-788-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        p = _Probe(tmp)
+        p.commit("a.txt", "one\n")
+        p._git("config", "filter.real.clean", "cat")
+        (p.repo / ".gitattributes").write_text("a.txt filter=*\n", encoding="utf-8")
+        (p.repo / "a.txt").write_text("two\n", encoding="utf-8")
+        r = subprocess.run(["sh", str(ROOT / "runtime" / "scripts" / "wtree.sh")],
+                           cwd=str(p.repo), capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, f"wildcard filter=* matched declared filter: {r.stderr}")
+        self.assertRegex(r.stdout.strip(), r"^[0-9a-f]{40}$")
+        # Exact declared filter name must still refuse with exit 3.
+        (p.repo / ".gitattributes").write_text("a.txt filter=real\n", encoding="utf-8")
+        r2 = subprocess.run(["sh", str(ROOT / "runtime" / "scripts" / "wtree.sh")],
+                            cwd=str(p.repo), capture_output=True, text=True, timeout=60)
+        self.assertEqual(r2.returncode, 3, r2.stdout + r2.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

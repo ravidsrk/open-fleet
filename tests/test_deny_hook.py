@@ -733,7 +733,7 @@ class TestGitGlobalOptionsAreStripped(HookBase):
     def test_a_redirect_inside_an_option_value_is_text_not_an_option(self):
         # PR #321 review — `-c`'s operand may legitimately contain ` -C `;
         # scanning it raw called a non-default delete a redirect and denied it.
-        for command in ("git -c 'core.sshCommand=ssh -C' push -d origin topic",
+        for command in ("git -c 'http.userAgent=agent -C' push -d origin topic",
                         'git -c "x=--git-dir /y" push -d origin topic'):
             with self.subTest(command=command):
                 block = self.decision(self.fire(event("Bash", command=command)))
@@ -3602,3 +3602,234 @@ class TestAuditFindingsF1F2F7(ReviewHookBase):
         ):
             with self.subTest(payload=payload):
                 self.assertEqual(self.raw(payload), "allow")
+
+
+class TestAdversarialHardeningW2(HookBase):
+    """Regression coverage for #767, #774, and #780 in runtime/scripts/deny-hook.sh."""
+
+    def _verdict(self, payload, env_extra=None, cwd=None):
+        r = self.fire(payload, env_extra=env_extra, cwd=cwd)
+        self.assertIn(r.returncode, (0, 2), r.stderr)
+        if not r.stdout.strip():
+            return "allow", ""
+        block = json.loads(r.stdout)["hookSpecificOutput"]
+        return block["permissionDecision"], block.get("permissionDecisionReason", "")
+
+    def test_brace_expansion_comments_in_test_reset_and_nested_bodies(self):
+        for cmd in (
+            "echo ok # [[\nrm -rf {/,.}",
+            "echo [[; rm -rf {/,.}",
+            "[[ a == b; rm -rf {/,.}",
+            "[[ a == b && rm -rf {/,.}",
+            "[[ a == b || rm -rf {/,.}",
+            "[[ a == b )\nrm -rf {/,.}",
+            "bash -c 'rm -rf {/,.}'",
+            "eval 'git push --{force,force} origin main'",
+            "sh <<'EOF'\nrm -rf {/,.}\nEOF",
+            "echo 'rm -rf {/,.}' | sh",
+            'echo "$(rm -rf {/,.})"',
+            "bash -c 'rm -f .claude/{settings,other}.json'",
+            "bash -c 'gh issue {close,view} 34'",
+        ):
+            with self.subTest(cmd=cmd):
+                got, why = self._verdict(event("Bash", command=cmd))
+                self.assertEqual(got, "deny", f"{cmd!r}: {why}")
+        ro = {"OPEN_FLEET_HOOK_READONLY": "1"}
+        for cmd in (
+            "bash -c 'echo x > /tmp/{a,b}'",
+            "bash -c 'echo x | {t,t}ee out.txt'",
+        ):
+            with self.subTest(ro_cmd=cmd):
+                got, why = self._verdict(event("Bash", command=cmd), env_extra=ro)
+                self.assertEqual(got, "deny", f"{cmd!r}: {why}")
+
+    def test_dev_fd_traversal_and_busybox_toybox_tee_are_blocked(self):
+        wt = self.tmp / "w2_fd_wt"
+        wt.mkdir(exist_ok=True)
+        bound_env = {"OPEN_FLEET_UNIT_WORKTREE": str(wt)}
+        ro_env = {"OPEN_FLEET_HOOK_READONLY": "1"}
+        # Pure numeric /dev/fd/<n> stays allowed.
+        self.assertEqual(self._verdict(event("Bash", command="echo hi > /dev/fd/3"), env_extra=bound_env, cwd=wt)[0], "allow")
+        for cmd in (
+            "echo pwn > /dev/fd/../../tmp/pwned",
+            "echo pwn > /dev/fd/1/../../tmp/pwned",
+            "echo pwn > /dev/fd/",
+            "echo pwn | busybox tee /etc/pwned",
+            "echo pwn | toybox tee /etc/pwned",
+            "echo pwn | /bin/busybox tee /etc/pwned",
+        ):
+            with self.subTest(bound_cmd=cmd):
+                got, why = self._verdict(event("Bash", command=cmd), env_extra=bound_env, cwd=wt)
+                self.assertEqual(got, "deny", f"{cmd!r}: {why}")
+        for cmd in (
+            "echo pwn | busybox tee in.txt",
+            "echo pwn | toybox tee in.txt",
+            "busybox rm -rf /",
+            "toybox rm -rf /",
+        ):
+            with self.subTest(ro_cmd=cmd):
+                got, why = self._verdict(event("Bash", command=cmd), env_extra=ro_env, cwd=wt)
+                self.assertEqual(got, "deny", f"{cmd!r}: {why}")
+
+    def test_git_attr_source_and_dangerous_config_keys_are_denied(self):
+        for cmd in (
+            "git --attr-source HEAD push --force origin main",
+            "git --attr-source=HEAD push --force origin main",
+            "git --attr-source HEAD -C /other push -d origin topic",
+            "git --attr-source=HEAD -C /other push -d origin topic",
+            "git -c remote.origin.mirror=true push origin",
+            "git -c remote.origin.push=+HEAD:main push origin",
+            "git -c remote.origin.prune=true push origin",
+            "git -c core.fsmonitor='rm -rf /' status",
+            "git -c core.pager='sh -c id' log",
+            "git -c pager.log='sh -c id' log",
+            "git -c core.sshCommand='sh -c id' fetch",
+            "git -c core.hooksPath=/tmp/hooks commit -m x",
+            "git -c core.editor='sh -c id' commit",
+            "git -c core.askPass=/tmp/ask fetch",
+            "git -c credential.helper='!id' fetch",
+            "git -c diff.external=/tmp/d diff",
+            "git -c diff.foo.command=/tmp/d diff",
+            "git -c diff.foo.textconv=/tmp/d diff",
+            "git -c filter.x.clean=/tmp/c status",
+            "git -c filter.x.smudge=/tmp/s checkout",
+            "git -c filter.x.process=/tmp/p status",
+            "git -c merge.x.driver=/tmp/m merge",
+            "git -c core.alternateRefsCommand=/tmp/a fetch",
+            "git -c gpg.program=/tmp/g log --show-signature",
+            "git -c gpg.ssh.program=/tmp/g commit -S",
+            "git -c protocol.ext.allow=always clone ext::id",
+            "git --config-env=core.sshCommand=CMD fetch",
+            "GIT_CONFIG_KEY_0=remote.origin.mirror GIT_CONFIG_VALUE_0=true GIT_CONFIG_COUNT=1 git push origin",
+            "GIT_CONFIG_PARAMETERS=\"'core.fsmonitor=id'\" git status",
+        ):
+            with self.subTest(cmd=cmd):
+                got, why = self._verdict(event("Bash", command=cmd))
+                self.assertEqual(got, "deny", f"{cmd!r}: {why}")
+
+    def test_receipt_help_fake_path_gh_api_clusters_and_gh_secret_flags(self):
+        fake_egress = self.tmp / "egress.py"
+        fake_egress.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        for cmd in (
+            "runtime/scripts/egress.py write -h && gh issue close 34",
+            "runtime/scripts/egress.py write --help && gh issue close 34",
+            "runtime/scripts/egress.py write --he && gh issue close 34",
+            "runtime/scripts/egress.py write --h && gh issue close 34",
+            "runtime/scripts/egress.py write --sink s --help && gh issue close 34",
+            f"python3 {fake_egress} write --sink s --host h --payload-class c --consent k && gh issue close 34",
+            "./egress.py write --sink s --host h --payload-class c --consent k && gh issue close 34",
+            "gh api -iX POST repos/o/r/issues",
+            "gh api -iXDELETE repos/o/r/issues/1",
+            "gh api -if title=x repos/o/r/issues",
+            "gh api -iF title=x repos/o/r/issues",
+            "gh api -H -XGET -f title=x repos/o/r/issues",
+            "gh api -q -XGET -f title=x repos/o/r/issues",
+            "gh api --input -XGET repos/o/r/issues",
+            "gh api -X GET --input body.json repos/o/r/issues",
+        ):
+            with self.subTest(deny_cmd=cmd):
+                got, why = self._verdict(event("Bash", command=cmd))
+                self.assertEqual(got, "deny", f"{cmd!r}: {why}")
+        for cmd in (
+            "gh secret -R o/r set FOO -b bar",
+            "gh secret --repo o/r delete FOO",
+            "gh -R o/r secret set FOO -b bar",
+            "runtime/scripts/egress.py write --sink s --host h --payload-class c --consent k && gh repo -R o/r delete o/r",
+        ):
+            with self.subTest(ask_cmd=cmd):
+                got, why = self._verdict(event("Bash", command=cmd))
+                self.assertEqual(got, "ask", f"{cmd!r}: {why}")
+
+    def test_root_wipe_with_extra_benign_operand_still_denies(self):
+        for cmd in (
+            "rm -rf / ./tmp",
+            "rm -rf ./tmp /",
+            "rm -rf ~ ./tmp",
+            "rm -rf /*/ ./tmp",
+            "rm -rf ${HOME}/* ./tmp",
+        ):
+            with self.subTest(cmd=cmd):
+                got, why = self._verdict(event("Bash", command=cmd))
+                self.assertEqual(got, "deny", f"{cmd!r}: {why}")
+                self.assertIn("HIGH", why)
+
+    def test_c_quoted_patch_targets_empty_patch_and_readonly_empty_file_deny(self):
+        c_quoted = '--- /dev/null\n+++ "b/.claude/\\163ettings.json"\n@@ -0,0 +1 @@\n+{}\n'
+        got, why = self._verdict(event("apply_patch", patch=c_quoted))
+        self.assertEqual(got, "deny", why)
+        got_empty, why_empty = self._verdict(event("apply_patch", patch="not a valid patch"))
+        self.assertEqual(got_empty, "deny", why_empty)
+        got_ro, why_ro = self._verdict(event("Edit", file_path=""), env_extra={"OPEN_FLEET_HOOK_READONLY": "1"})
+        self.assertEqual(got_ro, "deny", why_ro)
+        self.assertIn("READONLY", why_ro)
+
+    def test_verify_settings_rejects_expanded_steering_disable_all_hooks_and_command_keys(self):
+        wt = self.tmp / "w2_vs_wt"
+        wt.mkdir(exist_ok=True)
+        base_settings = {
+            "env": {"OPEN_FLEET_UNIT_WORKTREE": str(wt)},
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit",
+                    "hooks": [{"type": "command", "command": f"sh {HOOK}"}],
+                }],
+            },
+        }
+        steering_keys = (
+            "LD_AUDIT", "GLIBC_TUNABLES", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH",
+            "DYLD_FRAMEWORK_PATH", "BASHOPTS", "NODE_OPTIONS", "PERL5OPT", "RUBYOPT",
+            "ANTHROPIC_BASE_URL", "HTTP_PROXY", "HTTPS_PROXY", "GIT_SSH_COMMAND",
+            "GIT_EXTERNAL_DIFF", "BASH_FUNC_evil%%",
+        )
+        for key in steering_keys:
+            with self.subTest(steering=key):
+                doc = json.loads(json.dumps(base_settings))
+                doc["env"][key] = "evil"
+                sf = wt / "settings.json"
+                sf.write_text(json.dumps(doc), encoding="utf-8")
+                r = subprocess.run(["sh", str(HOOK), "--verify-settings", str(sf)],
+                                   capture_output=True, text=True, timeout=60)
+                self.assertNotEqual(r.returncode, 0, f"{key} should be refused: {r.stdout}{r.stderr}")
+        for label, extra in (
+            ("disableAllHooks", {"disableAllHooks": True}),
+            ("apiKeyHelper", {"apiKeyHelper": "/tmp/evil.sh"}),
+            ("awsAuthRefresh", {"awsAuthRefresh": "/tmp/evil.sh"}),
+            ("awsCredentialExport", {"awsCredentialExport": "/tmp/evil.sh"}),
+            ("otelHeadersHelper", {"otelHeadersHelper": "/tmp/evil.sh"}),
+        ):
+            with self.subTest(setting=label):
+                doc = json.loads(json.dumps(base_settings))
+                doc.update(extra)
+                sf = wt / "settings.json"
+                sf.write_text(json.dumps(doc), encoding="utf-8")
+                r = subprocess.run(["sh", str(HOOK), "--verify-settings", str(sf)],
+                                   capture_output=True, text=True, timeout=60)
+                self.assertNotEqual(r.returncode, 0, f"{label} should be refused: {r.stdout}{r.stderr}")
+
+    def test_guard_text_fetch_commands_are_extracted_and_judged_by_all_tiers(self):
+        wt = self.tmp / "w2_gt_wt"
+        wt.mkdir(exist_ok=True)
+        for cmd in (
+            "python3 runtime/scripts/guard_text.py --source issue --fetch rm -rf /",
+            "runtime/scripts/guard_text.py --source pr --fetch gh pr merge 12",
+            "python3 runtime/scripts/guard_text.py --source issue --fetch rm -f .claude/settings.json",
+            "python3 -I runtime/scripts/guard_text.py --source ci --fetch git push --force origin main",
+        ):
+            with self.subTest(cmd=cmd):
+                got, why = self._verdict(event("Bash", command=cmd))
+                self.assertEqual(got, "deny", f"{cmd!r}: {why}")
+        got_ro, why_ro = self._verdict(
+            event("Bash", command="python3 runtime/scripts/guard_text.py --source ci --fetch tee out.txt"),
+            env_extra={"OPEN_FLEET_HOOK_READONLY": "1"},
+        )
+        self.assertEqual(got_ro, "deny", why_ro)
+        got_wt, why_wt = self._verdict(
+            event("Bash", command="python3 runtime/scripts/guard_text.py --source ci --fetch sh -c 'echo x > /etc/pwn'"),
+            env_extra={"OPEN_FLEET_UNIT_WORKTREE": str(wt)},
+            cwd=wt,
+        )
+        self.assertEqual(got_wt, "deny", why_wt)
+        got_ok, why_ok = self._verdict(
+            event("Bash", command="python3 runtime/scripts/guard_text.py --source issue --fetch gh issue view 42 --json title,body"),
+        )
+        self.assertEqual(got_ok, "allow", why_ok)
