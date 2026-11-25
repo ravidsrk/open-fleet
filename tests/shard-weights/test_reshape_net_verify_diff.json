@@ -1,0 +1,8 @@
+{
+  "seconds": 0.1,
+  "measured": "2026-11-25: one local run of tests.test_reshape_net_verify_diff (6 tests, Python 3.12.3), x2 to the CI lane",
+  "classes": {
+    "DiffAndHunkBindingSeamNet": 0.1
+  },
+  "fixture_seconds": 0.0
+}
