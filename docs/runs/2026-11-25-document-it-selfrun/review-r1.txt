@@ -1,0 +1,16 @@
+# Acceptance Review — `document-it-2026-11-25-DOC-1` (Round 1 of 3)
+
+- **Unit ID:** `document-it-2026-11-25-DOC-1`
+- **Commit range:** `4ad16df406c6df3bb2d13f0037ec274802666b61..4b2e99e523fe235fd30aab2e68612d616787c3dc`
+- **reviewed_sha:** `4b2e99e523fe235fd30aab2e68612d616787c3dc`
+- **Reviewer mode:** `same-vendor-fresh` (independent build-blind `research` subagent `14cd4c74-c15b-46eb-a9dd-064490d50aab`)
+- **Review round:** `1 of 3`
+- **Verdict:** **NO-GO**
+
+## Summary of Findings (Round 1)
+1. **[Critical — DOC-1-AC1, confirmed across all 3 axes]:** `CORE_SYMBOL_ANCHORS` (`scripts/extract_product_surface.py:34-49`) was a static hand-copied tuple checked only against `open_fleet/*.py` ASTs, decoupled from `docs/cli-and-mcp.md` (which carried zero `file:symbol` anchors).
+2. **[Required — Standards]:** `scripts/extract_product_surface.py:146-147,236` raised `KeyError: 'counts'` when `docs/cli-and-mcp.md` was missing; `scripts/extract_product_surface.py:124-125` failed open (vacuous pass) when `.github/actions/open-fleet-verify/action.yml` was deleted; reachability checked raw substrings instead of Markdown links; CLI checks lacked word boundaries and reference-table scoping.
+3. **[Required — DOC-1-AC2]:** `scripts/extract_product_surface.py --check` was wired into `product-package.yml` and `test_entrypoint_guard.py`, but not explicitly wired into `scripts/check.py` or `.github/workflows/validate.yml` (`checks` job).
+4. **[Required — Test-adequacy]:** Negative controls covered only the static `CORE_SYMBOL_ANCHORS` rename, not doc-anchored symbol renames, bogus doc anchors, dropped CLI/MCP/Action documentation entries, unlinked reachability text, or missing-file CLI exit codes.
+
+Action taken: Rework wave dispatched to resolve all 4 findings cleanly before Round 2 independent re-review.

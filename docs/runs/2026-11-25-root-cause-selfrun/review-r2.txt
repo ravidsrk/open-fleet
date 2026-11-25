@@ -1,0 +1,13 @@
+# Acceptance Review — `root-cause-2026-11-25-hidepid` (Round 2 of 3)
+
+- **Unit ID:** `root-cause-2026-11-25-hidepid`
+- **Reviewed SHA:** `5611805fb691999bed51d7b264b5f5d52280bb7f`
+- **Reviewer mode:** `same-vendor-fresh` (independent build-blind `research` subagent `8af9243e-5eb4-424e-97d7-43a61da07270`)
+- **Review round:** `2 of 3`
+- **Verdict:** **NO-GO** (AXIS 1: PASS · AXIS 2: FAIL [1 Required] · AXIS 3: PASS)
+
+## Summary of Findings (Round 2)
+Both Round 1 Critical security findings (W4-04 transitive bypass and broken negative control) and `agent-brief.md` compliance PASSED cleanly (AXIS 1 PASS, AXIS 3 PASS, `repro-red.txt` PASS, `diagnosis-evidence.md` verbatim quotes PASS).
+1. **[Required — AXIS 2, RC-2]:** Five of six `$ ...` command headers in `falsification-probes.txt` were paraphrased or missing `PYTHONPATH=runtime/scripts` rather than the literal self-contained commands producing the verbatim outputs.
+
+Action taken: Re-executed every probe via literal self-contained commands capturing exact command + raw unmodified stdout/stderr in `falsification-probes.txt`, synced PIDs in `diagnosis-evidence.md`, and logged `which orca orca-ide` prior-art status before Round 3 independent re-review.

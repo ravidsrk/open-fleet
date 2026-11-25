@@ -1,0 +1,59 @@
+### root-cause self-run 2026-11-25 — Phase 1 deterministic red-capable reproduction (A/B single-variable control)
+### fixed_point_sha: 4b2e99e523fe235fd30aab2e68612d616787c3dc
+
+=== [RED] Repro under hidden supervisor ancestor on Linux /proc hidepid=invisible ===
+# Exact command: spawn a non-dumpable parent (PR_SET_DUMPABLE=0, hidden under hidepid=invisible exactly like
+# a root-owned container supervisor) that runs the failing spawn-worker test unaltered:
+$ python3 -c "import ctypes, os, subprocess, sys; assert ctypes.CDLL(None).prctl(4, 0, 0, 0, 0) == 0; p = subprocess.run([sys.executable, '-m', 'unittest', 'tests.test_spawn_worker.TestUnknownIsNeverAbsent.test_a_response_that_does_not_parse_whole_registers_what_it_names', '-v']); sys.exit(p.returncode)"
+test_a_response_that_does_not_parse_whole_registers_what_it_names (tests.test_spawn_worker.TestUnknownIsNeverAbsent.test_a_response_that_does_not_parse_whole_registers_what_it_names) ... 
+  test_a_response_that_does_not_parse_whole_registers_what_it_names (tests.test_spawn_worker.TestUnknownIsNeverAbsent.test_a_response_that_does_not_parse_whole_registers_what_it_names) (lane='worker-start') ... FAIL
+/usr/lib/python3.12/unittest/case.py:669: ResourceWarning: unclosed file <_io.TextIOWrapper name=11 encoding='UTF-8'>
+  function, args, kwargs = self._cleanups.pop()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/usr/lib/python3.12/unittest/case.py:669: ResourceWarning: unclosed file <_io.TextIOWrapper name=9 encoding='UTF-8'>
+  function, args, kwargs = self._cleanups.pop()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/usr/lib/python3.12/unittest/case.py:669: ResourceWarning: unclosed file <_io.TextIOWrapper name=7 encoding='UTF-8'>
+  function, args, kwargs = self._cleanups.pop()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/usr/lib/python3.12/unittest/case.py:669: ResourceWarning: unclosed file <_io.TextIOWrapper name=5 encoding='UTF-8'>
+  function, args, kwargs = self._cleanups.pop()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+
+======================================================================
+FAIL: test_a_response_that_does_not_parse_whole_registers_what_it_names (tests.test_spawn_worker.TestUnknownIsNeverAbsent.test_a_response_that_does_not_parse_whole_registers_what_it_names) (lane='worker-start')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/tests/test_spawn_worker.py", line 2482, in test_a_response_that_does_not_parse_whole_registers_what_it_names
+    self.assert_capped(pty.run(self.CHILD, child, via="pane"), f"parent profile '{profile}'")
+  File "<repo>/tests/test_spawn_worker.py", line 2231, in assert_capped
+    self.assertIn(needle, err)
+AssertionError: "parent profile 'rw'" not found in "SPAWN=NOTE task=task_child this session's spawn identity cannot be read (no registry location, or a read it needs failed: its process ancestry, the spawn registry, or a /proc that is not this pid namespace's): the child is capped at ro rather than left uncapped (W4-04)\nSPAWN=REFUSED task=task_child monotonic privilege narrowing violation: child PROFILE=danger exceeds parent profile 'ro' (ro < rw < danger)\n"
+
+----------------------------------------------------------------------
+Ran 1 test in 1.624s
+
+FAILED (failures=1)
+exit_code: 1
+
+=== [CONTROL A] Same test on same commit WITHOUT hidden ancestor (parent chain reaches pid 1 directly) ===
+$ python3 -m unittest tests.test_spawn_worker.TestUnknownIsNeverAbsent.test_a_response_that_does_not_parse_whole_registers_what_it_names -v
+test_a_response_that_does_not_parse_whole_registers_what_it_names (tests.test_spawn_worker.TestUnknownIsNeverAbsent.test_a_response_that_does_not_parse_whole_registers_what_it_names) ... /usr/lib/python3.12/unittest/case.py:669: ResourceWarning: unclosed file <_io.TextIOWrapper name=11 encoding='UTF-8'>
+  function, args, kwargs = self._cleanups.pop()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/usr/lib/python3.12/unittest/case.py:669: ResourceWarning: unclosed file <_io.TextIOWrapper name=9 encoding='UTF-8'>
+  function, args, kwargs = self._cleanups.pop()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/usr/lib/python3.12/unittest/case.py:669: ResourceWarning: unclosed file <_io.TextIOWrapper name=7 encoding='UTF-8'>
+  function, args, kwargs = self._cleanups.pop()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/usr/lib/python3.12/unittest/case.py:669: ResourceWarning: unclosed file <_io.TextIOWrapper name=5 encoding='UTF-8'>
+  function, args, kwargs = self._cleanups.pop()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+ok
+
+----------------------------------------------------------------------
+Ran 1 test in 1.618s
+
+OK
+exit_code: 0

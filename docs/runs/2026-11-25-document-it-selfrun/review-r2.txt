@@ -1,0 +1,14 @@
+# Acceptance Review — `document-it-2026-11-25-DOC-1` (Round 2 of 3)
+
+- **Unit ID:** `document-it-2026-11-25-DOC-1`
+- **Reviewed SHA:** `5611805fb691999bed51d7b264b5f5d52280bb7f`
+- **Reviewer mode:** `same-vendor-fresh` (independent build-blind `research` subagent `bf6bf6d5-b71e-4642-9a9a-a5c460d8c75b`)
+- **Review round:** `2 of 3`
+- **Verdict:** **NO-GO**
+
+## Summary of Findings (Round 2)
+Round 1 Critical #1 (doc-embedded AST anchors) and Required #3 (wiring in `check.py` and `validate.yml`) RESOLVED cleanly. Two surgical Required findings remained:
+1. **[Required — Stale module cache & masked ImportError in rename control]:** `_load_open_fleet` (`scripts/extract_product_surface.py:45-48`) cached `sys.modules["open_fleet"]` by path, masking that `test_rename_negative_control_turns_claim_check_red` patched `cli.py` and `mcp_server.py` but omitted `open_fleet/ui_server.py:40` (causing `ImportError` in a fresh subprocess).
+2. **[Required — Permissive Markdown link matcher & missing `docs/README.md` control]:** `_has_markdown_link` (`scripts/extract_product_surface.py:123-126`) allowed `[^)]*` before `target`, admitting broken relative links like `[CLI](docs/cli-and-mcp.md)` inside `docs/README.md`, and `docs/README.md` reachability lacked a negative control.
+
+Action taken: Final surgical rework wave (Round 3 of 3) applied and verified via fresh subprocess before Round 3 independent re-review.

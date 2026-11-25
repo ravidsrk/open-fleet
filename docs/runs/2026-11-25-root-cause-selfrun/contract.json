@@ -1,0 +1,29 @@
+{
+  "mission": "root-cause",
+  "run": "2026-11-25 self-run (Linux /proc hidepid=invisible spawn_identity false-cap diagnosis)",
+  "criterion_ids": ["RC-1", "RC-2", "RC-3", "RC-4"],
+  "criteria": [
+    {
+      "id": "RC-1",
+      "text": "Build and run a deterministic red-capable reproduction of the tests/test_spawn_worker.py parent-profile cap failure BEFORE theorizing, pasting the exact command invocation and verbatim failing output."
+    },
+    {
+      "id": "RC-2",
+      "text": "Perform a prior-art check, freeze 3-5 ranked falsifiable hypotheses (H1-H4), and test each hypothesis one variable at a time with pasted commands and verbatim outputs, falsifying all rivals."
+    },
+    {
+      "id": "RC-3",
+      "text": "Demonstrate the single surviving root cause directly against live /proc hidepid=invisible state with A/B single-variable control and verbatim source-seam quotes in diagnosis-evidence.md."
+    },
+    {
+      "id": "RC-4",
+      "text": "Respect diagnosis-only authority (zero production or test code modified) and emit a durable, path-free, line-number-free DIAGNOSED-WITH-HANDOFF brief conforming to playbooks/agent-brief.md that preserves W4-04 fail-closed invariants and specifies exact regression tests plus fail-closed negative controls."
+    }
+  ],
+  "frozen_at": "2026-11-25T17:06:00Z",
+  "dispatch": {
+    "unit_class": "planning",
+    "lighting": "lit",
+    "why": "Read-only root-cause diagnosis on Linux hidepid=invisible host; zero production or test edits; emits a durable agent-brief handoff for a separately authorized lit-reviewed fix."
+  }
+}

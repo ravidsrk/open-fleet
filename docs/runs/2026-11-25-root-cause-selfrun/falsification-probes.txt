@@ -1,0 +1,48 @@
+### root-cause self-run 2026-11-25 — Prior-art check & ranked single-variable falsification probes (H1-H4)
+### fixed_point_sha: cfa3bd63f78df5f0e5e7ee66817ba466d860340b (spawn_identity.py / spawn_worker.sh / test_spawn_worker.py unchanged since 4b2e99e5)
+
+=== Prior-Art Check (docs/runs/ and orca index availability) ===
+$ git grep -n spawn_identity docs/runs/ || echo '(0 matches in docs/runs/)'; command -v orca orca-ide || echo '(orca/orca-ide not installed on PATH)'
+(0 matches in docs/runs/)
+(orca/orca-ide not installed on PATH)
+exit_code: 0
+
+=== Environment Facts ===
+$ python3 -c 'import os; print("uid=" + str(os.getuid()), "euid=" + str(os.geteuid()), "pid=" + str(os.getpid()), "ppid=" + str(os.getppid())); print("proc_mounts=" + repr([l.strip() for l in open("/proc/mounts") if " /proc " in l])); print("/proc/1_exists=" + str(os.path.exists("/proc/1")))'
+uid=1002 euid=1002 pid=546301 ppid=546218
+proc_mounts=['proc /proc proc rw,relatime,gid=987,hidepid=invisible 0 0']
+/proc/1_exists=False
+exit_code: 0
+
+=== Ranked Hypotheses (frozen before executing single-variable probes) ===
+Rank 1 (H1): Linux /proc hidepid=invisible hides a supervisor ancestor (ppid > 1, stat(ppid) is None), so once reg.live_roots() is non-empty, whoami() flips chain(pid, allow_hidden=not live) to allow_hidden=False (spawn_identity.py:474) and raises Unknown at spawn_identity.py:196.
+Rank 2 (H2): own_proc() raises Unknown because /proc belongs to another PID namespace.
+Rank 3 (H3): spawn_identity.py fails under python3 -I, setsid is absent, or Registry read/write/entries fails.
+Rank 4 (H4): _uids(pid) fails to parse /proc/<pid>/status Uid credentials on this Linux kernel.
+
+=== Probe H2: PID namespace check (spawn_identity.own_proc()) — FALSIFIED ===
+$ PYTHONPATH=runtime/scripts python3 -c 'import os, spawn_identity as si; si.own_proc(); print("readlink(/proc/self)=" + os.readlink("/proc/self"), "== pid=" + str(os.getpid()), "-> own_proc: OK")'
+readlink(/proc/self)=546302 == pid=546302 -> own_proc: OK
+exit_code: 0
+
+=== Probe H3: python3 -I CLI, setsid, and Registry read/write/entries — FALSIFIED ===
+$ python3 -I runtime/scripts/spawn_identity.py --help >/dev/null && echo 'spawn_identity --help: OK' && command -v setsid && PYTHONPATH=runtime/scripts python3 -c 'import os, tempfile, spawn_identity as si; td = tempfile.TemporaryDirectory(); reg = si.Registry(td.name); reg.write(".roots", si.key(os.getppid()), "rw pane_probe" + chr(10)); print("entries=" + repr(reg.entries(".roots")), "live_roots=" + repr(reg.live_roots())); td.cleanup()'
+spawn_identity --help: OK
+/usr/bin/setsid
+entries=['546218.359425724'] live_roots={'546218.359425724': 'rw'}
+exit_code: 0
+
+=== Probe H4: /proc/<pid>/status Uid parsing (spawn_identity._uids()) — FALSIFIED ===
+$ PYTHONPATH=runtime/scripts python3 -c 'import os, spawn_identity as si; print("_uids(" + str(os.getpid()) + ")=" + repr(si._uids(os.getpid())))'
+_uids(546337)=(1002, 1002, 1002, 1002)
+exit_code: 0
+
+=== Probe H1: Live chain() & whoami() under PR_SET_DUMPABLE=0 hidden supervisor ancestor — SURVIVES (DEMONSTRATED) ===
+$ PYTHONPATH=runtime/scripts python3 -c 'import ctypes, os, subprocess, sys; child = "import os, tempfile, spawn_identity as si" + chr(10) + "pid = os.getpid()" + chr(10) + "c = si.chain(pid, allow_hidden=True)" + chr(10) + "tp = int(c[-1].split(chr(46))[0])" + chr(10) + "print(f\"probed_pid={pid} visible_chain_len={len(c)} topmost_visible_pid={tp} hidden_parent_pid={si.stat(tp)[0]}\")" + chr(10) + "td = tempfile.TemporaryDirectory()" + chr(10) + "reg = si.Registry(td.name)" + chr(10) + "out0 = si.whoami(reg, pid)" + chr(10) + "print(f\"whoami(empty_reg, {pid}) -> OK lines={len(out0)} last={out0[-1]}\")" + chr(10) + "k = si.key(pid)" + chr(10) + "reg.write(chr(46) + \"roots\", k, \"rw pane_live\" + chr(10))" + chr(10) + "print(\"registered_live_root=\" + k)" + chr(10) + "try:" + chr(10) + "    si.chain(pid, allow_hidden=False)" + chr(10) + "except si.Unknown as e:" + chr(10) + "    print(f\"chain({pid}, allow_hidden=False) RAISED Unknown: {e}\")" + chr(10) + "try:" + chr(10) + "    si.whoami(reg, pid)" + chr(10) + "except si.Unknown as e:" + chr(10) + "    print(f\"whoami(nonempty_live_root_reg, {pid}) RAISED Unknown: {e}\")" + chr(10) + "td.cleanup()" + chr(10); assert ctypes.CDLL(None).prctl(4, 0, 0, 0, 0) == 0; print("hidden_supervisor_pid=" + str(os.getpid())); p = subprocess.run([sys.executable, "-c", child], capture_output=True, text=True); print(p.stdout.rstrip()); assert p.returncode == 0, p.stderr'
+hidden_supervisor_pid=546338
+probed_pid=546371 visible_chain_len=1 topmost_visible_pid=546371 hidden_parent_pid=546338
+whoami(empty_reg, 546371) -> OK lines=3 last=SELF 546371.359425745
+registered_live_root=546371.359425745
+chain(546371, allow_hidden=False) RAISED Unknown: ancestor 546338 of 546371 cannot be read
+whoami(nonempty_live_root_reg, 546371) RAISED Unknown: ancestor 546338 of 546371 cannot be read
+exit_code: 0

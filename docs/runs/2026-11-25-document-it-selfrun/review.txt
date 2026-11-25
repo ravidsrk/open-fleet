@@ -1,0 +1,47 @@
+# Acceptance Review — `document-it-2026-11-25-DOC-1` (Round 3 of 3)
+
+- **Unit ID:** `document-it-2026-11-25-DOC-1`
+- **Commit range:** `4ad16df406c6df3bb2d13f0037ec274802666b61..cfa3bd63f78df5f0e5e7ee66817ba466d860340b`
+- **reviewed_sha:** `cfa3bd63f78df5f0e5e7ee66817ba466d860340b`
+- **Review round:** `3 of 3`
+- **Reviewer mode:** `same-vendor-fresh` (independent build-blind `research` subagent `8f6614ba-23ba-4598-8477-08434e53c853`)
+- **Spec source (first hit):** `docs/runs/2026-11-25-document-it-selfrun/contract.json` (`DOC-1-AC1`, `DOC-1-AC2`)
+- **Verdict:** **GO**
+
+---
+
+## PART 1 — Blind expectation (written prior to reading candidate files)
+
+- `scripts/extract_product_surface.py`: stdlib-only W3-01 guarded extractor dynamically deriving CLI commands, MCP tools/resources, Action outputs, and doc-embedded `file:symbol` AST anchors (zero hand-copied lists); unconditional `sys.modules` purge + `importlib.invalidate_caches()`; resolved relative Markdown link verification `(source_path.parent / target).resolve() == doc_path.resolve()`; fail-closed exit 1 on coverage gaps and exit 2 on load/root errors.
+- `docs/cli-and-mcp.md`: 100% surface coverage + live `open_fleet/<module>.py:<symbol>` anchor table; one-hop reachable from `README.md` and `docs/README.md`.
+- Wiring in `tests/test_entrypoint_guard.py`, `scripts/check.py`, `.github/workflows/validate.yml`, `.github/workflows/product-package.yml`; executable negative controls in `tests/test_product_surface_and_wheel.py` including fresh `-I` subprocess rename-to-RED with zero `ImportError`.
+
+---
+
+## Round 2 NO-GO Findings Verification
+
+1. **[Resolved]** `_load_open_fleet` (`scripts/extract_product_surface.py:49-51`) unconditionally purges `open_fleet` / `open_fleet.*` and calls `importlib.invalidate_caches()`. `test_rename_negative_control_turns_claim_check_red` (`tests/test_product_surface_and_wheel.py:74-96`) patches `open_fleet/ui_server.py` alongside `cli.py` and `mcp_server.py` and verifies exit 1 + exact AST anchor error + zero `ImportError` via isolated `subprocess.run([sys.executable, "-I", ...])`.
+2. **[Resolved]** `_has_resolved_markdown_link` (`scripts/extract_product_surface.py:36,126-142`) resolves relative Markdown links against `source_path.parent`, backed by negative tests on both `README.md` and `docs/README.md` (`tests/test_product_surface_and_wheel.py:131-177`), empty `action.yml` outputs, missing doc/root exits (1/2), and `try/finally` module restore.
+
+---
+
+## PART 2 — Three-axis judgment (side by side, no cross-rerank)
+
+### AXIS 1 — Standards — **PASS**
+- `ruff check`, `scripts/check_trailers.py`, `floor_guard.py`, `tests.test_entrypoint_guard` + `tests.test_shard_tests` (59/59 OK), `scripts/check.py --no-suite` (3/3 PASS), and cross-module `open_fleet` tests (26/26 OK) all pass.
+- 0 Critical, 0 Required (non-blocking Optional/Nit notes: extract helpers from 124-line `check_coverage`, broaden YAML key regex, exclude `![` image links, ignore `__pycache__` in `_stage_copy`).
+
+### AXIS 2 — Spec fidelity — **PASS**
+- `DOC-1-AC1` satisfied: zero hand-copied lists; live extraction of 16 CLI commands, 19 MCP tools, 10 MCP resources, 5 Action outputs, and 18 doc-embedded AST-verified `file:symbol` anchors in `docs/cli-and-mcp.md:139-148`; reference-table scoping (`## Unified CLI Commands`), fail-closed empty/missing guards, and resolved relative Markdown links from `README.md` and `docs/README.md`.
+- `DOC-1-AC2` satisfied: all executable negative controls verified + wired in `tests/test_entrypoint_guard.py:81`, `scripts/check.py:57`, `.github/workflows/validate.yml:361-362`, and `.github/workflows/product-package.yml:27-28`. 0 Critical, 0 Required.
+
+### AXIS 3 — Test-adequacy — **PASS**
+- All primary behavioral mutants killed by `tests/test_product_surface_and_wheel.py` and `tests/test_entrypoint_guard.py` (AST anchor check, resolved link check on both hubs, CLI section scoping, MCP/Action checks, missing/empty file exits, `check.py` wiring, W3-01 guard). 0 Critical, 0 Required.
+
+---
+
+## Verdict
+
+- **Verdict:** **GO**
+- **reviewed_sha:** `cfa3bd63f78df5f0e5e7ee66817ba466d860340b`
+- **Round:** `3 of 3`

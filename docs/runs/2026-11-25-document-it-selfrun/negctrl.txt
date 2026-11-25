@@ -1,0 +1,62 @@
+### document-it self-run 2026-11-25 — DOC-1 Round 3 negative control (hand mutant)
+### target: scripts/extract_product_surface.py doc-anchor AST check (ok = symbol in syms)
+### proof command: python3 -m unittest tests.test_product_surface_and_wheel.TestProductSurfaceDocumentationAndRenameControl
+
+Pinned mutant (tool=hand): force doc-parsed AST anchor verification ok = True so renaming
+an anchored symbol in docs/cli-and-mcp.md no longer turns the claim check RED.
+
+diff --git a/scripts/extract_product_surface.py b/scripts/extract_product_surface.py
+index 0a1ed376..3fba6632 100755
+--- a/scripts/extract_product_surface.py
++++ b/scripts/extract_product_surface.py
+@@ -274,7 +274,7 @@ def check_coverage(root=ROOT):
+             anchor_results.append({"anchor": f"{rel_file}:{symbol}", "ok": False})
+             continue
+         syms = _defined_symbols(fpath)
+-        ok = symbol in syms
++        ok = True
+         anchor_results.append({"anchor": f"{rel_file}:{symbol}", "ok": ok})
+         if not ok:
+             errors.append(f"broken symbol anchor: {rel_file}:{symbol} not found in AST")
+CONTROL TRANSCRIPT
+== [1] clean head_sha (expect OK; exit 0) ==
+...
+----------------------------------------------------------------------
+Ran 3 tests in 3.479s
+
+OK
+exit 0
+
+== [2] under hand mutant (expect FAIL — mutant KILLED; exit 1) ==
+F.F
+======================================================================
+FAIL: test_bogus_anchor_dropped_entities_and_missing_files_fail_closed (tests.test_product_surface_and_wheel.TestProductSurfaceDocumentationAndRenameControl.test_bogus_anchor_dropped_entities_and_missing_files_fail_closed)
+Negative controls for bogus anchors, dropped docs, broken links, empty surfaces, and missing files.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tmp/of-doc-r3-i1TBdW/wt-doc/tests/test_product_surface_and_wheel.py", line 109, in test_bogus_anchor_dropped_entities_and_missing_files_fail_closed
+    self.assertFalse(r1["ok"])
+AssertionError: True is not false
+
+======================================================================
+FAIL: test_rename_negative_control_turns_claim_check_red (tests.test_product_surface_and_wheel.TestProductSurfaceDocumentationAndRenameControl.test_rename_negative_control_turns_claim_check_red)
+document-it negative control: renaming a doc-anchored symbol turns --check RED in a fresh process.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tmp/of-doc-r3-i1TBdW/wt-doc/tests/test_product_surface_and_wheel.py", line 80, in test_rename_negative_control_turns_claim_check_red
+    self.assertFalse(mutated["ok"], "rename control stayed GREEN instead of turning RED")
+AssertionError: True is not false : rename control stayed GREEN instead of turning RED
+
+----------------------------------------------------------------------
+Ran 3 tests in 1.137s
+
+FAILED (failures=2)
+exit 1
+
+== [3] after revert (expect OK; exit 0) ==
+...
+----------------------------------------------------------------------
+Ran 3 tests in 3.467s
+
+OK
+exit 0
