@@ -50,12 +50,27 @@ from .base import (
     parse_json_strict,
     require_id,
 )
-from ._external import release_claim_on_failure
-from ._external import call_runner, foreign_dirty_paths, insert_dispatch, load_dispatch, local_worker_list, preserve_worker_head, record_fence, run_cli_text, show_from_row
+from ._external import (
+    _ensure_ctx_task_claimed,
+    call_runner,
+    foreign_dirty_paths,
+    insert_dispatch,
+    load_dispatch,
+    local_worker_list,
+    mark_dispatch_unrecorded,
+    preserve_worker_head,
+    record_fence,
+    release_claim_on_failure,
+    run_cli_text,
+    runtime_was_reached,
+    show_from_row,
+    without_contact_marking,
+)
 from .local_state import LocalStateStore
 from .posix import (
     CANONICAL_DENY_HOOK,
     WORKER_ENV_DENYLIST,
+    prepare_hermes_home,
     strip_denied_env,
     verify_installed_guard,
     worker_env_deny_patterns,
@@ -122,7 +137,8 @@ class WorktrunkProvider(RuntimeProvider):
         self.call_log: list[Any] = []
 
     def _default_runner(self, argv: list[str], **kwargs: Any) -> str:
-        return run_cli_text(argv, self.name, timeout=int(kwargs.get("timeout", 60)), env=kwargs.get("env"))
+        run_env = kwargs.get("env") if kwargs.get("env") is not None else self.env
+        return run_cli_text(argv, self.name, timeout=int(kwargs.get("timeout", 60)), env=run_env)
 
     def _run(self, argv: list[str], **kwargs: Any) -> str:
         self.call_log.append(list(argv))
@@ -329,19 +345,27 @@ class WorktrunkProvider(RuntimeProvider):
         if profile == "danger":
             raise ProviderError("unsupported_profile", "worktrunk launches on the host; PROFILE=danger needs an isolated sandbox")
         task_prompt = self.resolve_task_prompt(task_id, prompt)
-
-        created: dict[str, Any] | None = None
+        # Validate agent/profile/harness command and worktree args before touching upstream.
+        build_harness_command(agent, profile, "/open-fleet-probe", prompt=task_prompt, environ=self.env)
         if _is_placeholder_worktree(worktree):
             branch = name or (f"wt-{task_id}" if task_id else f"wt-{uuid.uuid4().hex[:6]}")
-            created = self.worktree_create(name=branch, base=base)
-            wt_path = str(created["worktree"]["path"])
-            branch = str(created["worktree"]["branch"])
-        else:
-            found = self._find_worktree(worktree)
-            wt_path = str(found["path"])
-            branch = str(found["branch"] or "")
-            if not branch:
-                raise ProviderError("worktree_detached", f"worktree {wt_path!r} has no branch; worktrunk keys workers by branch")
+            _validate_wt_arg(str(branch), "name")
+            if base:
+                _validate_wt_arg(str(base), "base")
+        _ensure_ctx_task_claimed()
+
+        created: dict[str, Any] | None = None
+        with without_contact_marking():
+            if _is_placeholder_worktree(worktree):
+                created = self.worktree_create(name=branch, base=base)
+                wt_path = str(created["worktree"]["path"])
+                branch = str(created["worktree"]["branch"])
+            else:
+                found = self._find_worktree(worktree)
+                wt_path = str(found["path"])
+                branch = str(found["branch"] or "")
+                if not branch:
+                    raise ProviderError("worktree_detached", f"worktree {wt_path!r} has no branch; worktrunk keys workers by branch")
 
         hooks = self._hooks(wt_path, agent, profile)
         hook_script = (hooks or {}).get("deny_hook") or str(CANONICAL_DENY_HOOK)
@@ -370,6 +394,11 @@ class WorktrunkProvider(RuntimeProvider):
         eff_run = eff_run or "default"
 
         host_env = dict(os.environ if self.env is None else self.env)
+        hermes_env: dict[str, str] = {}
+        if agent == "hermes":
+            lane_dir = self.state.db_path.parent / "lanes" / dispatch_id
+            lane_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            hermes_env = prepare_hermes_home(lane_dir, wt_path, hook_script, host_env)
         deny_patterns = worker_env_deny_patterns(host_env)
         scrubbed_proc_env = strip_denied_env(host_env, deny_patterns)
         unset_keys = sorted(
@@ -381,6 +410,7 @@ class WorktrunkProvider(RuntimeProvider):
             }
         )
         identity_env: dict[str, str] = {
+            **hermes_env,
             "OPEN_FLEET_DISPATCH_ID": dispatch_id,
             "ORCA_DISPATCH_ID": dispatch_id,
             "OPEN_FLEET_RUN_ID": eff_run,
@@ -401,7 +431,8 @@ class WorktrunkProvider(RuntimeProvider):
 
         marker: Any
         try:
-            self._run(["wt", "config", "state", "marker", "set", "🤖", f"--branch={branch}"])
+            with without_contact_marking():
+                self._run(["wt", "config", "state", "marker", "set", "🤖", f"--branch={branch}"])
             marker = "🤖"
         except ProviderError as exc:  # cosmetic; never blocks the launch
             marker = {"error": exc.code}
@@ -437,9 +468,11 @@ class WorktrunkProvider(RuntimeProvider):
         launch_argv = ["tmux", "new-session", "-d", "-s", session, "-c", wt_path, scrubbed_shell]
         try:
             self._run(launch_argv, env=scrubbed_proc_env)
-        except ProviderError:
+        except BaseException:
             with self.state._connect() as conn:
                 conn.execute("DELETE FROM dispatches WHERE dispatch_id = ?", (dispatch_id,))
+            if not runtime_was_reached():
+                mark_dispatch_unrecorded()
             raise
 
         res = {

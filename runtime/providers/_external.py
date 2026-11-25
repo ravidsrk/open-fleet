@@ -11,6 +11,7 @@ Private helpers used by every non-Orca, non-POSIX adapter so they all fail the s
 """
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import functools
 import inspect
@@ -65,13 +66,20 @@ def real_worktree(path: Any) -> str | None:
     return str(p.resolve()) if p.is_dir() else None
 
 
-def run_cli(argv: list[str], *, provider: str, timeout: float = 60, cwd: str | None = None) -> dict[str, Any]:
+def run_cli(
+    argv: list[str],
+    *,
+    provider: str,
+    timeout: float = 60,
+    cwd: str | None = None,
+    env: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """Run an upstream CLI; every failure mode is a ProviderError (never a silent success)."""
     try:
         if argv and argv[0] == "git":
-            proc = _run_git(argv, cwd=cwd, env=None, timeout=timeout)
+            proc = _run_git(argv, cwd=cwd, env=env, timeout=timeout)
         else:
-            proc = subprocess.run(argv, capture_output=True, text=True, check=False, timeout=timeout, cwd=cwd)
+            proc = subprocess.run(argv, capture_output=True, text=True, check=False, timeout=timeout, cwd=cwd, env=env)
     except FileNotFoundError as exc:
         raise ProviderError(f"{provider}_cli_missing", f"{argv[0]!r} not found on PATH", {"argv": argv}) from exc
     except subprocess.TimeoutExpired as exc:
@@ -177,6 +185,9 @@ def http_json(
 # worker may exist, so a failure keeps the request's claim. A ContextVar, so concurrent calls on
 # one adapter each read their own.
 _REACHED_RUNTIME: contextvars.ContextVar[bool] = contextvars.ContextVar("reached_runtime", default=False)
+_SUPPRESS_CONTACT_MARKING: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "suppress_contact_marking", default=False
+)
 _LAUNCH_CLAIM_CTX: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
     "launch_claim_ctx", default=None
 )
@@ -243,11 +254,58 @@ def _ensure_ctx_task_claimed() -> None:
         ctx["effective_run"] = eff_run
 
 
+@contextlib.contextmanager
+def without_contact_marking():
+    """Run read-only probes or cleanable pre-launch setup without marking runtime launch contact."""
+    token = _SUPPRESS_CONTACT_MARKING.set(True)
+    try:
+        yield
+    finally:
+        _SUPPRESS_CONTACT_MARKING.reset(token)
+
+
+def mark_launch_contact() -> None:
+    """Record that the current worker_start has crossed the upstream launch boundary."""
+    _ensure_ctx_task_claimed()
+    ctx = _LAUNCH_CLAIM_CTX.get()
+    before = _REACHED_RUNTIME.get()
+    if not before and ctx is not None:
+        st = ctx.get("state")
+        req_id = ctx.get("retry_request")
+        if req_id and st is not None and hasattr(st, "mark_request_contacted"):
+            st.mark_request_contacted(
+                req_id,
+                contacted=True,
+                task_id=ctx.get("task_id") if ctx.get("claimed") else None,
+            )
+    _REACHED_RUNTIME.set(True)
+
+
+def reset_launch_contact() -> None:
+    """Clear runtime contact when a pre-launch artifact was provably cleaned up before launch."""
+    ctx = _LAUNCH_CLAIM_CTX.get()
+    _REACHED_RUNTIME.set(False)
+    if ctx is not None:
+        st = ctx.get("state")
+        req_id = ctx.get("retry_request")
+        if req_id and st is not None and hasattr(st, "mark_request_contacted"):
+            st.mark_request_contacted(req_id, contacted=False)
+
+
+def mark_dispatch_unrecorded() -> None:
+    """Mark the launch context unrecorded after rolling back a premature local dispatch row."""
+    ctx = _LAUNCH_CLAIM_CTX.get()
+    if ctx is not None:
+        ctx["recorded"] = False
+
+
 def _marking_runtime_contact(runner):
     """`runner` that claims the local task and records the runtime was reached."""
 
     @functools.wraps(runner)
     def marked(*args, **kwargs):
+        if _SUPPRESS_CONTACT_MARKING.get():
+            return runner(*args, **kwargs)
         _ensure_ctx_task_claimed()
         ctx = _LAUNCH_CLAIM_CTX.get()
         before = _REACHED_RUNTIME.get()

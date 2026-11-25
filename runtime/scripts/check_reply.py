@@ -69,14 +69,22 @@ def _positive_int(raw, flag):
 
 
 def resolve_from(explicit, env=None):
-    """--from wins; else ORCA_TERMINAL_HANDLE; a disagreement is refused."""
+    """--from wins; else OPEN_FLEET_TERMINAL_HANDLE (preferred) / ORCA_TERMINAL_HANDLE; disagreements refused."""
     env = os.environ if env is None else env
-    ambient = env.get("ORCA_TERMINAL_HANDLE", "")
+    of_ambient = env.get("OPEN_FLEET_TERMINAL_HANDLE", "")
+    orca_ambient = env.get("ORCA_TERMINAL_HANDLE", "")
+    if of_ambient and orca_ambient and of_ambient != orca_ambient:
+        raise Refused(
+            f"OPEN_FLEET_TERMINAL_HANDLE='{_visible_line(of_ambient)}' disagrees with "
+            f"ORCA_TERMINAL_HANDLE='{_visible_line(orca_ambient)}' — refusing ambiguous terminal identity"
+        )
+    ambient = of_ambient or orca_ambient
+    ambient_var = "OPEN_FLEET_TERMINAL_HANDLE" if of_ambient else "ORCA_TERMINAL_HANDLE"
     if explicit is not None:
         _nonempty(explicit, "--from")
         if ambient and explicit != ambient:
             raise Refused(f"--from '{_visible_line(explicit)}' disagrees with "
-                          f"ORCA_TERMINAL_HANDLE='{_visible_line(ambient)}' — passing another "
+                          f"{ambient_var}='{_visible_line(ambient)}' — passing another "
                           f"pane's handle would act on its mailbox")
         return explicit
     return ambient or None
@@ -154,8 +162,8 @@ def build_reply_argv(ns, env=None):
     return argv
 
 
-def run_orca(argv):
-    return orca_cli.run_json(argv, timeout=300, error=Failed, nonzero="no-receipt")
+def run_orca(argv, *, timeout=300):
+    return orca_cli.run_json(argv, timeout=timeout, error=Failed, nonzero="no-receipt")
 
 
 BODY_LIMIT = 2000
@@ -191,7 +199,11 @@ def main(argv=None, env=None):
         return exc.code
     try:
         if ns.command == "check":
-            result = run_orca(build_check_argv(ns))
+            check_argv = build_check_argv(ns)
+            if ns.wait and ns.timeout_ms is not None:
+                result = run_orca(check_argv, timeout=max(300, int(ns.timeout_ms) // 1000 + 30))
+            else:
+                result = run_orca(check_argv)
             messages = result.get("messages")
             count = result.get("count")
             if not isinstance(messages, list) or not isinstance(count, int):

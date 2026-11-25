@@ -1,0 +1,13 @@
+{
+  "seconds": 7.9,
+  "measured": "2026-11-25: one local run of tests.test_adversarial_runtime (24 tests, Python 3.12.3), x2 to the CI lane",
+  "classes": {
+    "TestEmdashMulticlaudeGastown": 0.3,
+    "TestExternalPrelaunchAndRollback": 1.0,
+    "TestPosixHardening": 3.6,
+    "TestProviderRegistryAuto": 0.1,
+    "TestSandboxDoctorHardening": 0.1,
+    "TestScriptsHardening": 2.8
+  },
+  "fixture_seconds": 0.1
+}

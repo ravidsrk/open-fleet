@@ -39,8 +39,17 @@ import json
 from pathlib import Path
 from typing import Any, Callable
 
-from ._external import release_claim_on_failure
-from ._external import ExternalDispatchMixin, env_lookup, http_json, quote_url_segment, real_worktree
+from ._external import (
+    ExternalDispatchMixin,
+    _ensure_ctx_task_claimed,
+    env_lookup,
+    http_json,
+    quote_url_segment,
+    real_worktree,
+    release_claim_on_failure,
+    reset_launch_contact,
+    without_contact_marking,
+)
 from .base import (
     ProviderError,
     RuntimeProvider,
@@ -204,26 +213,32 @@ class PaperclipProvider(ExternalDispatchMixin, RuntimeProvider):
             "adapterConfig": adapter_cfg,
         }
         q_co = quote_url_segment(co, provider="paperclip", label="company_id")
-        created = self._request("POST", f"/api/companies/{q_co}/agents", agent_body)
-        agent_id = require_id(created, "id", provider="paperclip", what="agent id")
-        read_back = self._verify_agent(agent_id, adapter_type, adapter_cfg)
+        _ensure_ctx_task_claimed()
+        with without_contact_marking():
+            created = self._request("POST", f"/api/companies/{q_co}/agents", agent_body)
+            agent_id = require_id(created, "id", provider="paperclip", what="agent id")
+            read_back = self._verify_agent(agent_id, adapter_type, adapter_cfg)
 
         try:
-            issue = self._request(
-                "POST",
-                f"/api/companies/{q_co}/issues",
-                {
-                    "title": (task_prompt.strip().splitlines()[0][:200] or task_id or "open-fleet task"),
-                    "description": task_prompt,
-                    "status": "todo",
-                    "workMode": "planning" if profile == "ro" else "standard",
-                },
-            )
-            issue_id = require_id(issue, "id", provider="paperclip", what="issue id")
-            q_issue = quote_url_segment(issue_id, provider="paperclip", label="issue_id")
+            with without_contact_marking():
+                issue = self._request(
+                    "POST",
+                    f"/api/companies/{q_co}/issues",
+                    {
+                        "title": (task_prompt.strip().splitlines()[0][:200] or task_id or "open-fleet task"),
+                        "description": task_prompt,
+                        "status": "todo",
+                        "workMode": "planning" if profile == "ro" else "standard",
+                    },
+                )
+                issue_id = require_id(issue, "id", provider="paperclip", what="issue id")
+                q_issue = quote_url_segment(issue_id, provider="paperclip", label="issue_id")
             checkout = self._request("POST", f"/api/issues/{q_issue}/checkout", {"agentId": agent_id, "expectedStatuses": ["todo"]})
         except ProviderError as exc:
-            cleanup = self._delete_agent(agent_id)
+            with without_contact_marking():
+                cleanup = self._delete_agent(agent_id)
+            if exc.data.get("status") in (409, 422) and "agentDeleted" in cleanup:
+                reset_launch_contact()
             if exc.data.get("status") == 409:
                 raise ProviderError(
                     "task_not_startable",

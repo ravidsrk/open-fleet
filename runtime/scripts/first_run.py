@@ -1232,7 +1232,7 @@ def reap_groups(sb: Sandbox, wait_s: float = 5.0, grace_s: float = 3.0) -> dict:
     Returns {"ended", "survivors", "leaders_alive"}: survivors are members still alive after
     SIGKILL, which the caller must not settle as torn down."""
     try:
-        conn = sqlite3.connect(f"file:{sb.state_db}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"{Path(sb.state_db).resolve().as_uri()}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
         try:
             rows = conn.execute("SELECT * FROM dispatches").fetchall()

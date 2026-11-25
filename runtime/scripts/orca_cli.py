@@ -5,12 +5,15 @@ Every fleet script that talks to Orca resolves the executable through this modul
 rule holds everywhere. The order is upstream's own, from `skill-stubs/_shared/cli-resolution.md`
 in stablyai/orca:
 
-  1. `OPEN_FLEET_CLI_COMMAND`, else `ORCA_CLI_COMMAND`, when set. Orca exports the latter inside
-     the sessions it manages (structured worker sessions, managed WSL sessions), and the test
-     suite points it at a stub. It must name ONE executable — a bare name or an absolute path,
-     never a command line, an option, a cwd-relative path or an invisible character — or
-     resolution refuses by name. One policy for every resolver: runtime/providers/orca.py's
-     resolve_orca_binary delegates to resolve_orca here, upstream_probe reads the same override.
+  1. `OPEN_FLEET_CLI_COMMAND`, else `ORCA_CLI_COMMAND`, when set. `OPEN_FLEET_CLI_COMMAND` is an
+     explicit operator override and wins even when a non-Orca `OPEN_FLEET_RUNTIME` is set;
+     `ORCA_CLI_COMMAND` applies on the Orca path (and under `OPEN_FLEET_RUNTIME=auto` when it
+     resolves to Orca), while an explicit non-Orca `OPEN_FLEET_RUNTIME` ignores an inherited
+     `ORCA_CLI_COMMAND` (#775) so Orca's own session export cannot hijack a non-Orca fleet. Either
+     override must name ONE executable — a bare name or an absolute path, never a command line,
+     an option, a cwd-relative path or an invisible character — or resolution refuses by name.
+     One policy for every resolver: runtime/providers/orca.py's resolve_orca_binary delegates to
+     resolve_orca here, upstream_probe reads the same override.
   2. `orca-dev` when `ORCA_DEV_REPO_ROOT` is set — a dev checkout's launcher.
   3. `orca-ide` on Linux, WSL included. Orca's Linux executable, `.deb` and `.rpm` are all
      `orca-ide` by construction (`src/main/cli/bundled-cli-launcher-path.ts`
@@ -238,17 +241,26 @@ def _inert(value) -> str:
 
 def run_json(argv, *, timeout, error, nonzero="strict"):
     """Run `<resolved cli> *argv --json`; return the envelope's result object or raise `error`."""
-    if _active_non_orca_runtime():
+    explicit_cli = (os.environ.get("OPEN_FLEET_CLI_COMMAND") or "").strip(" \t\r\n\v\f")
+    non_orca_rt = _active_non_orca_runtime()
+    if non_orca_rt and not explicit_cli:
         providers = _load_providers()
-        try:
-            options, tail = _split_output_flag(argv)
-            clean = [*options, *tail]
-            res = providers.get_provider().dispatch(clean, timeout=timeout)
-            return res if isinstance(res, dict) else {}
-        except providers.ProviderError as exc:
-            raise error(f"orca refused: {_inert(exc.code)}")
-        except Exception as exc:
-            raise error(f"could not run orca: {_inert(exc)}")
+        use_in_process = True
+        if non_orca_rt == "auto":
+            try:
+                use_in_process = providers.active_provider_name() != "orca"
+            except providers.ProviderError as exc:
+                raise error(f"orca refused: {_inert(exc.code)}")
+        if use_in_process:
+            try:
+                options, tail = _split_output_flag(argv)
+                clean = [*options, *tail]
+                res = providers.get_provider().dispatch(clean, timeout=timeout)
+                return res if isinstance(res, dict) else {}
+            except providers.ProviderError as exc:
+                raise error(f"orca refused: {_inert(exc.code)}")
+            except Exception as exc:
+                raise error(f"could not run orca: {_inert(exc)}")
     try:
         cli = resolve()
     except CliCommandError as exc:

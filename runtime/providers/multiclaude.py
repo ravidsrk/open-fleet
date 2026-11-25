@@ -195,7 +195,7 @@ class MulticlaudeProvider(ExternalDispatchMixin, RuntimeProvider):
         )
         self.repo = repo or env_lookup(self.env, "OPEN_FLEET_MULTICLAUDE_REPO", "ORCA_MULTICLAUDE_REPO")
         self._runner = runner or self._default_runner
-        self._cli = cli_runner or (lambda argv: run_cli(argv, provider="multiclaude", timeout=60))
+        self._cli = cli_runner or (lambda argv: run_cli(argv, provider="multiclaude", timeout=60, env=self.env))
         self.call_log: list[dict[str, Any]] = []
         with self.state._connect() as conn:
             conn.execute(
@@ -548,22 +548,44 @@ class MulticlaudeProvider(ExternalDispatchMixin, RuntimeProvider):
             except ProviderError as exc:
                 out["preserved"] = {"error": exc.code, "message": exc.message}
         target = self._tmux_target(repo, agent_name)
+        kill_ok = True
         try:
             self._cli(["tmux", "kill-window", "-t", target])
         except ProviderError as exc:
-            raise ProviderError(
-                "stop_failed",
-                f"multiclaude: `tmux kill-window -t {target}` failed ({exc.message}); the agent may still be "
-                "running, so it was NOT removed from daemon state or reported stopped",
-                {"agent": agent_name, "target": target, "killWindow": exc.code, **out},
-            ) from exc
-        if not self._window_gone(repo, agent_name):
+            if not any(m in str(exc.message).lower() for m in _TMUX_GONE):
+                raise ProviderError(
+                    "stop_failed",
+                    f"multiclaude: `tmux kill-window -t {target}` failed ({exc.message}); the agent may still be "
+                    "running, so it was NOT removed from daemon state or reported stopped",
+                    {"agent": agent_name, "target": target, "killWindow": exc.code, **out},
+                ) from exc
+            # Confirm on the live tmux session that the window is truly absent; if list-windows
+            # also fails (e.g. wrong tmux server/socket), fail closed as stop_failed.
+            session = target.rsplit(":", 1)[0]
+            try:
+                names = self._cli_text(["tmux", "list-windows", "-t", session, "-F", "#{window_name}"])
+            except ProviderError as list_exc:
+                raise ProviderError(
+                    "stop_failed",
+                    f"multiclaude: `tmux kill-window -t {target}` failed ({exc.message}) and session "
+                    f"{session!r} could not be queried ({list_exc.message}); the agent may still be "
+                    "running, so it was NOT removed from daemon state or reported stopped",
+                    {"agent": agent_name, "target": target, "killWindow": exc.code, **out},
+                ) from exc
+            if agent_name in [ln.strip() for ln in names.splitlines()]:
+                raise ProviderError(
+                    "stop_unconfirmed",
+                    f"multiclaude: tmux window {target} still exists after kill-window; not reporting it stopped",
+                    {"agent": agent_name, "target": target, **out},
+                )
+            kill_ok = False
+        if kill_ok and not self._window_gone(repo, agent_name):
             raise ProviderError(
                 "stop_unconfirmed",
                 f"multiclaude: tmux window {target} still exists after kill-window; not reporting it stopped",
                 {"agent": agent_name, "target": target, **out},
             )
-        out["killWindow"] = True
+        out["killWindow"] = kill_ok
         out["windowGone"] = True
         out["remove_agent"] = self._command("remove_agent", {"repo": repo, "agent": agent_name})
         return out
@@ -585,6 +607,11 @@ class MulticlaudeProvider(ExternalDispatchMixin, RuntimeProvider):
         The manifest is REQUIRED: `--sha <HEAD>` alone proves only that the worker has a HEAD.
         """
         row = self._dispatch_row(dispatch_id)
+        if self.state._own_worker_identity():
+            raise ProviderError(
+                "worker_forbidden",
+                f"launched worker cannot self-verify dispatch {dispatch_id!r}; only the coordinator may",
+            )
         wt = real_worktree(row["worktree"])
         if not wt:
             raise ProviderError("worktree_unknown", f"multiclaude: worktree of {dispatch_id!r} is gone or unknown")

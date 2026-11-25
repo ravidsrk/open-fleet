@@ -47,8 +47,8 @@ from .base import (
     require_id,
 )
 from .local_state import LocalStateStore
-from ._external import release_claim_on_failure
 from ._external import (
+    _ensure_ctx_task_claimed,
     _filter_upstream_records,
     call_runner,
     foreign_dirty_paths,
@@ -56,9 +56,11 @@ from ._external import (
     load_dispatch,
     preserve_worker_head,
     record_fence,
+    release_claim_on_failure,
     resolve_worker_list_run,
     run_cli_text,
     show_from_row,
+    without_contact_marking,
 )
 
 AGENT_WAIT_UNTIL = ("settled", "idle", "blocked", "working")
@@ -90,7 +92,8 @@ class SupersetProvider(RuntimeProvider):
         self.call_log: list[Any] = []
 
     def _default_runner(self, argv: list[str], **kwargs: Any) -> str:
-        return run_cli_text(argv, self.name, timeout=int(kwargs.get("timeout", 60)))
+        run_env = kwargs.get("env") if kwargs.get("env") is not None else self.env
+        return run_cli_text(argv, self.name, timeout=int(kwargs.get("timeout", 60)), env=run_env)
 
     def _run_json(self, argv: list[str], **kwargs: Any) -> Any:
         self.call_log.append(list(argv))
@@ -287,6 +290,7 @@ class SupersetProvider(RuntimeProvider):
                     "missing_sandbox_recipe",
                     "Superset profile='danger' requires OPEN_FLEET_SANDBOX_RECIPE or ORCA_SANDBOX_RECIPE",
                 )
+            _ensure_ctx_task_claimed()
             argv = [
                 "superset", "workspaces", "create", "--json",
                 "--environment", str(recipe), "--name", worker_title, "--branch", worker_title,
@@ -298,15 +302,21 @@ class SupersetProvider(RuntimeProvider):
             mechanism = "workspaces.create+cloud"
             upstream["workspace"] = raw
         else:
-            if _is_placeholder(worktree):
-                created = self.worktree_create(name=worker_title, base=base, repo=repo)
-                workspace_id = str(created["worktree"]["id"])
-                wt_path = str(created["worktree"]["path"])
-                upstream["workspace"] = created["upstream"]
-            else:
-                workspace_id = str(worktree)
-                # Fails closed (worktree_unresolved) when Superset cannot name the real path.
-                wt_path = self._workspace_path(workspace_id)
+            if profile not in ("ro", "rw"):
+                raise ProviderError("invalid_profile", f"unknown profile {profile!r}")
+            # Validate agent/profile/harness command before touching any upstream workspace.
+            build_harness_command(agent, profile, "/open-fleet-probe", prompt=task_prompt)
+            _ensure_ctx_task_claimed()
+            with without_contact_marking():
+                if _is_placeholder(worktree):
+                    created = self.worktree_create(name=worker_title, base=base, repo=repo)
+                    workspace_id = str(created["worktree"]["id"])
+                    wt_path = str(created["worktree"]["path"])
+                    upstream["workspace"] = created["upstream"]
+                else:
+                    workspace_id = str(worktree)
+                    # Fails closed (worktree_unresolved) when Superset cannot name the real path.
+                    wt_path = self._workspace_path(workspace_id)
             hooks = self._hooks(wt_path, agent, profile)
             if profile == "ro":
                 # Superset agent presets inject YOLO flags unconditionally; route ro via a terminal
@@ -319,7 +329,7 @@ class SupersetProvider(RuntimeProvider):
                 raw = self._run_json(argv)
                 terminal_id = require_id(raw, "terminalId", provider=self.name, what="terminal id")
                 mechanism = "terminals.create"
-            elif profile == "rw":
+            else:
                 harness = build_harness_command(agent, "rw", wt_path, prompt=task_prompt)
                 argv = [
                     "superset", "agents", "create", "--local", "--json",
@@ -328,8 +338,6 @@ class SupersetProvider(RuntimeProvider):
                 raw = self._run_json(argv)
                 terminal_id = require_id(raw, "sessionId", provider=self.name, what="agent session id")
                 mechanism = "agents.create"
-            else:
-                raise ProviderError("invalid_profile", f"unknown profile {profile!r}")
             upstream["launch"] = raw
 
         dispatch_id = f"sup_{terminal_id}" if terminal_id else f"sup_ws_{workspace_id}"

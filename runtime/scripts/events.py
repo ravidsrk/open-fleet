@@ -1365,7 +1365,12 @@ def cmd_ingest_state(args):
                                  observed_at=at, source_ref=f"local-state:dispatches/{did}",
                                  event_id=f"local-state:died:{did}@{at}", **common))
     for msg in mail:
-        match = by_id.get(msg["sender"])
+        attrs = _attrs(msg)
+        unbound = attrs.get("dispatchUnbound") is True
+        attr_did = attrs.get("dispatchId") if isinstance(attrs.get("dispatchId"), str) else None
+        match = None if unbound else (by_id.get(attr_did) if attr_did else None)
+        if match is None:
+            match = by_id.get(msg["sender"])
         handles = by_handle.get(msg["sender"], [])
         if match is None and len(handles) == 1:
             match = by_id[handles[0]["dispatch_id"]]
@@ -1373,8 +1378,7 @@ def cmd_ingest_state(args):
             skipped.append(msg["id"])
             continue
         row, row_head = match
-        attrs = _attrs(msg)
-        if attrs.get("dispatchUnbound") is True:
+        if unbound:
             earlier.append(msg["id"])
             continue
         named = next((attrs[k] for k in ("task-id", "task_id", "taskId")

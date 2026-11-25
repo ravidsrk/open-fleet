@@ -1136,7 +1136,12 @@ def run_git(args: list[str], *, cwd: str | Path | None = None, env: dict[str, st
         with _custody_git_dir(str(facts["common"]), str(facts["format"]), None, None, attributes=attrs) as gd:
             proc = _direct(["--git-dir", gd, "merge-tree", *opts, *shas], None, base, timeout)
         return subprocess.CompletedProcess(args, proc.returncode, proc.stdout, proc.stderr)
-    named = next((lead[i + 1] for i, tok in enumerate(lead[:-1]) if tok == "--work-tree"), None)
+    named = None
+    for i, tok in enumerate(lead):
+        if tok == "--work-tree" and i + 1 < len(lead):
+            named = lead[i + 1]
+        elif tok.startswith("--work-tree="):
+            named = tok.split("=", 1)[1]
     named = os.path.join(git_location(lead, cwd)[0], named) if named else git_location(lead, cwd)[0]
     if not facts["top"] or os.path.realpath(str(facts["top"])) != os.path.realpath(named):
         # The work tree the call names, never one config (`core.worktree`) redirects it to.
@@ -1408,9 +1413,10 @@ class PosixWorktreeProvider(RuntimeProvider):
         ).lower()
         if req in ("tmux", "cmux", "setsid", "dry-run"):
             return req
-        if self.env.get("CMUX_SOCKET_PATH") and shutil.which("cmux"):
+        path_env = self.env.get("PATH")
+        if self.env.get("CMUX_SOCKET_PATH") and shutil.which("cmux", path=path_env):
             return "cmux"
-        if shutil.which("tmux"):
+        if shutil.which("tmux", path=path_env):
             return "tmux"
         return "setsid"
 
@@ -1620,6 +1626,11 @@ class PosixWorktreeProvider(RuntimeProvider):
                     "cross_run_access",
                     f"launched worker in run {worker_run!r} cannot remove worktree {wt_path!r} outside its run",
                 )
+        if self.state._own_worker_identity():
+            raise ProviderError(
+                "worker_forbidden",
+                f"launched worker cannot remove worktree {wt_path!r}; only the coordinator may",
+            )
         repo_root = self.repo_root.resolve()
         common = _line(_git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=repo_root).stdout)
         protected = {repo_root, Path.home().resolve(), Path("/").resolve()}
@@ -1881,6 +1892,8 @@ if {repr(self.backend)} == "cmux":
                 ["tmux", "display-message", "-p", "-t", sess_name, "#{pane_pid}"],
                 capture_output=True,
                 text=True,
+                env=self.env,
+                timeout=15,
             )
             pane_pid = int(pane.stdout.strip()) if pane.returncode == 0 and pane.stdout.strip().isdigit() else 0
             return {"pid": pane_pid, "backend": "tmux", "session": sess_name, "backendRef": sess_name}
@@ -3000,7 +3013,9 @@ if {repr(self.backend)} == "cmux":
             ref = d["backend_ref"] or f"openfleet-{d['terminal_handle']}"
             out["backendRef"] = ref
             try:
-                out["alive"] = subprocess.run(["tmux", "has-session", "-t", ref], capture_output=True, timeout=15).returncode == 0
+                out["alive"] = subprocess.run(
+                    ["tmux", "has-session", "-t", ref], capture_output=True, env=self.env, timeout=15
+                ).returncode == 0
             except (OSError, subprocess.SubprocessError):
                 out["alive"] = None  # no tmux to ask: cannot tell
         elif pid > 0:
@@ -3167,6 +3182,11 @@ if {repr(self.backend)} == "cmux":
         head = (salvage or {}).get("head") or ""
         if not head and r["worktree"]:
             head = _git(["rev-parse", "HEAD"], cwd=r["worktree"]).stdout.strip()
+        with self.state._connect() as conn:
+            conn.execute(
+                "UPDATE terminals SET state = 'exited' WHERE handle = ? AND state = 'running'",
+                (r["terminal_handle"],),
+            )
         died = self.state.ensure_terminal_or_died(
             dispatch_id=r["dispatch_id"],
             worker_handle=r["terminal_handle"],
@@ -3197,8 +3217,14 @@ if {repr(self.backend)} == "cmux":
         """
         report: dict[str, Any] = {"backend": backend}
         if container:
-            proc = subprocess.run(["docker", "rm", "-f", container], capture_output=True, text=True, env=self.env)
-            report["container"] = {"name": container, "rc": proc.returncode}
+            try:
+                proc = subprocess.run(
+                    ["docker", "rm", "-f", container], capture_output=True, text=True, env=self.env, timeout=30
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                report["container"] = {"name": container, "rc": None, "error": str(exc)[:200]}
+            else:
+                report["container"] = {"name": container, "rc": proc.returncode}
             if lane_dir:
                 exit_file = Path(lane_dir) / "exit.json"
                 try:
@@ -3233,19 +3259,29 @@ if {repr(self.backend)} == "cmux":
             except OSError:
                 report["pidGroup"] = "absent"
         if backend == "tmux" and handle:
-            proc = subprocess.run(
-                ["tmux", "kill-session", "-t", backend_ref or f"openfleet-{handle}"],
-                capture_output=True,
-                text=True,
-            )
-            report["tmux"] = proc.returncode
+            try:
+                proc = subprocess.run(
+                    ["tmux", "kill-session", "-t", backend_ref or f"openfleet-{handle}"],
+                    capture_output=True,
+                    text=True,
+                    env=self.env,
+                    timeout=30,
+                )
+                report["tmux"] = proc.returncode
+            except (OSError, subprocess.SubprocessError) as exc:
+                report["tmux"] = {"rc": None, "error": str(exc)[:200]}
         elif backend == "cmux" and (backend_ref or handle):
-            proc = subprocess.run(
-                ["cmux", "close-workspace", "--workspace", backend_ref or str(handle)],
-                capture_output=True,
-                text=True,
-            )
-            report["cmux"] = proc.returncode
+            try:
+                proc = subprocess.run(
+                    ["cmux", "close-workspace", "--workspace", backend_ref or str(handle)],
+                    capture_output=True,
+                    text=True,
+                    env=self.env,
+                    timeout=30,
+                )
+                report["cmux"] = proc.returncode
+            except (OSError, subprocess.SubprocessError) as exc:
+                report["cmux"] = {"rc": None, "error": str(exc)[:200]}
         return report
 
     def _backend_alive(self, row: Any) -> bool | None:
@@ -3259,8 +3295,14 @@ if {repr(self.backend)} == "cmux":
         if pid <= 0 and not row["backend_ref"]:
             return None  # inserted before spawn and not launched yet: starting, not dead
         if backend == "tmux":
-            ref = row["backend_ref"] or f"openfleet-{row['terminal_handle']}"
-            return subprocess.run(["tmux", "has-session", "-t", ref], capture_output=True).returncode == 0
+            term_handle = _col(row, "terminal_handle") or _col(row, "handle") or ""
+            ref = row["backend_ref"] or f"openfleet-{term_handle}"
+            try:
+                return subprocess.run(
+                    ["tmux", "has-session", "-t", ref], capture_output=True, env=self.env, timeout=15
+                ).returncode == 0
+            except (OSError, subprocess.SubprocessError):
+                return None
         if pid > 0:
             lane = Path(_col(row, "lane_dir")) if _col(row, "lane_dir") else None
             if lane is not None and (lane / "run_worker.py").is_file():
@@ -3414,6 +3456,13 @@ if {repr(self.backend)} == "cmux":
         row_run = str(rows[0]["run_id"] or "default")
         if bound and row_run != bound:
             raise ProviderError("cross_run_access", f"dispatch {dispatch_id!r} belongs to run {row_run!r}, not {bound!r}")
+        if self.state._own_worker_identity():
+            own_ids = set(self.state._bound_worker_identities())
+            if dispatch_id not in own_ids:
+                raise ProviderError(
+                    "worker_forbidden",
+                    f"launched worker cannot inspect peer dispatch {dispatch_id!r}; only the coordinator may",
+                )
         self._sweep_liveness(rows)
         r = self._dispatch_rows("WHERE dispatch_id = ?", (dispatch_id,))[0]
         return normalize_show(
@@ -3454,6 +3503,13 @@ if {repr(self.backend)} == "cmux":
         row_run = str(r["run_id"] or "default")
         if bound and row_run != bound:
             raise ProviderError("cross_run_access", f"dispatch {dispatch_id!r} belongs to run {row_run!r}, not {bound!r}")
+        if self.state._own_worker_identity():
+            own_ids = set(self.state._bound_worker_identities())
+            if dispatch_id not in own_ids:
+                raise ProviderError(
+                    "worker_forbidden",
+                    f"launched worker cannot read peer dispatch {dispatch_id!r}; only the coordinator may",
+                )
         log_file = Path(r["lane_dir"]) / "events.jsonl" if r["lane_dir"] else None
         all_lines: list[str] = []
         if log_file and log_file.is_file():
@@ -3756,6 +3812,13 @@ if {repr(self.backend)} == "cmux":
                 "cross_run_access",
                 f"launched worker in run {bound!r} cannot access unregistered terminal {terminal!r}",
             )
+        if self.state._own_worker_identity():
+            own_ids = set(self.state._bound_worker_identities())
+            if terminal not in own_ids:
+                raise ProviderError(
+                    "worker_forbidden",
+                    f"launched worker cannot access peer terminal {terminal!r}; only the coordinator may",
+                )
         if not r:
             raise ProviderError("terminal_not_found", f"terminal {terminal!r} not found")
         return r
@@ -3766,10 +3829,24 @@ if {repr(self.backend)} == "cmux":
             return None
         if backend == "tmux":
             ref = r["backend_ref"] or f"openfleet-{r['handle']}"
-            proc = subprocess.run(["tmux", "capture-pane", "-p", "-t", ref], capture_output=True, text=True)
+            try:
+                proc = subprocess.run(
+                    ["tmux", "capture-pane", "-p", "-t", ref], capture_output=True, text=True, env=self.env, timeout=15
+                )
+            except (OSError, subprocess.SubprocessError):
+                return None
             return proc.stdout if proc.returncode == 0 else None
         if backend == "cmux" and r["backend_ref"]:
-            proc = subprocess.run(["cmux", "read-screen", "--workspace", r["backend_ref"]], capture_output=True, text=True)
+            try:
+                proc = subprocess.run(
+                    ["cmux", "read-screen", "--workspace", r["backend_ref"]],
+                    capture_output=True,
+                    text=True,
+                    env=self.env,
+                    timeout=15,
+                )
+            except (OSError, subprocess.SubprocessError):
+                return None
             return proc.stdout if proc.returncode == 0 else None
         return None
 
@@ -3791,6 +3868,20 @@ if {repr(self.backend)} == "cmux":
             r = self._terminal_row(terminal)
             alive = r["state"] == "running"
             if normalized == "exit":
+                if alive:
+                    d_rows = self._dispatch_rows("WHERE terminal_handle = ?", (terminal,))
+                    if d_rows:
+                        self._sweep_liveness(d_rows)
+                        r = self._terminal_row(terminal)
+                        alive = r["state"] == "running"
+                    elif int(r["pid"] or 0) > 0 and self._backend_alive(r) is False:
+                        with self.state._connect() as conn:
+                            conn.execute(
+                                "UPDATE terminals SET state = 'exited' WHERE handle = ? AND state = 'running'",
+                                (terminal,),
+                            )
+                        r = self._terminal_row(terminal)
+                        alive = r["state"] == "running"
                 if not alive:
                     return {"wait": {"satisfied": True, "condition": condition, "terminal": terminal}}
             else:
@@ -3967,9 +4058,11 @@ if {repr(self.backend)} == "cmux":
             )
         elif backend == "tmux":
             ref = term_row["backend_ref"] or f"openfleet-{handle}"
-            proc = subprocess.run(tmux_send_keys_argv(ref, text), capture_output=True, text=True)
+            proc = subprocess.run(tmux_send_keys_argv(ref, text), capture_output=True, text=True, env=self.env, timeout=15)
             if proc.returncode == 0 and enter:
-                proc = subprocess.run(["tmux", "send-keys", "-t", ref, "Enter"], capture_output=True, text=True)
+                proc = subprocess.run(
+                    ["tmux", "send-keys", "-t", ref, "Enter"], capture_output=True, text=True, env=self.env, timeout=15
+                )
             if proc.returncode != 0:
                 raise ProviderError("terminal_send_failed", (proc.stderr or "tmux send-keys failed").strip())
         elif backend == "cmux":
@@ -3983,6 +4076,8 @@ if {repr(self.backend)} == "cmux":
                 ["cmux", "send", "--workspace", term_row["backend_ref"], *end_opts, payload],
                 capture_output=True,
                 text=True,
+                env=self.env,
+                timeout=15,
             )
             if proc.returncode != 0:
                 raise ProviderError("terminal_send_failed", (proc.stderr or "cmux send failed").strip())
@@ -4047,9 +4142,21 @@ if {repr(self.backend)} == "cmux":
         to_handle: str,
         run: str | None = None,
         sender: str | None = None,
+        retry_request: str | None = None,
     ) -> dict[str, Any]:
         worker_run = self.state._worker_bound_run()
         eff_run = self.state._resolve_caller_run(run, default_run=None)
+        payload_sha = _launch_payload_sha256(
+            {
+                "task_id": task_id,
+                "to_handle": to_handle,
+                "run": eff_run if worker_run else run,
+                "sender": sender,
+            }
+        )
+        cached = self.state.get_or_record_request(retry_request, "dispatch", payload_sha)
+        if cached:
+            return cached
         parent_prof = most_restrictive_profile(
             env_get("OPEN_FLEET_PARENT_PROFILE", "ORCA_PARENT_PROFILE", self.env, ""),
             env_get("OPEN_FLEET_SANDBOX_PROFILE", "ORCA_SANDBOX_PROFILE", self.env, ""),
@@ -4057,90 +4164,95 @@ if {repr(self.backend)} == "cmux":
         req_id = f"req_{uuid.uuid4().hex[:10]}"
         dispatch_id = f"disp_{uuid.uuid4().hex[:10]}"
         now = time.time()
-        with self.state._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            t_row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
-            if not t_row:
-                conn.execute("ROLLBACK")
-                raise ProviderError("task_not_found", f"task {task_id!r} not found")
-            if eff_run is not None and t_row["run_id"] != eff_run:
-                conn.execute("ROLLBACK")
-                raise ProviderError(
-                    "cross_run_access",
-                    f"task {task_id!r} belongs to run {t_row['run_id']!r}, not {eff_run!r}",
-                )
-            effective_run = t_row["run_id"] or "default"
-            term_row = conn.execute("SELECT * FROM terminals WHERE handle = ?", (to_handle,)).fetchone()
-            if not term_row:
-                conn.execute("ROLLBACK")
-                raise ProviderError("inject_rejected", f"terminal {to_handle!r} not found")
-            bound_disp = conn.execute(
-                "SELECT run_id FROM dispatches WHERE terminal_handle = ? AND run_id != ? LIMIT 1",
-                (to_handle, effective_run),
-            ).fetchone()
-            if bound_disp:
-                conn.execute("ROLLBACK")
-                raise ProviderError(
-                    "cross_run_access",
-                    f"terminal {to_handle!r} is bound to run {bound_disp['run_id']!r}, not {effective_run!r}",
-                )
-            if worker_run:
-                owned_disp = conn.execute(
-                    "SELECT 1 FROM dispatches WHERE terminal_handle = ? AND run_id = ? LIMIT 1",
-                    (to_handle, effective_run),
-                ).fetchone()
-                if owned_disp is None:
+        try:
+            with self.state._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                t_row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+                if not t_row:
+                    conn.execute("ROLLBACK")
+                    raise ProviderError("task_not_found", f"task {task_id!r} not found")
+                if eff_run is not None and t_row["run_id"] != eff_run:
                     conn.execute("ROLLBACK")
                     raise ProviderError(
                         "cross_run_access",
-                        f"launched worker in run {worker_run!r} cannot inject into unregistered terminal {to_handle!r}",
+                        f"task {task_id!r} belongs to run {t_row['run_id']!r}, not {eff_run!r}",
                     )
-            if self.state._own_worker_identity():
-                conn.execute("ROLLBACK")
-                raise ProviderError(
-                    "worker_forbidden",
-                    f"launched worker cannot inject tasks into terminal {to_handle!r}; only the coordinator may",
+                effective_run = t_row["run_id"] or "default"
+                term_row = conn.execute("SELECT * FROM terminals WHERE handle = ?", (to_handle,)).fetchone()
+                if not term_row:
+                    conn.execute("ROLLBACK")
+                    raise ProviderError("inject_rejected", f"terminal {to_handle!r} not found")
+                bound_disp = conn.execute(
+                    "SELECT run_id FROM dispatches WHERE terminal_handle = ? AND run_id != ? LIMIT 1",
+                    (to_handle, effective_run),
+                ).fetchone()
+                if bound_disp:
+                    conn.execute("ROLLBACK")
+                    raise ProviderError(
+                        "cross_run_access",
+                        f"terminal {to_handle!r} is bound to run {bound_disp['run_id']!r}, not {effective_run!r}",
+                    )
+                if worker_run:
+                    owned_disp = conn.execute(
+                        "SELECT 1 FROM dispatches WHERE terminal_handle = ? AND run_id = ? LIMIT 1",
+                        (to_handle, effective_run),
+                    ).fetchone()
+                    if owned_disp is None:
+                        conn.execute("ROLLBACK")
+                        raise ProviderError(
+                            "cross_run_access",
+                            f"launched worker in run {worker_run!r} cannot inject into unregistered terminal {to_handle!r}",
+                        )
+                if self.state._own_worker_identity():
+                    conn.execute("ROLLBACK")
+                    raise ProviderError(
+                        "worker_forbidden",
+                        f"launched worker cannot inject tasks into terminal {to_handle!r}; only the coordinator may",
+                    )
+                prior_disp = conn.execute(
+                    "SELECT profile FROM dispatches WHERE terminal_handle = ? ORDER BY created_at DESC LIMIT 1",
+                    (to_handle,),
+                ).fetchone()
+                target_profile = str(prior_disp["profile"]) if (prior_disp and prior_disp["profile"]) else "rw"
+                try:
+                    check_monotonic_profile(parent_prof, target_profile)
+                except ProviderError:
+                    conn.execute("ROLLBACK")
+                    raise
+                cur = conn.execute(
+                    "UPDATE tasks SET status = 'dispatched', updated_at = ? WHERE id = ? AND status = 'ready'",
+                    (now, task_id),
                 )
-            prior_disp = conn.execute(
-                "SELECT profile FROM dispatches WHERE terminal_handle = ? ORDER BY created_at DESC LIMIT 1",
-                (to_handle,),
-            ).fetchone()
-            target_profile = str(prior_disp["profile"]) if (prior_disp and prior_disp["profile"]) else "rw"
-            try:
-                check_monotonic_profile(parent_prof, target_profile)
-            except ProviderError:
-                conn.execute("ROLLBACK")
-                raise
-            cur = conn.execute(
-                "UPDATE tasks SET status = 'dispatched', updated_at = ? WHERE id = ? AND status = 'ready'",
-                (now, task_id),
-            )
-            if cur.rowcount != 1:
-                conn.execute("ROLLBACK")
-                raise ProviderError("task_not_startable", f"task {task_id!r} has status {t_row['status']!r} (must be 'ready')")
-            # Injected work is a real dispatch: it shows in worker-list and its crash is linkable.
-            conn.execute(
-                """
-                INSERT INTO dispatches(dispatch_id, task_id, run_id, worktree, agent, profile, terminal_handle, state, terminal_state, pid, backend, backend_ref, launch_effective, lane_dir, created_at, updated_at)
-                VALUES (?, ?, ?, ?, 'custom', ?, ?, 'ready', 'active', ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    dispatch_id,
-                    task_id,
-                    effective_run,
-                    term_row["worktree"] or "",
-                    target_profile,
-                    to_handle,
-                    int(term_row["pid"] or 0),
-                    term_row["backend"] or self.backend,
-                    term_row["backend_ref"] or "",
-                    json.dumps({"agent": "custom", "command": term_row["command"] or "", "inject": True}),
-                    str(Path(term_row["log_path"]).parent) if term_row["log_path"] else "",
-                    now,
-                    now,
-                ),
-            )
-            conn.execute("COMMIT")
+                if cur.rowcount != 1:
+                    conn.execute("ROLLBACK")
+                    raise ProviderError("task_not_startable", f"task {task_id!r} has status {t_row['status']!r} (must be 'ready')")
+                # Injected work is a real dispatch: it shows in worker-list and its crash is linkable.
+                conn.execute(
+                    """
+                    INSERT INTO dispatches(dispatch_id, task_id, run_id, worktree, agent, profile, terminal_handle, state, terminal_state, pid, backend, backend_ref, launch_effective, lane_dir, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, 'custom', ?, ?, 'ready', 'active', ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        dispatch_id,
+                        task_id,
+                        effective_run,
+                        term_row["worktree"] or "",
+                        target_profile,
+                        to_handle,
+                        int(term_row["pid"] or 0),
+                        term_row["backend"] or self.backend,
+                        term_row["backend_ref"] or "",
+                        json.dumps({"agent": "custom", "command": term_row["command"] or "", "inject": True}),
+                        str(Path(term_row["log_path"]).parent) if term_row["log_path"] else "",
+                        now,
+                        now,
+                    ),
+                )
+                conn.execute("COMMIT")
+        except BaseException:
+            if retry_request:
+                self.state.release_request(retry_request)
+            raise
         injected_line = json.dumps({"type": "injected_prompt", "taskId": task_id, "spec": t_row["spec"]})
         try:
             self._deliver_terminal_input(term_row, injected_line, enter=True)
@@ -4154,8 +4266,10 @@ if {repr(self.backend)} == "cmux":
                 )
                 conn.execute("DELETE FROM dispatches WHERE dispatch_id = ?", (dispatch_id,))
                 conn.execute("COMMIT")
+            if retry_request:
+                self.state.release_request(retry_request)
             raise
-        return {
+        res = {
             "injected": True,
             "dispatchId": dispatch_id,
             "prompt": {
@@ -4163,6 +4277,8 @@ if {repr(self.backend)} == "cmux":
                 "stages": ["input_accepted"],
             },
         }
+        self.state.save_request(retry_request, "dispatch", "completed", res, payload_sha)
+        return res
 
 
 def _parse_cmux_workspace_ref(out: str) -> str:

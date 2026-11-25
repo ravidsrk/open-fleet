@@ -36,6 +36,7 @@ from .base import (
     check_monotonic_profile,
     env_get,
     fence_state,
+    most_restrictive_profile,
     normalize_read,
     parse_json_strict,
     require_id,
@@ -58,6 +59,7 @@ from ._external import (
     run_cli_text,
     runtime_was_reached,
     show_from_row,
+    without_contact_marking,
 )
 
 PROFILE_MODES = {
@@ -91,7 +93,7 @@ class T3CodeProvider(RuntimeProvider):
         self.state = state or LocalStateStore(db_path=db_path, env=self.env)
         self._runner = runner or self._default_runner
         self._install_hooks = install_hooks
-        self._git = git_runner or (lambda argv: run_cli_text(argv, self.name))
+        self._git = git_runner or (lambda argv: run_cli_text(argv, self.name, env=self.env))
         self.project_id = project_id or env_get("OPEN_FLEET_T3_PROJECT_ID", "ORCA_T3_PROJECT_ID", self.env, "")
         self.worktree_root = env_get(
             "OPEN_FLEET_T3_WORKTREE_ROOT", "ORCA_T3_WORKTREE_ROOT", self.env,
@@ -108,7 +110,7 @@ class T3CodeProvider(RuntimeProvider):
                 "t3code_not_configured",
                 "t3 acp-mcp-call needs T3_ACP_MCP_ENDPOINT and T3_ACP_MCP_AUTHORIZATION in the environment",
             )
-        child_env = dict(os.environ)
+        child_env = dict(os.environ if self.env is None else self.env)
         child_env.update({"T3_ACP_MCP_ENDPOINT": endpoint, "T3_ACP_MCP_AUTHORIZATION": auth})
         return run_cli_text(call["argv"], self.name, timeout=int(kwargs.get("timeout", 120)), env=child_env)
 
@@ -215,6 +217,10 @@ class T3CodeProvider(RuntimeProvider):
         if not self.project_id:
             raise ProviderError("missing_project", "t3_thread_launch from outside T3 needs OPEN_FLEET_T3_PROJECT_ID")
         task_prompt = self.resolve_task_prompt(task_id, prompt)
+        if not _is_placeholder(worktree):
+            wt_abs = os.path.abspath(worktree)
+            if not os.path.isdir(wt_abs):
+                raise ProviderError("worktree_unknown", f"t3code: worktree {worktree!r} does not exist")
         _ensure_ctx_task_claimed()
         runtime_mode, interaction_mode = PROFILE_MODES[profile]
         title = name or (f"t3-{task_id}" if task_id else f"t3-worker-{uuid.uuid4().hex[:6]}")
@@ -224,16 +230,14 @@ class T3CodeProvider(RuntimeProvider):
         strategy: dict[str, Any]
         if _is_placeholder(worktree) and profile == "rw":
             # `worktree` strategy would start a full-access agent before any hook could exist.
-            cut = self._cut_worktree(ref_safe(title), base)
+            with without_contact_marking():
+                cut = self._cut_worktree(ref_safe(title), base)
             strategy = {"type": "existing_worktree", "worktreePath": cut["path"]}
             hooks = self._hooks(cut["path"], agent, profile)  # before the agent starts
         elif _is_placeholder(worktree):
             # ro: the thread itself is approval-required + plan; T3 cuts the worktree.
             strategy = {"type": "worktree", "baseRef": base or "HEAD", "branch": title, "startFromOrigin": False}
         else:
-            wt_abs = os.path.abspath(worktree)
-            if not os.path.isdir(wt_abs):
-                raise ProviderError("worktree_unknown", f"t3code: worktree {worktree!r} does not exist")
             strategy = {"type": "existing_worktree", "worktreePath": wt_abs}
             hooks = self._hooks(wt_abs, agent, profile)  # before the agent starts
 
@@ -380,6 +384,17 @@ class T3CodeProvider(RuntimeProvider):
                     "cross_run_access",
                     f"thread {thread_id!r} is bound to run {bound['run_id']!r}, not {target_run!r}",
                 )
+            if self.state._own_worker_identity():
+                raise ProviderError(
+                    "worker_forbidden",
+                    f"launched worker cannot inject tasks into t3code thread {thread_id!r}; only the coordinator may",
+                )
+            parent_prof = most_restrictive_profile(
+                env_get("OPEN_FLEET_PARENT_PROFILE", "ORCA_PARENT_PROFILE", self.env, ""),
+                env_get("OPEN_FLEET_SANDBOX_PROFILE", "ORCA_SANDBOX_PROFILE", self.env, ""),
+            )
+            target_profile = str(orig["profile"]) if (orig and orig["profile"]) else "rw"
+            check_monotonic_profile(parent_prof, target_profile)
         except BaseException:
             if claimed:
                 release_local_task(self.state, task_id)
@@ -411,7 +426,7 @@ class T3CodeProvider(RuntimeProvider):
                     run=target_run,
                     worktree=str(orig["worktree"] or "") if orig else "",
                     agent=str(orig["agent"] or "claude") if orig else "claude",
-                    profile=str(orig["profile"] or "ro") if orig else "ro",
+                    profile=target_profile,
                     handle=f"t3:{thread_id}",
                     backend=self.name,
                     effective={"threadId": thread_id, "mechanism": "mcp.t3_thread_send", "inject": True},

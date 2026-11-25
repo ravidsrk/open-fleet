@@ -48,9 +48,20 @@ from .base import (
     require_id,
 )
 from .local_state import LocalStateStore
-from ._external import release_claim_on_failure
-from ._external import insert_dispatch, load_dispatch, local_worker_list, record_fence, resolve_worker_list_run, show_from_row
-from ._external import credentialed_request, origin, quote_url_segment
+from ._external import (
+    _ensure_ctx_task_claimed,
+    credentialed_request,
+    insert_dispatch,
+    load_dispatch,
+    local_worker_list,
+    origin,
+    quote_url_segment,
+    record_fence,
+    release_claim_on_failure,
+    resolve_worker_list_run,
+    show_from_row,
+    without_contact_marking,
+)
 
 RO_ALLOWED_TOOLS = ["glob", "grep", "planning_file_editor"]
 RO_DISABLED_TOOLS = ["terminal", "file_editor", "apply_patch", "task_tracker", "browser_tool_set"]
@@ -352,20 +363,13 @@ class OpenHandsProvider(RuntimeProvider):
                     "unsupported_workspace_type",
                     "the agent-server API has no apptainer conversation runtime (ApptainerWorkspace is a client-side SDK class)",
                 )
-            info = self._request("GET", "/server_info")
-            server_runtime = str(info.get("conversation_runtime") or "local")
-            if server_runtime != "docker":
-                raise ProviderError(
-                    "sandbox_unavailable",
-                    f"OpenHands server runs conversation_runtime={server_runtime!r}; PROFILE=danger needs 'docker'",
-                    {"server_info": {"conversation_runtime": server_runtime}},
-                )
             tools = list(RW_TOOLS)
             disabled_tools = []
             profile_flag = PROFILE_FLAGS["danger"]
         else:
             raise ProviderError("invalid_profile", f"unknown profile {profile!r}")
 
+        llm_cfg = self._llm()
         worktree = _selector_path(worktree)
         if _is_placeholder(worktree):
             # Let the server cut a dedicated git worktree from the repo root.
@@ -387,10 +391,22 @@ class OpenHandsProvider(RuntimeProvider):
             # A named worktree: prove the guard before the conversation even exists (W4-06).
             verify_conversation_guard(hook_config, profile, working_dir)
 
+        _ensure_ctx_task_claimed()
+        if profile == "danger":
+            with without_contact_marking():
+                info = self._request("GET", "/server_info")
+            server_runtime = str(info.get("conversation_runtime") or "local")
+            if server_runtime != "docker":
+                raise ProviderError(
+                    "sandbox_unavailable",
+                    f"OpenHands server runs conversation_runtime={server_runtime!r}; PROFILE=danger needs 'docker'",
+                    {"server_info": {"conversation_runtime": server_runtime}},
+                )
+
         conv_payload: dict[str, Any] = {
             "agent": {
                 "kind": "Agent",
-                "llm": self._llm(),
+                "llm": llm_cfg,
                 "tools": [{"name": t, "params": {}} for t in tools],
             },
             "workspace": {"working_dir": working_dir},
@@ -402,7 +418,8 @@ class OpenHandsProvider(RuntimeProvider):
         }
         if hook_config is not None:
             conv_payload["hook_config"] = hook_config
-        created = self._request("POST", "/api/conversations", conv_payload)
+        with without_contact_marking():
+            created = self._request("POST", "/api/conversations", conv_payload)
         conv_id = require_id(created, "id", provider=self.name, what="conversation id")
         actual_dir = (created.get("workspace") or {}).get("working_dir") if isinstance(created.get("workspace"), dict) else None
         if hook_config is not None and use_worktree:

@@ -89,7 +89,8 @@ def default_db_path(env: dict[str, str] | None = None) -> Path:
     # Per-repository default (#579): `~/.open-fleet/state/<repo-id>/runtime.db`, keyed on the git
     # common dir so a coordinator and the workers in its linked worktrees share ONE store while
     # unrelated repositories never share a DB.
-    start = (env or os.environ).get("OPEN_FLEET_REPO_ROOT") or env_get("OPEN_FLEET_CLI_CWD", "ORCA_CLI_CWD", env, "")
+    source = os.environ if env is None else env
+    start = source.get("OPEN_FLEET_REPO_ROOT") or env_get("OPEN_FLEET_CLI_CWD", "ORCA_CLI_CWD", env, "")
     return Path.home() / ".open-fleet" / "state" / _repo_state_id(start or None, env) / "runtime.db"
 
 
@@ -200,12 +201,30 @@ class LocalStateStore:
         return conn
 
     def _init_db(self) -> None:
-        # Schema and migration in ONE `BEGIN IMMEDIATE` transaction: concurrent openers take
-        # turns, each re-reads the columns under the lock, and an upgrade that fails leaves the
-        # store as it found it. Not executescript, which COMMITs first and runs each statement
-        # in autocommit, letting another opener interleave and a failure half-upgrade the store.
+        # Check PRAGMA user_version before opening a write transaction or running DDL/migrations:
+        # an already-current store skips the write tx altogether, and a store stamped higher by a
+        # newer open-fleet is refused before touching anything.
         with self._connect() as conn:
+            stamped = int(conn.execute("PRAGMA user_version").fetchone()[0])
+            if stamped > SCHEMA_VERSION:
+                raise ProviderError(
+                    "state_schema_newer",
+                    f"{self.db_path} carries schema version {stamped}, newer than this open-fleet's "
+                    f"{SCHEMA_VERSION}: refusing to read it with an older layout (upgrade open-fleet)",
+                )
+            if stamped == SCHEMA_VERSION:
+                return
             conn.execute("BEGIN IMMEDIATE")
+            stamped = int(conn.execute("PRAGMA user_version").fetchone()[0])
+            if stamped > SCHEMA_VERSION:
+                raise ProviderError(
+                    "state_schema_newer",
+                    f"{self.db_path} carries schema version {stamped}, newer than this open-fleet's "
+                    f"{SCHEMA_VERSION}: refusing to read it with an older layout (upgrade open-fleet)",
+                )
+            if stamped == SCHEMA_VERSION:
+                conn.execute("COMMIT")
+                return
             for statement in _statements(
                 """
                 CREATE TABLE IF NOT EXISTS runs (
@@ -347,14 +366,8 @@ class LocalStateStore:
             ):
                 conn.execute(statement)
             self._migrate(conn)
-            stamped = int(conn.execute("PRAGMA user_version").fetchone()[0])
-            if stamped > SCHEMA_VERSION:
-                raise ProviderError(
-                    "state_schema_newer",
-                    f"{self.db_path} carries schema version {stamped}, newer than this open-fleet's "
-                    f"{SCHEMA_VERSION}: refusing to read it with an older layout (upgrade open-fleet)",
-                )
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            conn.execute("COMMIT")
 
     @staticmethod
     def _migrate(conn: sqlite3.Connection) -> None:
@@ -1935,10 +1948,28 @@ class LocalStateStore:
         if not question:
             raise ProviderError("invalid_argument", "ask needs --question (or --resume <id>)")
         gate_id = retry_request or f"gate_{uuid.uuid4().hex[:10]}"
-        if isinstance(options, str) and options.strip().startswith("["):
-            opts = json.loads(options)
+        if options is None:
+            opts = []
+        elif isinstance(options, list):
+            opts = options
+        elif isinstance(options, str):
+            stripped = options.strip()
+            if not stripped:
+                opts = []
+            elif stripped.startswith("["):
+                try:
+                    parsed_opts = json.loads(stripped)
+                except json.JSONDecodeError as exc:
+                    raise ProviderError("invalid_argument", f"ask --options invalid JSON list: {exc}") from exc
+                if not isinstance(parsed_opts, list):
+                    raise ProviderError(
+                        "invalid_argument", f"ask --options must be a JSON list, got {type(parsed_opts).__name__}"
+                    )
+                opts = parsed_opts
+            else:
+                opts = [o.strip() for o in stripped.split(",") if o.strip()]
         else:
-            opts = [o.strip() for o in options.split(",") if o.strip()] if options else []
+            raise ProviderError("invalid_argument", f"ask --options must be a list or string, got {options!r}")
         asker = self._resolve_bound_sender(sender, default_unlaunched="worker")
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")

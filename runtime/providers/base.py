@@ -558,7 +558,10 @@ def most_restrictive_profile(*profiles: str | None) -> str:
 
 # Flags whose value is free TEXT: the next token is the value whatever it looks like (`--text
 # --json` sends "--json"), except the bare `--` terminator (W2-01, PR #720 review).
-TEXT_FLAGS = frozenset({"--text", "--spec", "--subject", "--body", "--question", "--prompt"})
+TEXT_FLAGS = frozenset({
+    "--text", "--spec", "--subject", "--body", "--question", "--prompt",
+    "--payload", "--reason", "--resolution", "--objective", "--result",
+})
 
 
 def split_output_flag(argv: list[str]) -> tuple[list[str], list[str]]:
@@ -604,6 +607,19 @@ def _text_flag(flags: dict[str, Any], key: str, default: Any = "") -> Any:
             f"--{key} needs one text value; use --{key}=<text> for text that starts with '-'",
         )
     return val
+
+
+def _parse_int_flag(flags: dict[str, Any], key: str, default: int | None = None) -> int | None:
+    """Parse an integer CLI flag, rejecting booleans and non-integer strings cleanly."""
+    if key not in flags:
+        return default
+    val = flags[key]
+    if isinstance(val, bool) or not isinstance(val, (int, str)):
+        raise ProviderError("invalid_argument", f"--{key} requires an integer value, got {val!r}")
+    try:
+        return int(val)
+    except ValueError as exc:
+        raise ProviderError("invalid_argument", f"--{key} requires an integer value, got {val!r}") from exc
 
 
 def _parse_flag_map(tokens: list[str], rest: list[str] | None = None) -> tuple[list[str], dict[str, Any]]:
@@ -703,7 +719,7 @@ class RuntimeProvider:
             return self.search(
                 query=str(query),
                 scope=flags.get("scope"),
-                limit=int(flags["limit"]) if "limit" in flags else 20,
+                limit=_parse_int_flag(flags, "limit", 20),
                 cursor=flags.get("cursor"),
                 agent=flags.get("agent"),
                 path=flags.get("path"),
@@ -720,7 +736,7 @@ class RuntimeProvider:
             if sub == "list":
                 return self.worktree_list(
                     repo=flags.get("repo"),
-                    limit=int(flags["limit"]) if "limit" in flags else None,
+                    limit=_parse_int_flag(flags, "limit"),
                 )
             if sub == "show":
                 return self.worktree_show(selector=flags.get("worktree") or (pos[0] if pos else "current"))
@@ -750,14 +766,14 @@ class RuntimeProvider:
             if sub == "read":
                 return self.terminal_read(
                     terminal=flags.get("terminal") or (pos[0] if pos else ""),
-                    cursor=int(flags["cursor"]) if "cursor" in flags else None,
-                    limit=int(flags["limit"]) if "limit" in flags else None,
+                    cursor=_parse_int_flag(flags, "cursor"),
+                    limit=_parse_int_flag(flags, "limit"),
                     screen=bool(flags.get("screen")),
                 )
             if sub == "list":
                 return self.terminal_list(
                     worktree=flags.get("worktree"),
-                    limit=int(flags["limit"]) if "limit" in flags else None,
+                    limit=_parse_int_flag(flags, "limit"),
                     include_visual_layouts=bool(flags.get("include-visual-layouts")),
                 )
             if sub == "show":
@@ -766,7 +782,7 @@ class RuntimeProvider:
                 return self.terminal_wait(
                     terminal=flags.get("terminal") or (pos[0] if pos else ""),
                     condition=flags.get("for", "tui-idle"),
-                    timeout_ms=int(flags.get("timeout-ms", 90000)),
+                    timeout_ms=_parse_int_flag(flags, "timeout-ms", 90000),
                 )
             if sub == "send":
                 before = pos[: len(pos) - len(rest)]  # a positional handle never comes after `--`
@@ -780,7 +796,21 @@ class RuntimeProvider:
             pos, flags = _parse_flag_map(clean[2:])
             if sub == "task-create":
                 deps_raw = flags.get("deps")
-                deps = json.loads(deps_raw) if isinstance(deps_raw, str) else (deps_raw or [])
+                if deps_raw is None:
+                    deps = []
+                elif isinstance(deps_raw, str):
+                    try:
+                        deps = json.loads(deps_raw)
+                    except json.JSONDecodeError as exc:
+                        raise ProviderError("invalid_argument", f"--deps must be a JSON list: {exc}") from exc
+                    if not isinstance(deps, list):
+                        raise ProviderError(
+                            "invalid_argument", f"--deps must be a JSON list, got {type(deps).__name__}"
+                        )
+                elif isinstance(deps_raw, list):
+                    deps = deps_raw
+                else:
+                    raise ProviderError("invalid_argument", f"--deps must be a JSON list, got {deps_raw!r}")
                 return self.task_create(
                     spec=_text_flag(flags, "spec"),
                     title=flags.get("task-title"),
@@ -795,7 +825,7 @@ class RuntimeProvider:
                 return self.task_update(
                     task_id=flags.get("id", ""),
                     status=flags.get("status", ""),
-                    result=flags.get("result"),
+                    result=_text_flag(flags, "result", None),
                     run=flags.get("run"),
                     sender=flags.get("from"),
                     retry_request=flags.get("retry-request"),
@@ -811,7 +841,7 @@ class RuntimeProvider:
                     "OPEN_FLEET_SANDBOX_PROFILE",
                     "ORCA_SANDBOX_PROFILE",
                     env,
-                    os.environ.get("PROFILE", "rw"),
+                    (os.environ if env is None else env).get("PROFILE") or "rw",
                 )
                 # The parent is the MOST restrictive of the explicit flag, the inherited
                 # OPEN_FLEET_PARENT_PROFILE, and the caller's own sandbox profile: a ro worker
@@ -828,7 +858,7 @@ class RuntimeProvider:
                     "name": flags.get("name"),
                     "run": flags.get("run"),
                     "sender": flags.get("from"),
-                    "timeout_ms": int(flags["timeout-ms"]) if "timeout-ms" in flags else None,
+                    "timeout_ms": _parse_int_flag(flags, "timeout-ms"),
                     "on_env": flags.get("on"),
                     "retry_of": flags.get("retry-of"),
                     "retry_request": flags.get("retry-request"),
@@ -863,7 +893,7 @@ class RuntimeProvider:
                 list_kw: dict[str, Any] = {
                     "run": flags.get("run"),
                     "task": flags.get("task"),
-                    "limit": int(flags["limit"]) if "limit" in flags else None,
+                    "limit": _parse_int_flag(flags, "limit"),
                     "cursor": flags.get("cursor"),
                 }
                 try:
@@ -883,7 +913,7 @@ class RuntimeProvider:
                 read_kw: dict[str, Any] = {
                     "dispatch_id": flags.get("dispatch", ""),
                     "source": "transcript" if flags.get("transcript") else ("terminal" if flags.get("terminal") else flags.get("source", "transcript")),
-                    "limit": int(flags.get("limit", 50)),
+                    "limit": _parse_int_flag(flags, "limit", 50),
                 }
                 if "cursor" in flags:
                     try:
@@ -898,14 +928,15 @@ class RuntimeProvider:
                     "until": str(flags.get("until") or "settled"),
                 }
                 if "timeout-ms" in flags:
+                    parsed_timeout_ms = _parse_int_flag(flags, "timeout-ms")
                     try:
                         params = set(inspect.signature(self.worker_wait).parameters)
                     except (TypeError, ValueError):
                         params = set()
                     if "timeout_s" in params:
-                        wait_kw["timeout_s"] = max(1, int(flags["timeout-ms"]) // 1000)
+                        wait_kw["timeout_s"] = max(1, int(parsed_timeout_ms) // 1000)
                     else:
-                        wait_kw["timeout_ms"] = int(flags["timeout-ms"])
+                        wait_kw["timeout_ms"] = parsed_timeout_ms
                 return self.worker_wait(**wait_kw)
             if sub in ("worker-stop", "worker-abandon", "worker-release", "worker-retain"):
                 verb = sub.split("-", 1)[1]
@@ -913,7 +944,7 @@ class RuntimeProvider:
                 fence_kw: dict[str, Any] = {
                     "verb": verb,
                     "dispatch_id": flags.get("dispatch", ""),
-                    "reason": flags.get("reason"),
+                    "reason": _text_flag(flags, "reason", None),
                 }
                 if "verified" in flags:
                     fence_kw["verified"] = flags["verified"] is True or str(flags["verified"]).lower() in ("1", "true", "yes")
@@ -987,7 +1018,7 @@ class RuntimeProvider:
                     "retry-request",
                 }
                 attrs = {k: v for k, v in flags.items() if k not in reserved}
-                payload = flags.get("payload")
+                payload = _text_flag(flags, "payload", None) if "payload" in flags else None
                 if payload is None and "body" in flags:
                     payload = _text_flag(flags, "body")
                 send_kw: dict[str, Any] = {
@@ -1043,7 +1074,7 @@ class RuntimeProvider:
                     types=flags.get("types"),
                     fmt=bool(flags.get("format")),
                     wait=bool(flags.get("wait")),
-                    timeout_ms=int(flags["timeout-ms"]) if "timeout-ms" in flags else None,
+                    timeout_ms=_parse_int_flag(flags, "timeout-ms"),
                     retry_request=flags.get("retry-request"),
                 )
             if sub == "reply":
@@ -1066,7 +1097,7 @@ class RuntimeProvider:
             if sub == "gate-resolve":
                 return self.gate_resolve(
                     gate_id=flags.get("id", ""),
-                    resolution=flags.get("resolution"),
+                    resolution=_text_flag(flags, "resolution", None),
                     run=flags.get("run"),
                     sender=flags.get("from"),
                     retry_request=flags.get("retry-request"),
@@ -1074,7 +1105,11 @@ class RuntimeProvider:
             if sub == "gate-list":
                 return self.gate_list(run=flags.get("run"), task_id=flags.get("task"), status=flags.get("status"))
             if sub == "run-create":
-                return self.run_create(objective=flags.get("objective"), run=flags.get("id"), sender=flags.get("from"))
+                return self.run_create(
+                    objective=_text_flag(flags, "objective", None),
+                    run=flags.get("id"),
+                    sender=flags.get("from"),
+                )
             if sub == "run-use":
                 return self.run_use(
                     run=flags.get("id", ""),
@@ -1083,12 +1118,12 @@ class RuntimeProvider:
                 )
             if sub == "ask":
                 return self.ask_human(
-                    question=flags.get("question"),
+                    question=_text_flag(flags, "question", None),
                     resume=flags.get("resume"),
                     to=flags.get("to"),
                     run=flags.get("run"),
                     options=flags.get("options"),
-                    timeout_ms=int(flags["timeout-ms"]) if "timeout-ms" in flags else None,
+                    timeout_ms=_parse_int_flag(flags, "timeout-ms"),
                     sender=flags.get("from"),
                     retry_request=flags.get("retry-request"),
                 )
@@ -1099,7 +1134,7 @@ class RuntimeProvider:
         try:
             return json.loads(pins.read_text(encoding="utf-8"))["orca"]["version"]
         except Exception:
-            return "v1.4.238"
+            return "unknown"
 
     def status(self) -> dict[str, Any]:
         return {"ready": True, "provider": self.name, "version": self.version()}

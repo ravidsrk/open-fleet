@@ -203,10 +203,21 @@ DECLARED=
 # config with exit 0 and no output; anything else — a non-zero exit (128 for an unreadable or
 # malformed config), output that is not NUL-terminated, a scope without its key — is "no
 # fingerprint", exit 1 with the reason on stderr.
+CFG=
+CUSTODY=
+TMPIDX=
+cleanup() {
+  if [ -n "${CFG:-}" ]; then rm -f "$CFG"; fi
+  if [ -n "${TMPIDX:-}" ]; then rm -f "$TMPIDX"; fi
+  if [ -n "${CUSTODY:-}" ]; then rm -rf "$CUSTODY"; fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 set --
 _n=$GIT_CONFIG_COUNT
 CFG=$(mktemp "${TMPDIR:-/tmp}/orca-wtree-cfg-XXXXXX") || exit 1
-trap 'rm -f "$CFG"' EXIT INT TERM
 if ! (
   if [ -n "$_CALLER_GLOBAL_SET" ]; then GIT_CONFIG_GLOBAL=$_CALLER_GLOBAL; export GIT_CONFIG_GLOBAL
   else unset GIT_CONFIG_GLOBAL; fi
@@ -322,7 +333,6 @@ done
 _head=$("$GIT" -C "$TOP" rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null) || _head=
 
 CUSTODY=$(mktemp -d "${TMPDIR:-/tmp}/orca-wtree-git-XXXXXX") || exit 1
-trap 'rm -rf "$CUSTODY"' EXIT INT TERM
 
 # core.attributesFile (Codex on this branch, P1): a repository-scope one is attribute DATA like
 # info/attributes — dropped, a clean CRLF checkout an `eol=crlf` line there steers, once touched,
@@ -380,7 +390,6 @@ case "$REAL_INDEX" in
 esac
 
 TMPIDX=$(mktemp "${TMPDIR:-/tmp}/orca-wtree-XXXXXX") || exit 1
-trap 'rm -f "$TMPIDX"; rm -rf "$CUSTODY"' EXIT INT TERM
 
 # What git reads from the repository's git dir is COPIED into CUSTODY: the common `info/exclude`,
 # `info/attributes` and `shallow`, the per-worktree `info/sparse-checkout` and split-index
