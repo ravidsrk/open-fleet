@@ -4,10 +4,12 @@
 Used by the document-it coverage pipeline and CI:
 - Extracts CLI subcommands from open_fleet/cli.py:build_parser()
 - Extracts MCP tools & resources from open_fleet/mcp_server.py:OpenFleetMCPServer
-- Extracts reusable GitHub Action inputs/outputs from .github/actions/open-fleet-verify/action.yml
-- Verifies every extracted entity is documented in docs/cli-and-mcp.md, every anchored
-  file:symbol resolves in live code, and docs/cli-and-mcp.md is reachable in one hop
-  from README.md and docs/README.md.
+- Extracts reusable GitHub Action inputs & outputs from .github/actions/open-fleet-verify/action.yml
+- Parses every `open_fleet/<module>.py:<symbol>` implementation anchor directly from
+  docs/cli-and-mcp.md (never a hand-copied list) and AST-verifies each anchor against live code
+- Verifies 100% coverage of CLI commands (in `## Unified CLI Commands`), MCP tools, MCP resources,
+  and Action outputs in docs/cli-and-mcp.md, plus one-hop Markdown link reachability from
+  README.md and docs/README.md.
 
 Exit codes: 0 all entities documented & anchored · 1 coverage gap or broken anchor · 2 error.
 """
@@ -29,24 +31,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# Canonical symbol anchors verified directly against live source ASTs.
-# Renaming any anchored symbol below turns --check RED (document-it rename control).
-CORE_SYMBOL_ANCHORS = (
-    ("open_fleet/cli.py", "build_parser"),
-    ("open_fleet/cli.py", "main"),
-    ("open_fleet/mcp_server.py", "OpenFleetMCPServer"),
-    ("open_fleet/mcp_server.py", "serve_stdio"),
-    ("open_fleet/sessions.py", "start_session"),
-    ("open_fleet/sessions.py", "approve_gate"),
-    ("open_fleet/sessions.py", "advance_session"),
-    ("open_fleet/sessions.py", "benchmark_progressive_savings"),
-    ("open_fleet/solo_review.py", "run_solo_review"),
-    ("open_fleet/ci_action.py", "run_ci_verify"),
-    ("open_fleet/readiness.py", "readiness_report"),
-    ("open_fleet/setup.py", "doctor"),
-    ("open_fleet/setup.py", "setup_host"),
-    ("open_fleet/ui_server.py", "MissionControlApp"),
-)
+# Inline backticked `open_fleet/<path>.py:<symbol>` anchors declared in docs/cli-and-mcp.md.
+_DOC_ANCHOR_RE = re.compile(r"`(open_fleet/[A-Za-z0-9_./-]+\.py):([A-Za-z_][A-Za-z0-9_]*)`")
+_MIN_DOC_ANCHORS = 10
 
 
 def _load_open_fleet(root):
@@ -105,8 +92,42 @@ def _defined_symbols(py_path):
     }
 
 
+def _extract_doc_anchors(doc_text):
+    """Extract unique (rel_file, symbol) pairs anchored in documentation text."""
+    seen = set()
+    anchors = []
+    for rel_file, symbol in _DOC_ANCHOR_RE.findall(doc_text):
+        key = (rel_file, symbol)
+        if key not in seen:
+            seen.add(key)
+            anchors.append(key)
+    return anchors
+
+
+def _section_lines(doc_lines, heading):
+    """Return [(1-based line_no, line_text)] inside the markdown section starting at `heading`."""
+    out = []
+    in_section = False
+    for idx, ln in enumerate(doc_lines, 1):
+        stripped = ln.strip()
+        if stripped == heading:
+            in_section = True
+            continue
+        if in_section and stripped.startswith("## "):
+            break
+        if in_section:
+            out.append((idx, ln))
+    return out
+
+
+def _has_markdown_link(text, target):
+    """True when `text` contains a real Markdown link `[label](...target...)`."""
+    pattern = re.compile(r"\[[^\]]+\]\([^)]*" + re.escape(target) + r"(?:#[^)]*)?\)")
+    return bool(pattern.search(text))
+
+
 def extract_surface(root=ROOT):
-    """Extract the complete public product surface directly from code."""
+    """Extract the complete public product surface directly from live code."""
     root = Path(root).resolve()
     mods = _load_open_fleet(root)
 
@@ -122,20 +143,21 @@ def extract_surface(root=ROOT):
     mcp_resources = sorted(r["uri"] for r in srv.resource_definitions())
 
     action_path = root / ".github" / "actions" / "open-fleet-verify" / "action.yml"
-    action_inputs, action_outputs = _extract_action_io(action_path) if action_path.is_file() else ([], [])
+    action_exists = action_path.is_file()
+    action_inputs, action_outputs = _extract_action_io(action_path) if action_exists else ([], [])
 
     return {
         "cli_commands": cli_commands,
         "mcp_tools": mcp_tools,
         "mcp_resources": mcp_resources,
+        "action_exists": action_exists,
         "action_inputs": action_inputs,
         "action_outputs": action_outputs,
-        "core_anchors": [{"file": f, "symbol": s} for f, s in CORE_SYMBOL_ANCHORS],
     }
 
 
 def check_coverage(root=ROOT):
-    """Verify every extracted entity is documented, every anchor resolves, and docs are reachable."""
+    """Verify every extracted entity is documented, every doc anchor resolves, and docs are reachable."""
     root = Path(root).resolve()
     surface = extract_surface(root)
     doc_path = root / "docs" / "cli-and-mcp.md"
@@ -143,11 +165,41 @@ def check_coverage(root=ROOT):
     hub_path = root / "docs" / "README.md"
 
     errors = []
+    if not surface["cli_commands"]:
+        errors.append("extracted 0 CLI commands from open_fleet/cli.py (fail-closed)")
+    if not surface["mcp_tools"]:
+        errors.append("extracted 0 MCP tools from open_fleet/mcp_server.py (fail-closed)")
+    if not surface["mcp_resources"]:
+        errors.append("extracted 0 MCP resources from open_fleet/mcp_server.py (fail-closed)")
+    if not surface["action_exists"]:
+        errors.append("missing .github/actions/open-fleet-verify/action.yml (fail-closed)")
+    elif not surface["action_outputs"]:
+        errors.append("extracted 0 Action outputs from .github/actions/open-fleet-verify/action.yml (fail-closed)")
+
+    base_counts = {
+        "cli_commands": len(surface["cli_commands"]),
+        "mcp_tools": len(surface["mcp_tools"]),
+        "mcp_resources": len(surface["mcp_resources"]),
+        "action_inputs": len(surface["action_inputs"]),
+        "action_outputs": len(surface["action_outputs"]),
+        "doc_anchors": 0,
+    }
+
     if not doc_path.is_file():
-        return {"ok": False, "surface": surface, "errors": [f"missing {doc_path}"]}
+        errors.append(f"missing {doc_path}")
+        return {
+            "ok": False,
+            "counts": base_counts,
+            "surface": surface,
+            "coverage": {},
+            "anchors": [],
+            "reachability": {},
+            "errors": errors,
+        }
 
     doc_text = doc_path.read_text(encoding="utf-8")
     doc_lines = doc_text.splitlines()
+    cli_section = _section_lines(doc_lines, "## Unified CLI Commands")
 
     def _find_line(needle):
         for idx, ln in enumerate(doc_lines, 1):
@@ -155,12 +207,21 @@ def check_coverage(root=ROOT):
                 return idx
         return None
 
+    def _find_cli_command_line(cmd):
+        pat = re.compile(rf"\bopen-fleet {re.escape(cmd)}\b")
+        for idx, ln in cli_section:
+            if pat.search(ln):
+                return idx
+        return None
+
     coverage = {"cli_commands": {}, "mcp_tools": {}, "mcp_resources": {}, "action_outputs": {}}
+    if not cli_section:
+        errors.append("missing '## Unified CLI Commands' reference section in docs/cli-and-mcp.md")
     for cmd in surface["cli_commands"]:
-        ln = _find_line(f"open-fleet {cmd}")
+        ln = _find_cli_command_line(cmd)
         coverage["cli_commands"][cmd] = f"docs/cli-and-mcp.md:{ln}" if ln else None
         if ln is None:
-            errors.append(f"undocumented CLI command: open-fleet {cmd}")
+            errors.append(f"undocumented CLI command in reference table: open-fleet {cmd}")
 
     for tool in surface["mcp_tools"]:
         ln = _find_line(f"`{tool}`")
@@ -180,11 +241,19 @@ def check_coverage(root=ROOT):
         if ln is None:
             errors.append(f"undocumented GitHub Action output: {out_key}")
 
-    # Verify every core file:symbol anchor resolves in live AST (rename-to-RED oracle).
+    # Parse every `open_fleet/<module>.py:<symbol>` anchor from docs/cli-and-mcp.md and AST-verify it.
+    doc_anchors = _extract_doc_anchors(doc_text)
+    base_counts["doc_anchors"] = len(doc_anchors)
+    if len(doc_anchors) < _MIN_DOC_ANCHORS:
+        errors.append(
+            f"docs/cli-and-mcp.md declares only {len(doc_anchors)} file:symbol anchors "
+            f"(minimum {_MIN_DOC_ANCHORS} required)"
+        )
+
     anchor_results = []
-    for rel_file, symbol in CORE_SYMBOL_ANCHORS:
-        fpath = root / rel_file
-        if not fpath.is_file():
+    for rel_file, symbol in doc_anchors:
+        fpath = (root / rel_file).resolve()
+        if not fpath.is_relative_to(root) or not fpath.is_file():
             errors.append(f"broken anchor file: {rel_file}:{symbol}")
             anchor_results.append({"anchor": f"{rel_file}:{symbol}", "ok": False})
             continue
@@ -194,27 +263,21 @@ def check_coverage(root=ROOT):
         if not ok:
             errors.append(f"broken symbol anchor: {rel_file}:{symbol} not found in AST")
 
-    # Verify one-hop reachability from README.md and docs/README.md.
+    # Verify one-hop Markdown link reachability from README.md and docs/README.md.
     reachability = {}
-    for label, path, needle in (
+    for label, path, target in (
         ("README.md", readme_path, "docs/cli-and-mcp.md"),
         ("docs/README.md", hub_path, "cli-and-mcp.md"),
     ):
-        ok = path.is_file() and needle in path.read_text(encoding="utf-8")
+        ok = path.is_file() and _has_markdown_link(path.read_text(encoding="utf-8"), target)
         reachability[label] = ok
         if not ok:
-            errors.append(f"unreachable: {label} does not link {needle}")
+            errors.append(f"unreachable: {label} has no Markdown link to {target}")
 
     return {
         "ok": len(errors) == 0,
-        "counts": {
-            "cli_commands": len(surface["cli_commands"]),
-            "mcp_tools": len(surface["mcp_tools"]),
-            "mcp_resources": len(surface["mcp_resources"]),
-            "action_inputs": len(surface["action_inputs"]),
-            "action_outputs": len(surface["action_outputs"]),
-            "core_anchors": len(CORE_SYMBOL_ANCHORS),
-        },
+        "counts": base_counts,
+        "surface": surface,
         "coverage": coverage,
         "anchors": anchor_results,
         "reachability": reachability,
@@ -237,12 +300,12 @@ def main(argv=None):
         print(
             f"product-surface: {c['cli_commands']} CLI commands · {c['mcp_tools']} MCP tools · "
             f"{c['mcp_resources']} MCP resources · {c['action_outputs']} Action outputs · "
-            f"{c['core_anchors']} core anchors"
+            f"{c['doc_anchors']} doc anchors"
         )
         for err in result["errors"]:
             print(f"FAIL: {err}", file=sys.stderr)
         if result["ok"]:
-            print("product-surface: OK — zero critical gaps, all anchors verified, one-hop reachable")
+            print("product-surface: OK — zero critical gaps, all doc anchors verified, one-hop reachable")
     return 0 if (not args.check or result["ok"]) else 1
 
 

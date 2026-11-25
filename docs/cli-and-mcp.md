@@ -127,3 +127,22 @@ Start locally with `open-fleet ui --port 8765` (binds to `127.0.0.1` by default 
 4. **Verification Lab:** 1-click live Negative-Control proof (`selfscore.py` GREEN vs `verify.py` RED), zero-spend standalone `posix` first-run witness (`ro`/`rw`), interactive capability preflight tester, 5 pre-launch negative safety probes (`first_run.py probes`), and live `floor_guard.py` check.
 5. **Runtime & Readiness:** Live certification matrix across all orchestrator providers and locally detected coding-agent harnesses, 1-click `certification.py check`, and the honest Proof-Graduation Workbench.
 6. **Setup & MCP Studio:** Host + runtime config generator with live dry-run setup plan and full 19-tool MCP catalog.
+
+---
+
+## Implementation Anchors
+
+Every core product subsystem in `open_fleet` is bound below to its live Python `file:symbol` implementation anchor and AST-verified by `python3 -I scripts/extract_product_surface.py --check` (renaming any anchored symbol turns the claim check RED):
+
+| Subsystem | Live `file:symbol` Anchors |
+|---|---|
+| Unified CLI & dispatch | `open_fleet/cli.py:build_parser`, `open_fleet/cli.py:main` |
+| Catalog & goal routing | `open_fleet/catalog.py:catalog_overview`, `open_fleet/catalog.py:route_intent` |
+| Local SQLite state & telemetry | `open_fleet/state.py:read_workspace_status`, `open_fleet/state.py:read_runtime_state` |
+| Zero-dep MCP JSON-RPC 2.0 server | `open_fleet/mcp_server.py:OpenFleetMCPServer`, `open_fleet/mcp_server.py:serve_stdio` |
+| Progressive `<5K`-token mission sessions | `open_fleet/sessions.py:start_session`, `open_fleet/sessions.py:approve_gate`, `open_fleet/sessions.py:advance_session`, `open_fleet/sessions.py:benchmark_progressive_savings` |
+| Honest solo-developer review lane | `open_fleet/solo_review.py:run_solo_review` |
+| Reusable PR GitHub Action runner | `open_fleet/ci_action.py:run_ci_verify` |
+| Proof-graduation readiness workbench | `open_fleet/readiness.py:readiness_report` |
+| Environment doctor & atomic host setup | `open_fleet/setup.py:doctor`, `open_fleet/setup.py:setup_host` |
+| Mission Control HTTP UI server | `open_fleet/ui_server.py:MissionControlApp` |

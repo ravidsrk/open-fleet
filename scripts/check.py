@@ -52,7 +52,10 @@ def default_jobs():
 
 def plan(jobs, suite=True, ruff=None):
     """[(name, argv | None)] in run order. argv None means the step is SKIPPED (tool missing)."""
-    steps = [("validate", [PY, "-I", "scripts/validate.py"])]
+    steps = [
+        ("validate", [PY, "-I", "scripts/validate.py"]),
+        ("product-surface", [PY, "-I", "scripts/extract_product_surface.py", "--check"]),
+    ]
     ruff = shutil.which("ruff") if ruff is None else ruff
     steps.append(("ruff", [ruff, "check", "--config", "ruff.toml", *RUFF_PATHS] if ruff else None))
     if suite:
