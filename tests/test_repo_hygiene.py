@@ -120,7 +120,7 @@ class EveryScriptCompilesWithoutWarnings(unittest.TestCase):
                              "the compile scan flags a raw string that is perfectly legal")
 
     def test_no_source_file_compiles_with_a_warning(self):
-        roots = ("scripts", "runtime/scripts", "tests", "bench", "evals/demo")
+        roots = ("scripts", "runtime/scripts", "tests", "bench", "evals/demo", "open_fleet")
         files = [f for r in roots for f in sorted((ROOT / r).rglob("*.py"))
                  if "__pycache__" not in f.parts]
         self.assertGreater(len(files), 40, "the scan found almost no sources to compile")

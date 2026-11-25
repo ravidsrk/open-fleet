@@ -41,7 +41,7 @@ PY = sys.executable or "python3"
 
 # The exact paths CI lints (.github/workflows/validate.yml, the `ruff check` step).
 # tests/test_shard_tests.py fails if the two drift apart.
-RUFF_PATHS = ("scripts", "runtime/scripts", "runtime/providers", "tests", "bench", "evals/demo")
+RUFF_PATHS = ("scripts", "runtime/scripts", "runtime/providers", "tests", "bench", "evals/demo", "open_fleet")
 
 TAIL_LINES = 60
 

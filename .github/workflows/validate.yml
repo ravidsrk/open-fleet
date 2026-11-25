@@ -357,7 +357,7 @@ jobs:
       - name: Ruff (syntax / undefined names)
         # Installed from the hashed lock above (#301), not re-resolved here.
         # Pin --config ruff.toml so a PR cannot shadow it with .ruff.toml or nested configs (#769).
-        run: ruff check --config ruff.toml scripts runtime/scripts runtime/providers tests bench evals/demo
+        run: ruff check --config ruff.toml scripts runtime/scripts runtime/providers tests bench evals/demo open_fleet
       - name: Publish the gate summary (proof rollup + routing score)
         # Observability only (#213): the numbers land in the run summary even
         # when a gate is red. The routing GATE is the step above; this one

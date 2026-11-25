@@ -1,0 +1,9 @@
+{
+  "seconds": 9.9,
+  "measured": "2026-11-25: one local run of tests.test_product_surface_and_wheel (3 tests, Python 3.12.3), x2 to the CI lane",
+  "classes": {
+    "TestProductSurfaceDocumentationAndRenameControl": 0.5,
+    "TestWheelBuildAndFreshVenvInstall": 9.4
+  },
+  "fixture_seconds": 0.2
+}

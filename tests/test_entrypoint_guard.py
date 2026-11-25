@@ -78,6 +78,8 @@ ENTRY_POINTS = (
     "scripts/release_check.py",
     "scripts/live_broker.py",
     "scripts/live_container.py",
+    "scripts/extract_product_surface.py",
+    "scripts/verify_wheel.py",
     "bench/vf-bench/gate.py",
     "bench/vf-bench/replay.py",
     "bench/vf-bench/heldout.py",

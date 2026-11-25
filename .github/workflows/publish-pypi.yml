@@ -1,0 +1,86 @@
+name: publish-pypi
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "An existing vMAJOR.MINOR.PATCH annotated release tag to build verified wheel artifacts for"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-pypi
+  cancel-in-progress: false
+
+jobs:
+  build-wheel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Only the release maintainer publishes
+        env:
+          RELEASE_MAINTAINER: ${{ github.repository_owner }}
+          RUN_ACTOR: ${{ github.actor }}
+          RUN_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          set -euo pipefail
+          if [ -z "$RELEASE_MAINTAINER" ] || [ "$RUN_ACTOR" != "$RELEASE_MAINTAINER" ] \
+             || [ "$RUN_TRIGGERING_ACTOR" != "$RELEASE_MAINTAINER" ]; then
+            echo "::error::only the release maintainer '$RELEASE_MAINTAINER' publishes; got '$RUN_ACTOR' (triggered by '$RUN_TRIGGERING_ACTOR')"
+            exit 1
+          fi
+      - name: Validate release tag shape before checkout
+        id: tag
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            printf '::error::not a release tag (vMAJOR.MINOR.PATCH): %q\n' "$TAG"
+            exit 1
+          fi
+          printf 'tag=%s\nref=refs/tags/%s\n' "$TAG" "$TAG" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.tag.outputs.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - name: Verify annotated tag is on main and matches pyproject.toml version
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          test "$(git cat-file -t "refs/tags/$TAG")" = "tag"
+          cut="$(git rev-parse "refs/tags/$TAG^{commit}")"
+          test "$(git rev-parse HEAD)" = "$cut"
+          git merge-base --is-ancestor "$cut" origin/main
+          python3 -I - <<'PY'
+          import os, tomllib
+          tag = os.environ["TAG"].lstrip("v")
+          proj = tomllib.loads(open("pyproject.toml", encoding="utf-8").read())
+          ver = proj["project"]["version"]
+          if ver != tag:
+              raise SystemExit(f"pyproject.toml version {ver!r} != release tag {tag!r}")
+          print(f"version pin OK: {ver}")
+          PY
+      - name: Build and verify standalone wheel + SHA-256 checksums
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pypi-dist"
+          python3 -I scripts/verify_wheel.py --out-dir "$RUNNER_TEMP/pypi-dist"
+          (cd "$RUNNER_TEMP/pypi-dist" && sha256sum open_fleet-*.whl > SHA256SUMS.txt && cat SHA256SUMS.txt)
+      - name: Upload verified wheel and checksums artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: open-fleet-wheel-${{ steps.tag.outputs.tag }}
+          path: ${{ runner.temp }}/pypi-dist/
+          if-no-files-found: error
+          retention-days: 30
