@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One local command for the checks a PR must pass (#760).
 
-    python3 scripts/check.py              validate + ruff + shard-partition check + full suite
+    python3 scripts/check.py              validate + product-surface + ruff + shard-partition check + full suite
     python3 scripts/check.py --no-suite   the fast loop: everything but the unittest suite
     python3 scripts/check.py --jobs 4     suite shards to run in parallel (default: CPUs, max 8)
     python3 scripts/check.py --strict     a missing ruff fails instead of being reported SKIPPED

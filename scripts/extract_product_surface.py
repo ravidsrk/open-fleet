@@ -8,7 +8,7 @@ Used by the document-it coverage pipeline and CI:
 - Parses every `open_fleet/<module>.py:<symbol>` implementation anchor directly from
   docs/cli-and-mcp.md (never a hand-copied list) and AST-verifies each anchor against live code
 - Verifies 100% coverage of CLI commands (in `## Unified CLI Commands`), MCP tools, MCP resources,
-  and Action outputs in docs/cli-and-mcp.md, plus one-hop Markdown link reachability from
+  and Action outputs in docs/cli-and-mcp.md, plus resolved one-hop Markdown link reachability from
   README.md and docs/README.md.
 
 Exit codes: 0 all entities documented & anchored · 1 coverage gap or broken anchor · 2 error.
@@ -33,27 +33,30 @@ ROOT = Path(__file__).resolve().parent.parent
 
 # Inline backticked `open_fleet/<path>.py:<symbol>` anchors declared in docs/cli-and-mcp.md.
 _DOC_ANCHOR_RE = re.compile(r"`(open_fleet/[A-Za-z0-9_./-]+\.py):([A-Za-z_][A-Za-z0-9_]*)`")
+_MD_LINK_RE = re.compile(r"\[[^\]]+\]\(([^)\s]+)(?:\s+[^)]*)?\)")
 _MIN_DOC_ANCHORS = 10
 
 
 def _load_open_fleet(root):
-    """Load open_fleet package from `root` cleanly via importlib (works under python3 -I)."""
+    """Load open_fleet package freshly from `root` via importlib (works under python3 -I).
+
+    Always purges any prior `open_fleet` / `open_fleet.*` entries from `sys.modules` so
+    repeated in-process checks against a mutated tree never read stale cached modules.
+    """
     pkg_init = root / "open_fleet" / "__init__.py"
     if not pkg_init.is_file():
         raise FileNotFoundError(f"open_fleet package not found at {pkg_init}")
-    # Purge any previously loaded modules if root changed.
-    prev = sys.modules.get("open_fleet")
-    if prev is None or Path(getattr(prev, "__file__", "")).resolve() != pkg_init.resolve():
-        for name in [k for k in list(sys.modules) if k == "open_fleet" or k.startswith("open_fleet.")]:
-            del sys.modules[name]
-        spec = importlib.util.spec_from_file_location(
-            "open_fleet",
-            pkg_init,
-            submodule_search_locations=[str(root / "open_fleet")],
-        )
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules["open_fleet"] = mod
-        spec.loader.exec_module(mod)
+    for name in [k for k in list(sys.modules) if k == "open_fleet" or k.startswith("open_fleet.")]:
+        del sys.modules[name]
+    importlib.invalidate_caches()
+    spec = importlib.util.spec_from_file_location(
+        "open_fleet",
+        pkg_init,
+        submodule_search_locations=[str(root / "open_fleet")],
+    )
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["open_fleet"] = mod
+    spec.loader.exec_module(mod)
     return {
         "cli": importlib.import_module("open_fleet.cli"),
         "mcp": importlib.import_module("open_fleet.mcp_server"),
@@ -120,10 +123,23 @@ def _section_lines(doc_lines, heading):
     return out
 
 
-def _has_markdown_link(text, target):
-    """True when `text` contains a real Markdown link `[label](...target...)`."""
-    pattern = re.compile(r"\[[^\]]+\]\([^)]*" + re.escape(target) + r"(?:#[^)]*)?\)")
-    return bool(pattern.search(text))
+def _has_resolved_markdown_link(source_path, expected_target_path):
+    """True when `source_path` contains a relative Markdown link resolving to `expected_target_path`."""
+    if not source_path.is_file():
+        return False
+    expected = expected_target_path.resolve()
+    text = source_path.read_text(encoding="utf-8")
+    for raw in _MD_LINK_RE.findall(text):
+        target = raw.strip("<>").split("#", 1)[0].split("?", 1)[0]
+        if not target or "://" in target or target.startswith(("/", "mailto:")):
+            continue
+        try:
+            resolved = (source_path.parent / target).resolve()
+        except OSError:
+            continue
+        if resolved == expected:
+            return True
+    return False
 
 
 def extract_surface(root=ROOT):
@@ -208,7 +224,7 @@ def check_coverage(root=ROOT):
         return None
 
     def _find_cli_command_line(cmd):
-        pat = re.compile(rf"\bopen-fleet {re.escape(cmd)}\b")
+        pat = re.compile(rf"(?<![A-Za-z0-9_-])open-fleet {re.escape(cmd)}(?![A-Za-z0-9_-])")
         for idx, ln in cli_section:
             if pat.search(ln):
                 return idx
@@ -263,16 +279,13 @@ def check_coverage(root=ROOT):
         if not ok:
             errors.append(f"broken symbol anchor: {rel_file}:{symbol} not found in AST")
 
-    # Verify one-hop Markdown link reachability from README.md and docs/README.md.
+    # Verify resolved one-hop Markdown link reachability from README.md and docs/README.md.
     reachability = {}
-    for label, path, target in (
-        ("README.md", readme_path, "docs/cli-and-mcp.md"),
-        ("docs/README.md", hub_path, "cli-and-mcp.md"),
-    ):
-        ok = path.is_file() and _has_markdown_link(path.read_text(encoding="utf-8"), target)
+    for label, path in (("README.md", readme_path), ("docs/README.md", hub_path)):
+        ok = _has_resolved_markdown_link(path, doc_path)
         reachability[label] = ok
         if not ok:
-            errors.append(f"unreachable: {label} has no Markdown link to {target}")
+            errors.append(f"unreachable: {label} has no valid relative Markdown link resolving to docs/cli-and-mcp.md")
 
     return {
         "ok": len(errors) == 0,
@@ -292,7 +305,12 @@ def main(argv=None):
     parser.add_argument("--json", action="store_true", help="emit JSON report")
     args = parser.parse_args(argv)
 
-    result = check_coverage(Path(args.root))
+    try:
+        result = check_coverage(Path(args.root))
+    except (OSError, SyntaxError, ImportError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
     if args.json:
         print(json.dumps(result, indent=2))
     else:
