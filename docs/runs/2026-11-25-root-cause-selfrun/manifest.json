@@ -36,7 +36,19 @@
       "addressed": true
     }
   ],
-  "commands": [],
+  "commands": [
+    {
+      "label": "verifier",
+      "ts": "2026-11-25T17:33:47Z",
+      "cmd": "python3 runtime/scripts/verify.py --manifest docs/runs/2026-11-25-root-cause-selfrun/manifest.json --contract-source docs/runs/2026-11-25-root-cause-selfrun/contract.json@ce5dc5ae838ada69a9b77daccf18e04537845df6 --contract-digest sha256:299958656074d3c6e296c4b662c29ad7bbb785b1f865923356c2281c6316602c --unit-class planning",
+      "cmd_sha256": "1fedd9cd3a59b4c0caf249eed5e1fd511ef3a27a100196c960978152e83fcb94",
+      "exit": 0,
+      "duration_s": 4.035,
+      "commit": "50fc0d1df97647cb347cd4d1d778249c02d4ff47",
+      "wtree": "47c969bdec23f0d04bb71784f3a011789ac37b3a",
+      "artifact": "docs/runs/2026-11-25-root-cause-selfrun/verifier.txt"
+    }
+  ],
   "negative_control": {
     "did": "planning-class analogue (artifact verification): deterministic A/B single-variable reproduction (PR_SET_DUMPABLE=0 hidden supervisor RED exit 1 vs PID-1 parent GREEN exit 0) plus 6 literal self-contained probes falsifying H2-H4 and demonstrating H1",
     "tool": "hand",
