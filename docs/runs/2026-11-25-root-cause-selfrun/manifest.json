@@ -2,8 +2,8 @@
   "unit": "root-cause-2026-11-25-hidepid",
   "unit_class": "planning",
   "terminal": "DIAGNOSED-WITH-HANDOFF",
-  "base_sha": "cfa3bd63f78df5f0e5e7ee66817ba466d860340b",
-  "head_sha": "ce5dc5ae838ada69a9b77daccf18e04537845df6",
+  "base_sha": "3601423ed8a4307e23f7ecf8a2741514246f514f",
+  "head_sha": "071256452948b552e287450a419765f7a1c8b812",
   "contract": {
     "source": "docs/runs/2026-11-25-root-cause-selfrun/contract.json@ce5dc5ae838ada69a9b77daccf18e04537845df6",
     "digest": "sha256:299958656074d3c6e296c4b662c29ad7bbb785b1f865923356c2281c6316602c",
@@ -65,6 +65,10 @@
     {
       "path": "docs/runs/2026-11-25-root-cause-selfrun/handoff-brief.md",
       "sha256": "04355a47731080ab3d8f3de83ec7950ca681f8c5e584d82da69483c9853eea44"
+    },
+    {
+      "path": "docs/runs/2026-11-25-root-cause-selfrun/ledger.md",
+      "sha256": "aabf2e725c086be6ecf136f300479b082ef76119c0ddd6bebba824c987d34bd1"
     },
     {
       "path": "docs/runs/2026-11-25-root-cause-selfrun/repro-red.txt",
