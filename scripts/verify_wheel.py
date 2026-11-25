@@ -77,21 +77,27 @@ def verify_wheel(root=ROOT, *, keep_wheel_dir=None):
         out_dir.mkdir(parents=True, exist_ok=True)
 
         # Prefer offline setuptools wheel build via pip --no-build-isolation when available,
-        # falling back to uv build --wheel if setuptools is not in the ambient interpreter.
+        # falling back to standard isolated pip wheel (for Python 3.13+ envs without bundled
+        # setuptools) or uv build --wheel.
         pip_wheel = _run(
             [sys.executable, "-m", "pip", "wheel", "--no-build-isolation", "--no-deps", str(stage), "-w", str(out_dir)],
             cwd=tmp_path,
         )
         if pip_wheel.returncode != 0:
-            uv_bin = shutil.which("uv")
-            if uv_bin:
-                uv_res = _run([uv_bin, "build", "--wheel", "--out-dir", str(out_dir), str(stage)], cwd=tmp_path)
-                if uv_res.returncode != 0:
-                    errors.append(f"wheel build failed (pip and uv): {uv_res.stderr.strip()[:400]}")
+            pip_iso = _run(
+                [sys.executable, "-m", "pip", "wheel", "--no-deps", str(stage), "-w", str(out_dir)],
+                cwd=tmp_path,
+            )
+            if pip_iso.returncode != 0:
+                uv_bin = shutil.which("uv")
+                if uv_bin:
+                    uv_res = _run([uv_bin, "build", "--wheel", "--out-dir", str(out_dir), str(stage)], cwd=tmp_path)
+                    if uv_res.returncode != 0:
+                        errors.append(f"wheel build failed (pip and uv): {uv_res.stderr.strip()[:400]}")
+                        return report
+                else:
+                    errors.append(f"wheel build failed: {pip_iso.stderr.strip()[:400]}")
                     return report
-            else:
-                errors.append(f"wheel build failed: {pip_wheel.stderr.strip()[:400]}")
-                return report
 
         wheels = sorted(out_dir.glob("open_fleet-*.whl"))
         if len(wheels) != 1:

@@ -1,0 +1,52 @@
+### reshape-it self-run 2026-11-25 — RV-D3 negative control (hand mutant)
+### target: runtime/scripts/_verify_diff.py _bind_hunks_to_change overlap check (line 163)
+### proof command: python3 -m unittest tests.test_reshape_net_verify_diff
+
+Pinned mutant (tool=hand): disable the overlap check in _bind_hunks_to_change
+so unrelated-hunk decoys slip past the deepening seam.
+
+diff --git a/runtime/scripts/_verify_diff.py b/runtime/scripts/_verify_diff.py
+index 35880a96..f7893465 100644
+--- a/runtime/scripts/_verify_diff.py
++++ b/runtime/scripts/_verify_diff.py
+@@ -160,7 +160,7 @@ def _bind_hunks_to_change(diff, m, resolve, git, hex40_re):
+                     "says which behaviour it mutates (#280)")
+         allowed = changed | {n + offset for n in changed if isinstance(n, int)
+                              for offset in (-0.5, 0.5)}
+-        if not lines <= allowed:
++        if False:
+             return (f"the hand mutant touches {path} at line(s) {sorted(lines)[:6]}, and "
+                     f"base_sha..head_sha changes line(s) {sorted(changed)[:6] or 'none'} there — "
+                     "they do not overlap completely. Mutating an untouched hunk of a changed file is the same "
+CONTROL TRANSCRIPT
+== [1] clean head_sha (expect OK; exit 0) ==
+......
+----------------------------------------------------------------------
+Ran 6 tests in 0.023s
+
+OK
+exit 0
+
+== [2] under hand mutant (expect FAIL — mutant KILLED; exit 1) ==
+F.....
+======================================================================
+FAIL: test_bind_hunks_to_change_accepts_overlapping_hunk_and_rejects_unrelated_hunk_decoy (tests.test_reshape_net_verify_diff.DiffAndHunkBindingSeamNet.test_bind_hunks_to_change_accepts_overlapping_hunk_and_rejects_unrelated_hunk_decoy)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tmp/of-selfrun-ouqSnj/wt-reshape/tests/test_reshape_net_verify_diff.py", line 127, in test_bind_hunks_to_change_accepts_overlapping_hunk_and_rejects_unrelated_hunk_decoy
+    self.assertIsNotNone(err)
+AssertionError: unexpectedly None
+
+----------------------------------------------------------------------
+Ran 6 tests in 0.025s
+
+FAILED (failures=1)
+exit 1
+
+== [3] after revert (expect OK; exit 0) ==
+......
+----------------------------------------------------------------------
+Ran 6 tests in 0.023s
+
+OK
+exit 0

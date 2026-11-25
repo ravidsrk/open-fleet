@@ -88,7 +88,7 @@ jobs:
         run: |
           if [ -z "$RUN_PR" ]; then
             # a fork's run lists no pull request; find the one open PR at that head
-            RUN_PR=$(python3 scripts/verdict_check.py --head-sha "$RUN_HEAD_SHA" --resolve-pr --head-repo="$RUN_HEAD_REPO" --head-branch="$RUN_HEAD_BRANCH")
+            RUN_PR=$(python3 scripts/verdict_check.py --head-sha "$RUN_HEAD_SHA" --resolve-pr --head-repo "$RUN_HEAD_REPO" --head-branch "$RUN_HEAD_BRANCH")
           fi
           case "$RUN_PR" in ''|*[!0-9]*) echo "::error::no usable pull request number resolved"; exit 2 ;; esac
           printf 'pr=%s\n' "$RUN_PR" >> "$GITHUB_OUTPUT"

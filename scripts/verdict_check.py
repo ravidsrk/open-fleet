@@ -130,14 +130,16 @@ GATE_SCRIPTS = (
     "runtime/scripts/decisions.py", "runtime/scripts/proof_status.py",
     "runtime/scripts/run_report.py",
     "scripts/bundle.py", "scripts/changelog.py", "scripts/check_trailers.py", "scripts/eval.py",
-    "scripts/gen-badges.py", "scripts/shard-tests.py", "scripts/validate.py",
+    "scripts/extract_product_surface.py", "scripts/gen-badges.py", "scripts/shard-tests.py",
+    "scripts/validate.py",
 )
 # 3. Anything at the root a job could import instead of a tool: scripts/shard-tests.py runs
 #    `python -m coverage` and `-m unittest` from the root, which is on sys.path there. A root
 #    module file, or a top-level directory this repository does not have (the test holds the list
 #    to the tree), is the grader.
 TOP_LEVEL_DIRS = frozenset({".claude-plugin", ".github", "bench", "changelog.d", "docs", "evals",
-                            "hooks", "playbooks", "runtime", "scripts", "skills", "tests"})
+                            "hooks", "open_fleet", "playbooks", "runtime", "scripts", "skills",
+                            "tests"})
 ROOT_MODULE_SUFFIXES = (".py", ".pyc", ".pyd", ".so", ".pth")
 # 4. What the test runner imports before any test: every shard runs `-m unittest tests.<module>`,
 #    so a `tests/__init__.py` would run first in each and could rewrite the runner.
