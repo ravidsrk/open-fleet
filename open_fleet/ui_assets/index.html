@@ -106,21 +106,23 @@
 
     .brand-title {
       font-weight: 700;
-      font-size: 15px;
+      font-size: 14.5px;
       letter-spacing: -0.01em;
       display: flex;
       align-items: center;
-      gap: 8px;
+      gap: 7px;
+      white-space: nowrap;
     }
 
     .brand-sub {
-      font-size: 12px;
+      font-size: 11.5px;
       color: var(--text-muted);
+      white-space: nowrap;
     }
 
     .nav {
       display: flex;
-      gap: 4px;
+      gap: 3px;
       background: var(--bg);
       border: 1px solid var(--border);
       border-radius: 9px;
@@ -132,9 +134,9 @@
       border: 0;
       background: transparent;
       color: var(--text-muted);
-      padding: 6px 13px;
+      padding: 6px 10px;
       border-radius: 7px;
-      font-size: 13px;
+      font-size: 12.5px;
       font-weight: 600;
       cursor: pointer;
       white-space: nowrap;
@@ -278,6 +280,7 @@
       font-weight: 600;
       font-family: var(--font-mono);
       border: 1px solid transparent;
+      white-space: nowrap;
     }
 
     .pill-ok, .pill-external-run, .pill-live-witnessed {
@@ -499,16 +502,16 @@
 
     <nav class="nav" role="tablist" aria-label="Mission Control sections">
       <button class="active" data-tab="overview">Control Room</button>
-      <button data-tab="missions">Mission Router</button>
-      <button data-tab="sessions">Sessions &amp; Solo Review</button>
-      <button data-tab="verify">Verification Lab</button>
-      <button data-tab="runtimes">Runtime &amp; Readiness</button>
+      <button data-tab="missions">Router</button>
+      <button data-tab="sessions">Sessions &amp; Solo</button>
+      <button data-tab="verify">Verify Lab</button>
+      <button data-tab="runtimes">Runtimes</button>
       <button data-tab="setup">Setup &amp; MCP</button>
     </nav>
 
     <div class="top-actions">
-      <button class="btn btn-sm" id="btn-refresh">Refresh</button>
-      <button class="btn btn-sm" id="btn-theme">Light / Dark</button>
+      <button class="btn btn-sm nowrap" id="btn-refresh">Refresh</button>
+      <button class="btn btn-sm nowrap" id="btn-theme">Theme</button>
     </div>
   </header>
 
