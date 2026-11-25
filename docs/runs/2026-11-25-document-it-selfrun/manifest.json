@@ -34,6 +34,17 @@
       "commit": "cfa3bd63f78df5f0e5e7ee66817ba466d860340b",
       "wtree": "b03a4fbb85fbbd2011e0c3715bfd4790b5899783",
       "artifact": "docs/runs/2026-11-25-document-it-selfrun/tests.txt"
+    },
+    {
+      "label": "verifier",
+      "ts": "2026-11-25T17:33:12Z",
+      "cmd": "python3 runtime/scripts/verify.py --manifest docs/runs/2026-11-25-document-it-selfrun/manifest.json --contract-source docs/runs/2026-11-25-document-it-selfrun/contract.json@ce5dc5ae838ada69a9b77daccf18e04537845df6 --contract-digest sha256:f61cce16eb641ba77d6e22f5109030f7c27b6bbc4ce857fee9d008ea9c0efa42 --unit-class mutation --lighting dark-eligible --lane A --execute-nc --nc-command 'python3 -m unittest tests.test_product_surface_and_wheel.TestProductSurfaceDocumentationAndRenameControl'",
+      "cmd_sha256": "2f63b244d5329b12f3c0cec3943d6375d5e3502b3009920f1e6b9ce020f68451",
+      "exit": 0,
+      "duration_s": 15.098,
+      "commit": "ff05bebca325f89798eaa2af645ae5252c8473d8",
+      "wtree": "1714f67f80b080da3ff676c065cd05a5984f42dc",
+      "artifact": "docs/runs/2026-11-25-document-it-selfrun/verifier.txt"
     }
   ],
   "negative_control": {
