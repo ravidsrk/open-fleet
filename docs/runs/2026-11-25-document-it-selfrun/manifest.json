@@ -1,0 +1,93 @@
+{
+  "unit": "document-it-2026-11-25-DOC-1",
+  "base_sha": "4ad16df406c6df3bb2d13f0037ec274802666b61",
+  "head_sha": "cfa3bd63f78df5f0e5e7ee66817ba466d860340b",
+  "base_branch": "main",
+  "contract": {
+    "source": "docs/runs/2026-11-25-document-it-selfrun/contract.json@ce5dc5ae838ada69a9b77daccf18e04537845df6",
+    "digest": "sha256:f61cce16eb641ba77d6e22f5109030f7c27b6bbc4ce857fee9d008ea9c0efa42",
+    "criterion_ids": [
+      "DOC-1-AC1",
+      "DOC-1-AC2"
+    ]
+  },
+  "criteria": [
+    {
+      "id": "DOC-1-AC1",
+      "text": "Provide a machine-derivable public-surface extractor (scripts/extract_product_surface.py) that parses open_fleet CLI commands, MCP tools, MCP resources, GitHub Action outputs, and doc-embedded file:symbol anchors directly from live code and docs/cli-and-mcp.md (no hand-copied lists), verifies 100% coverage (reference table scoped, fail-closed on missing files/empty surfaces) plus one-hop Markdown link reachability from README.md and docs/README.md.",
+      "addressed": true
+    },
+    {
+      "id": "DOC-1-AC2",
+      "text": "Provide executable negative controls in tests/test_product_surface_and_wheel.py proving that renaming a doc-anchored production symbol, adding a bogus doc anchor, dropping documented entities, breaking Markdown links, or deleting required files turns the claim check RED while clean head passes, and wire scripts/extract_product_surface.py --check into tests/test_entrypoint_guard.py, scripts/check.py, .github/workflows/validate.yml, and .github/workflows/product-package.yml.",
+      "addressed": true
+    }
+  ],
+  "commands": [
+    {
+      "label": "tests (DOC-1 Round 3 head_sha)",
+      "ts": "2026-11-25T17:22:08Z",
+      "cmd": "python3 -m unittest tests.test_product_surface_and_wheel.TestProductSurfaceDocumentationAndRenameControl",
+      "cmd_sha256": "eef46037a4e0578cfce1ddb5f567253a964e3882a1e19d42c0e9489252a90039",
+      "exit": 0,
+      "duration_s": 3.784,
+      "commit": "cfa3bd63f78df5f0e5e7ee66817ba466d860340b",
+      "wtree": "b03a4fbb85fbbd2011e0c3715bfd4790b5899783",
+      "artifact": "docs/runs/2026-11-25-document-it-selfrun/tests.txt"
+    }
+  ],
+  "negative_control": {
+    "did": "forced AST symbol anchor check ok = True in scripts/extract_product_surface.py (hand mutant) so renaming a doc-anchored symbol no longer turns check_coverage RED",
+    "tool": "hand",
+    "result": "the criterion-bound claim-check negative control went RED (mutant KILLED): exit 1, FAILED (failures=2) AssertionError",
+    "artifact": "docs/runs/2026-11-25-document-it-selfrun/negctrl.txt",
+    "command": "python3 -m unittest tests.test_product_surface_and_wheel.TestProductSurfaceDocumentationAndRenameControl"
+  },
+  "binding_audit": {
+    "coverage": "DOC-1-AC1..DOC-1-AC2 (2/2)",
+    "method": "16 CLI commands, 19 MCP tools, 10 MCP resources, 5 Action outputs, and 18 doc-embedded AST file:symbol anchors verified from live source; fresh-subprocess rename control and dropped-entity/broken-link controls all go RED under mutation"
+  },
+  "intent": {
+    "goal": "Cover the open_fleet product surface in docs/cli-and-mcp.md with zero critical gaps, 18 AST-verified doc-embedded file:symbol anchors, resolved one-hop Markdown reachability, and CI/local enforcement.",
+    "ruled_out": "hand-copied symbol allowlists decoupled from docs (caught and eliminated after Round 1 NO-GO); permissive substring link matching and cached sys.modules loads (eliminated after Round 2 NO-GO)",
+    "why": "documentation that is not extracted from live code and bound to AST-verified anchors silently drifts; a rename-to-RED negative control proves the anchor oracle is live"
+  },
+  "lighting": "dark-eligible",
+  "lane": "A",
+  "artifacts": [
+    {
+      "path": "docs/runs/2026-11-25-document-it-selfrun/contract.json",
+      "sha256": "f61cce16eb641ba77d6e22f5109030f7c27b6bbc4ce857fee9d008ea9c0efa42"
+    },
+    {
+      "path": "docs/runs/2026-11-25-document-it-selfrun/negctrl.txt",
+      "sha256": "874995ac97df8159b4b514887dfcc5d4210398cd5c88a0fc831fb53ef062e238"
+    },
+    {
+      "path": "docs/runs/2026-11-25-document-it-selfrun/review-r1.txt",
+      "sha256": "c5bece4b522d284beb9af358e088482aa9a617850bd4a121519ad64cf0fecedb"
+    },
+    {
+      "path": "docs/runs/2026-11-25-document-it-selfrun/review-r2.txt",
+      "sha256": "beb1c251ac9f0f90ecf868d61625154813d57c7fdc13065e123441d8860f0dac"
+    },
+    {
+      "path": "docs/runs/2026-11-25-document-it-selfrun/review.txt",
+      "sha256": "2f39d83eaf0d0190950e5d9e2a98bb89bc9beb93609ebc2a04e7be55c015e8d9"
+    },
+    {
+      "path": "docs/runs/2026-11-25-document-it-selfrun/surface-map.json",
+      "sha256": "48fba7f8d00ce86d98037566dbb2d6a613f3b4e7f8514bf5a88af43de83d36c3"
+    },
+    {
+      "path": "docs/runs/2026-11-25-document-it-selfrun/tests.txt",
+      "sha256": "206c78c65108050ffc57c2cd969b79aebb0288d2a299be0a190f4ed35c73ebcf"
+    }
+  ],
+  "reviewer_mode": "same-vendor-fresh",
+  "review": {
+    "artifact": "docs/runs/2026-11-25-document-it-selfrun/review.txt"
+  },
+  "toolchain": "Python 3.12 on Linux; git; unittest; independent build-blind research subagents (R1 NO-GO -> R2 NO-GO -> R3 GO)",
+  "claim": "DOC-1 extracted 100% of open_fleet public surface and 18 doc-embedded AST anchors; rename-to-RED and broken-link negative controls KILLED; wired into check.py and validate.yml; blind review GO round 3."
+}
