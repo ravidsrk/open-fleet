@@ -309,8 +309,8 @@ class TestSoloReviewAndCIAction(unittest.TestCase):
 class TestReadinessMCPCLIAndExpandedUI(unittest.TestCase):
     def test_readiness_honest_counts_and_live_cert_check(self):
         rep = OF["readiness"].readiness_report(ROOT, run_cert_check=True)
-        self.assertEqual(rep["proven_count"], 5)
-        self.assertGreaterEqual(rep["doctrine_only_count"], 17)
+        self.assertEqual(rep["proven_count"], 8)
+        self.assertGreaterEqual(rep["doctrine_only_count"], 14)
         self.assertTrue(rep["certification_check"]["ok"], rep["certification_check"])
         self.assertTrue(rep["certification_check"]["fresh"])
 
@@ -365,7 +365,7 @@ class TestReadinessMCPCLIAndExpandedUI(unittest.TestCase):
                 base = f"http://127.0.0.1:{port}"
                 with urlopen(f"{base}/api/readiness") as resp:
                     rdy = json.loads(resp.read().decode("utf-8"))
-                    self.assertEqual(rdy["proven_count"], 5)
+                    self.assertEqual(rdy["proven_count"], 8)
                 with urlopen(f"{base}/api/ci-workflow") as resp:
                     wf = json.loads(resp.read().decode("utf-8"))
                     self.assertIn("open-fleet-verify", wf["workflow_yaml"])

@@ -10,7 +10,7 @@ This reference covers how `open-fleet` is packaged for distribution, its enforce
 
 When describing `open-fleet` in external directories or release notes, distinguish between static catalog checks and live run verification:
 
-- **Static catalog checks (`validate.py`, `run_report.py`):** Enforce `agentskills.io` frontmatter, three-layer separation, badge freshness, and SHA-256 inventory bindings for retained runs in **[docs/runs/README.md](runs/README.md)**. Currently the catalog holds **2 external-run**, **3 self-run**, and **17 doctrine-only** missions.
+- **Static catalog checks (`validate.py`, `run_report.py`):** Enforce `agentskills.io` frontmatter, three-layer separation, badge freshness, and SHA-256 inventory bindings for retained runs in **[docs/runs/README.md](runs/README.md)**. Currently the catalog holds **2 external-run**, **6 self-run**, and **14 doctrine-only** missions.
 - **Off-worker live verification (`verify.py` + coordinator):** During a mission run, `verify.py` verifies frozen scope, git ancestry on `BASE`, GitHub review freshness, and negative-control replay (`--execute-nc --nc-command`), while the coordinator runs the clean-environment test suite at `head_sha`, the ≥ 10% control sample, and post-deploy revision verification.
 - **In-session native hooks (`verify-gate.sh`):** Provide local defense-in-depth inside a worker session; full soundness requires off-worker execution (CI, MCP Task, or coordinator subprocess — see [Trust boundary](verify-gate.md#trust-boundary)).
 
@@ -75,7 +75,7 @@ Per-aggregator blurbs that lead with the `proof:` framing, every submission URL,
 
 Shared lead for external directory submissions:
 
-> **open-fleet** is 22 outcome-named autonomous fleets for coding agents across the open-fleet Runtime Provider Interface (RPI) — running standalone on POSIX (`OPEN_FLEET_RUNTIME=posix`), on the Orca runtime, or across 12 external multi-agent orchestrators. Each mission is one outcome with its own state machine and an evidence-backed definition of done: every unit of work closes with a SHA-bound evidence manifest an independent verifier re-derives, never a worker's narration. Its own catalog holds five binding proof reports — two external-run (`ship-it`, `review-it`) and three self-run (`clean-sweep`, `prove-it`, `harden-it`) — with `17 doctrine-only` protocols ready to run. One router per worker; MIT.
+> **open-fleet** is 22 outcome-named autonomous fleets for coding agents across the open-fleet Runtime Provider Interface (RPI) — running standalone on POSIX (`OPEN_FLEET_RUNTIME=posix`), on the Orca runtime, or across 12 external multi-agent orchestrators. Each mission is one outcome with its own state machine and an evidence-backed definition of done: every unit of work closes with a SHA-bound evidence manifest an independent verifier re-derives, never a worker's narration. Its own catalog holds eight binding proof reports — two external-run (`ship-it`, `review-it`) and six self-run (`clean-sweep`, `prove-it`, `harden-it`, `reshape-it`, `document-it`, `root-cause`) — with `14 doctrine-only` protocols ready to run. One router per worker; MIT.
 > - **Install:** `/plugin marketplace add ravidsrk/open-fleet`
 > - **Proof:** `https://github.com/ravidsrk/open-fleet/tree/main/docs/runs`
 

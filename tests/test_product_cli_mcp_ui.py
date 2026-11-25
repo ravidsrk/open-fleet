@@ -47,7 +47,7 @@ class TestCatalogAndIntentRouter(unittest.TestCase):
         ov = OF["catalog"].catalog_overview(ROOT)
         self.assertGreaterEqual(ov["mission_count"], 22)
         self.assertEqual(ov["proof_counts"]["external-run"], 2)
-        self.assertEqual(ov["proof_counts"]["self-run"], 3)
+        self.assertEqual(ov["proof_counts"]["self-run"], 6)
         self.assertTrue(ov["quarantine"]["valid"])
         self.assertIn("orca", ov["pins"])
 

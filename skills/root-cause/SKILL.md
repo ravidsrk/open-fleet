@@ -14,7 +14,8 @@ compatibility: >-
   HARD dependency: open-fleet RPI runtime (Orca, posix, adapter). git + gh. A feedback-loop-first
   debugging playbook (mattpocock diagnosing-bugs or addyosmani debug) — one router per worker.
 metadata:
-  proof: doctrine-only
+  proof: self-run
+  proof_evidence: docs/runs/2026-11-25-root-cause-self-run.md
   autonomy: L4
   unit: one falsifiable hypothesis about one bug
   state_machine: stop-the-line → red-capable repro → rank hypotheses → falsify to one survivor → demonstrate

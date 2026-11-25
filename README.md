@@ -228,7 +228,7 @@ Every mission represents a distinct engineering outcome with its own unit of wor
 | Mission | Proof | Outcome (definition of done) | Use when |
 |---|---|---|---|
 | 🔍 **[review-it](docs/missions/review-it.md)** | `external-run` | A trusted, read-only, SHA-bound GO/NO-GO verdict — acceptance always, risk lenses when the diff triggers them. **No fix authority.** | "review this PR", "is this ready to merge" |
-| 🔬 **[root-cause](docs/missions/root-cause.md)** | `doctrine-only` | A reproduced symptom and a demonstrated cause: repro-first → falsify rival hypotheses → one survivor, with evidence; optional fix handoff | "diagnose this", "why is this happening" |
+| 🔬 **[root-cause](docs/missions/root-cause.md)** | `self-run` | A reproduced symptom and a demonstrated cause: repro-first → falsify rival hypotheses → one survivor, with evidence; optional fix handoff | "diagnose this", "why is this happening" |
 | 🧪 **[prove-it](docs/missions/prove-it.md)** | `self-run` | A mutation-audited critical surface: `COVERED` or `COVERED-WITH-PARKED`, tests that die when the code is mutated | "close the test gap", "cover the critical paths" |
 | 🧱 **[floor-it](docs/missions/floor-it.md)** | `doctrine-only` | A written, numbered quality bar: one tool per frozen dimension, every gate proven RED on an injected violation before it blocks CI: `FLOORED` or `FLOORED-WITH-PARKED` | "set the quality bar", "make CI enforce", "define our standards" |
 
@@ -246,7 +246,7 @@ Every mission represents a distinct engineering outcome with its own unit of wor
 | Mission | Proof | Outcome (definition of done) | Use when |
 |---|---|---|---|
 | 📦 **[modernize-it](docs/missions/modernize-it.md)** | `doctrine-only` | Dependency currency via expand/migrate/contract at the code level: `CURRENT` or `CURRENT-WITH-PINNED`, every pin justified | "update the dependencies", "framework migration" |
-| 🧬 **[reshape-it](docs/missions/reshape-it.md)** | `doctrine-only` | Confirmed hot modules deepened behind smaller, testable interfaces with behaviour demonstrably unchanged: `RESHAPED` or `RESHAPED-WITH-PARKED` | "god file", "architecture erosion", "refactor the hot path safely" |
+| 🧬 **[reshape-it](docs/missions/reshape-it.md)** | `self-run` | Confirmed hot modules deepened behind smaller, testable interfaces with behaviour demonstrably unchanged: `RESHAPED` or `RESHAPED-WITH-PARKED` | "god file", "architecture erosion", "refactor the hot path safely" |
 | 🗄️ **[migrate-it](docs/missions/migrate-it.md)** | `doctrine-only` | A stateful shape change landed across deploys — expand → dual-write → backfill → switch reads → zero readers → retire writes → zero writers → contract: `MIGRATED`, `MIGRATED-WITH-PARKED`, or `ABANDONED` | "migrate the database", "rename this column safely", "backfill without downtime" |
 
 ### 6. Operate, Document & Provision
@@ -254,7 +254,7 @@ Every mission represents a distinct engineering outcome with its own unit of wor
 | Mission | Proof | Outcome (definition of done) | Use when |
 |---|---|---|---|
 | 📟 **[oncall-it](docs/missions/oncall-it.md)** | `doctrine-only` | A frozen path set made operable: every on-call question answered by a quoted signal, alerts test-fired, and an induced staging failure named by a source-blind worker: `OPERABLE` or `OPERABLE-WITH-PARKED` | "make this operable", "we were blind during the incident", "add observability" |
-| 📚 **[document-it](docs/missions/document-it.md)** | `doctrine-only` | A public surface covered by quadrant with zero critical gaps, every claim bound to a `file:symbol` or a run and proven by a rename-to-RED control: `DOCUMENTED` or `DOCUMENTED-WITH-PARKED` | "document this project", "the API is undocumented", "docs coverage" |
+| 📚 **[document-it](docs/missions/document-it.md)** | `self-run` | A public surface covered by quadrant with zero critical gaps, every claim bound to a `file:symbol` or a run and proven by a rename-to-RED control: `DOCUMENTED` or `DOCUMENTED-WITH-PARKED` | "document this project", "the API is undocumented", "docs coverage" |
 | ☁️ **[offload-it](docs/missions/offload-it.md)** | `doctrine-only` | *Environment setup:* A per-workspace environment recipe stood up end to end — doctor-clear plus a live create→validate→destroy lifecycle: `OFFLOADED` or `OFFLOADED-WITH-PARKED` | "run this in the cloud", "sandbox recipe", "per-workspace environment" |
 | 📌 **[pin-it](docs/missions/pin-it.md)** | `doctrine-only` | *Maintainer-facing:* Runtime doctrine re-witnessed against the installed binary — every mechanics claim receipted CURRENT, patched, or removed: `PINNED` or `PINNED-WITH-PARKED` | "Orca updated", "re-pin the runtime contract", "policy lags practice" |
 
@@ -270,7 +270,7 @@ Every mission represents a distinct engineering outcome with its own unit of wor
 
 Every mission's `metadata:` block carries a validator-enforced `proof:` tier (`doctrine-only`, `self-run`, or `external-run`). Advancing past `doctrine-only` requires retained artifacts that hash true at a named commit: a run report with a `RUN:` header, a per-unit evidence manifest in the run's `docs/runs/` directory, and a SHA-256 inventory verified at the commit the header names.
 <!-- BEGIN GENERATED: proof-status — scripts/gen-badges.py -->
-**Today `review-it` and `ship-it` read `external-run`; `clean-sweep`, `harden-it` and `prove-it` read `self-run`; every other mission reads `doctrine-only`.**
+**Today `review-it` and `ship-it` read `external-run`; `clean-sweep`, `document-it`, `harden-it`, `prove-it`, `reshape-it` and `root-cause` read `self-run`; every other mission reads `doctrine-only`.**
 <!-- END GENERATED: proof-status -->
 Browse all retained runs in the [run archive](docs/runs/README.md). Note the scope of the static repository gate: it hashes, it does not re-run the verifier against a live target checkout; see [Concepts — Proof status](docs/concepts.md#proof-status) for how static binding and live verification complement each other.
 

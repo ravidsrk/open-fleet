@@ -25,4 +25,9 @@
   verification GitHub Action (`.github/actions/open-fleet-verify/action.yml` + `open_fleet/ci_action.py`),
   an honest proof-graduation & certification readiness workbench (`open_fleet/readiness.py`), and the
   interactive 6-tab Mission Control web cockpit ([`docs/cli-and-mcp.md`](../docs/cli-and-mcp.md),
-  [`docs/product-blueprint.md`](../docs/product-blueprint.md)).
+  [`docs/product-blueprint.md`](../docs/product-blueprint.md)). Executes RV-D3 kernel deepening of
+  `runtime/scripts/verify.py` (`WIDTH` 91 → 84 behind hashed sibling `runtime/scripts/_verify_diff.py`),
+  adds AST-anchored product-surface verification (`scripts/extract_product_surface.py`), standalone
+  wheel + fresh-venv verification (`scripts/verify_wheel.py`), and CI/PyPI release workflows
+  (`.github/workflows/product-package.yml`, `.github/workflows/publish-pypi.yml`), and graduates
+  `reshape-it`, `document-it`, and `root-cause` to bound `self-run` proof (`8/22` proven missions).

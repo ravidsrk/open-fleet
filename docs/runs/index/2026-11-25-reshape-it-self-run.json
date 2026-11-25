@@ -1,0 +1,10 @@
+{
+  "date": "2026-11-25",
+  "report": "2026-11-25-reshape-it-self-run.md",
+  "mission": "[reshape-it](2026-11-25-reshape-it-self-run.md)",
+  "target": "this catalog (verify.py RV-D3 -> _verify_diff.py)",
+  "ran_as": "self-run",
+  "binds": "yes",
+  "outcome": "RESHAPED (WIDTH 91->84; mutant killed + revert check; R1 GO)",
+  "summary": "RV-D3 deepening of verify.py diff and hunk-binding engine into hashed sibling _verify_diff.py"
+}
