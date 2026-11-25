@@ -876,7 +876,7 @@ class _Authority:
             return None, name, f"could not be classed (gitexec.py: {err})"
 
     @classmethod
-    def key_source(cls, source, what):
+    def key_source(cls, source, what, *, probe_git=True):
         """(where, the source to READ, pinned, refusal or None) for trust material named `path`
         or `path@ref` (W3-03).
 
@@ -911,6 +911,14 @@ class _Authority:
             read, pinned = source, False
         elif ref.startswith("-"):
             return f"{path} at {ref!r}", source, False, None  # read_source refuses it
+        elif not probe_git:
+            # Syntax-only pre-classification before an untrusted git binary may be executed (#768):
+            # matches the exact anchor shapes (full refs/remotes/… or 40/64-hex commit id).
+            pinned = ref.startswith("refs/remotes/") or bool(
+                re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", ref.lower())
+            )
+            where = f"{path} at {ref!r}"
+            read = source
         else:
             commit, target, why = cls.anchor_commit(ref)
             if commit is not None:
@@ -1440,6 +1448,48 @@ class _Authority:
             a = rest[i]
             if a == "--":
                 break
+            if a.startswith(tuple(opt + "=" for opt in long_opts)):
+                val = a.split("=", 1)[1]
+                err = cls._check_rel_operand(tok, val, "config")
+                if err:
+                    return None, err
+                staged.append(val)
+                if program == "grep":
+                    saw_grep_pat = True
+                i += 1
+                continue
+            if a in long_opts:
+                if i + 1 >= len(rest):
+                    return None, f"proof executable {tok!r} {a} missing operand; fail-closed (#750 C19)"
+                err = cls._check_rel_operand(tok, rest[i + 1], "config")
+                if err:
+                    return None, err
+                staged.append(rest[i + 1])
+                if program == "grep":
+                    saw_grep_pat = True
+                i += 2
+                continue
+            if a in value_opts:
+                if i + 1 >= len(rest):
+                    return None, f"proof executable {tok!r} {a} missing operand; fail-closed (#750 C19)"
+                err = cls._check_rel_operand(tok, rest[i + 1], "config")
+                if err:
+                    return None, err
+                staged.append(rest[i + 1])
+                if program == "grep":
+                    saw_grep_pat = True
+                i += 2
+                continue
+            if a.startswith(value_opts) and len(a) > 2:
+                val = a[2:]
+                err = cls._check_rel_operand(tok, val, "config")
+                if err:
+                    return None, err
+                staged.append(val)
+                if program == "grep":
+                    saw_grep_pat = True
+                i += 1
+                continue
             if program == "pytest":
                 if (
                     a in ("-o", "-p", "--override-ini", "--rootdir", "--confcutdir", "--basetemp", "--import-mode", "--pyargs")
@@ -1468,43 +1518,7 @@ class _Authority:
                     saw_grep_pat = True
                     i += 1
                     continue
-            if a.startswith(tuple(opt + "=" for opt in long_opts)):
-                val = a.split("=", 1)[1]
-                err = cls._check_rel_operand(tok, val, "config")
-                if err:
-                    return None, err
-                staged.append(val)
-                if program == "grep":
-                    saw_grep_pat = True
-            elif a in long_opts:
-                if i + 1 >= len(rest):
-                    return None, f"proof executable {tok!r} {a} missing operand; fail-closed (#750 C19)"
-                err = cls._check_rel_operand(tok, rest[i + 1], "config")
-                if err:
-                    return None, err
-                staged.append(rest[i + 1])
-                if program == "grep":
-                    saw_grep_pat = True
-                i += 1
-            elif a in value_opts:
-                if i + 1 >= len(rest):
-                    return None, f"proof executable {tok!r} {a} missing operand; fail-closed (#750 C19)"
-                err = cls._check_rel_operand(tok, rest[i + 1], "config")
-                if err:
-                    return None, err
-                staged.append(rest[i + 1])
-                if program == "grep":
-                    saw_grep_pat = True
-                i += 1
-            elif a.startswith(value_opts) and len(a) > 2:
-                val = a[2:]
-                err = cls._check_rel_operand(tok, val, "config")
-                if err:
-                    return None, err
-                staged.append(val)
-                if program == "grep":
-                    saw_grep_pat = True
-            elif len(a) > 1 and a[0] == "-" and a[1] != "-" and any(opt[1] in a[1:] for opt in value_opts):
+            if len(a) > 1 and a[0] == "-" and a[1] != "-" and any(opt[1] in a[1:] for opt in value_opts):
                 return None, f"proof executable {tok!r} uses ambiguous option cluster {a!r}; fail-closed (#750 C19)"
             elif program == "pytest" and not a.startswith("-"):
                 p_part = a.split("::", 1)[0]
@@ -1627,7 +1641,7 @@ class _Authority:
         return None if s_err else script_op
 
     @classmethod
-    def _unwrap_nc_indexed(cls, argv):
+    def _unwrap_nc_indexed(cls, argv, *, check_target_operands=True):
         """Extract `[(argv_idx, tok), ...]` across wrappers, failing closed on lookup/env/shell bypasses."""
         indexed = []
         idx = 0
@@ -1774,9 +1788,10 @@ class _Authority:
                     return None, "timeout wrapper missing duration or target proof command; fail-closed (#750 C19)"
                 idx += 1  # duration operand
             else:
-                _, t_err = cls._parse_target_operands(tok, rest)
-                if t_err:
-                    return None, t_err
+                if check_target_operands:
+                    _, t_err = cls._parse_target_operands(tok, rest)
+                    if t_err:
+                        return None, t_err
                 break
         return indexed, None
 
@@ -2563,29 +2578,46 @@ def _command_oracle_paths(command):
     argv = shlex.split(command) if command else []
     if not argv:
         return set()
-    inputs = argv[:1]
-    # Only one transparent env wrapper and optional --. Environment assignments, cwd changes
-    # and command splitting can redirect executable inputs, so require a different grammar.
-    if Path(argv[0]).name == "env":
-        argv = argv[1:]
-        if argv[:1] == ["--"]:
-            argv = argv[1:]
-        if not argv or argv[0].startswith("-") or "=" in argv[0]:
-            return None
-        inputs.append(argv[0])
-    program = Path(argv[0]).name
+    indexed, err = _Authority._unwrap_nc_indexed(argv, check_target_operands=False)
+    if err or not indexed:
+        return None
+    wrapper_names = [Path(tok).name for _, tok in indexed[:-1]]
+    if "nice" in wrapper_names or wrapper_names.count("env") > 1:
+        return None
+    inputs = [tok for _, tok in indexed]
+    target_idx, target_tok = indexed[-1]
+    argv = argv[target_idx:]
+    program = Path(target_tok).name
     python = re.fullmatch(r"(?:python|pypy)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", program)
-    interpreter = python or bool(
+    is_shell = _Authority._is_shell_name(program)
+    other_interp = bool(
         re.fullmatch(
-            r"(?:sh|bash|dash|zsh|ksh|mksh|pdksh|yash|posh|ash|node(?:js)?|ruby|perl|php|lua(?:jit)?|Rscript)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?",
+            r"(?:node(?:js)?|ruby|perl|php|lua(?:jit)?|Rscript)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?",
             program,
         )
     )
+    is_pytest = bool(re.fullmatch(r"(?:pytest|py\.test)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", program))
+    is_grep = bool(re.fullmatch(r"(?:[efg]?grep)(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", program))
+    is_make = bool(re.fullmatch(r"g?make(?:[-.]?[0-9]+(?:\.[0-9]+)*)?", program))
     module = None
     # Where the sweep below starts: the option list it reads belongs to the program, and for an
     # interpreter that is the SCRIPT, whose arguments begin after the script name.
     scan_from = 1
-    if interpreter:
+    if is_shell:
+        script_op, sh_err = _Authority._parse_shell_script_operand(target_tok, argv[1:])
+        if sh_err or not script_op:
+            return None
+        inputs.append(script_op)
+        si = 1
+        while si < len(argv):
+            if argv[si] == "--":
+                si += 1
+                break
+            if argv[si] == script_op:
+                break
+            si += 2 if argv[si] in ("-o", "+o") else 1
+        scan_from = si + 1 if (si < len(argv) and argv[si] == script_op) else len(argv)
+    elif python or other_interp:
         i = 1
         while python and i < len(argv) and argv[i] in {
                 "-B", "-E", "-I", "-O", "-OO", "-s", "-S", "-u", "-q"}:
@@ -2612,7 +2644,7 @@ def _command_oracle_paths(command):
             # as python3 left `python3 -m pytest -c custom.ini` classifying the
             # config as production, so a config-only revert could fake RED.
             if name == "pytest":
-                program = "pytest"
+                is_pytest = True
         else:
             if arg == "--":
                 i += 1
@@ -2622,7 +2654,7 @@ def _command_oracle_paths(command):
                 return None
             inputs.append(argv[i])
             scan_from = i + 1
-    elif program in {"make", "gmake"}:
+    elif is_make:
         i = 1
         while i < len(argv):
             arg = argv[i]
@@ -2636,7 +2668,7 @@ def _command_oracle_paths(command):
             elif arg.startswith("-") or "=" in arg:
                 return None
             i += 1
-    elif program not in {"grep", "pytest"}:
+    elif not (is_grep or is_pytest):
         return None
     # Explicit configuration is executable proof input. Data subjects (e.g. grep operands)
     # remain mutable. Arbitrary transitive dependencies are outside this bounded grammar.
@@ -2647,7 +2679,7 @@ def _command_oracle_paths(command):
     # ordinary classifier as production and a revert control could turn the proof RED by
     # changing the proof itself (PR #323 review, P1). `grep -c` is a counting flag taking no
     # value at all, which is why this cannot simply be one longer list.
-    value_opts = ("-f",) + {"pytest": ("-c",)}.get(program, ())
+    value_opts = ("-f",) + (("-c",) if is_pytest else ())
     long_opts = ("--config", "--config-file", "--file")
     i = scan_from
     while i < len(argv):
@@ -3273,7 +3305,7 @@ def _extract_diff(text):
     """Pull the unified diff out of a `hand` NC artifact. The diff runs from the first `diff --git`
     or `--- ` header through the last line that still looks like diff body; trailing prose (the
     test output that shows the RED) is dropped."""
-    lines = text.splitlines()
+    lines = [ln[:-1] if ln.endswith("\r") else ln for ln in text.split("\n")]
     start = next((i for i, ln in enumerate(lines)
                   if ln.startswith("diff --git ") or ln.startswith("--- ")), None)
     if start is None:
@@ -3634,17 +3666,34 @@ def execute_negative_control(m, nc_command=None):
         if not common_path.is_absolute():
             common_path = Path(top) / common_path
         objects = (common_path / "objects").resolve()
+        obj_bytes = os.fsencode(str(objects))
+        if b"\n" in obj_bytes or b"\r" in obj_bytes or b"\0" in obj_bytes:
+            return f"cannot stage the {phase} repository: object store path contains control/newline bytes"
         alt = Path(repo) / ".git" / "objects" / "info" / "alternates"
         alt.parent.mkdir(parents=True, exist_ok=True)
         # The checkout path is a filesystem path. ascii fails when it contains
         # a non-ASCII directory (PR #571 review); the bytes git will open are
         # the filesystem encoding.
-        alt.write_bytes(os.fsencode(str(objects)) + b"\n")
-        code, listing, gerr = _run([git, "-C", top, "for-each-ref", "--format=%(refname)"],
+        alt.write_bytes(obj_bytes + b"\n")
+        # Stage ONLY HEAD's symbolic branch ref (if under refs/heads/) and refs/tags/*
+        # peeling to `head` (retargeted unsigned to `commit`). Never copy refs/replace/*,
+        # refs/notes/*, or unrelated worker refs into the phase repository.
+        code, sym, _ = _run([git, "-C", top, "symbolic-ref", "-q", "HEAD"], timeout=30, env=env)
+        sym_ref = sym.strip() if code == 0 and sym.strip().startswith("refs/heads/") else ""
+        if sym_ref:
+            code, _, gerr = _run([git, "-C", repo, "update-ref", sym_ref, str(commit)],
+                                 timeout=30, env=env)
+            if code != 0:
+                return f"could not copy {sym_ref} into the {phase} repository: {gerr.strip()}"
+            code, _, gerr = _run([git, "-C", repo, "symbolic-ref", "HEAD", sym_ref],
+                                 timeout=30, env=env)
+            if code != 0:
+                return f"could not set HEAD in the {phase} repository: {gerr.strip()}"
+        code, listing, gerr = _run([git, "-C", top, "for-each-ref", "--format=%(refname)", "refs/tags/"],
                                    timeout=60, env=env)
         if code != 0:
-            return f"could not read the source refs for the {phase} repository: {gerr.strip()}"
-        for ref in listing.splitlines():
+            return f"could not read the source tag refs for the {phase} repository: {gerr.strip()}"
+        for ref in [r for r in listing.split("\n") if r]:
             code, direct, gerr = _run([git, "-C", top, "rev-parse", "--verify", ref],
                                       timeout=30, env=env)
             if code != 0:
@@ -3653,25 +3702,19 @@ def execute_negative_control(m, nc_command=None):
             code, peeled, _ = _run([git, "-C", top, "rev-parse", "--verify", f"{ref}^{{commit}}"],
                                    timeout=30, env=env)
             peeled = peeled.strip() if code == 0 else ""
+            if direct != head and peeled != head:
+                continue
             if direct == commit:
-                target = direct  # a lightweight ref already at this phase's commit
+                target = direct
             elif peeled == head and direct != head:
                 target, tag_err = _retarget_tag(top, repo, direct, commit)
                 if tag_err:
                     return f"could not retarget {ref} in the {phase} repository: {tag_err}"
-            elif direct == head or peeled == head:
-                target = commit
             else:
-                target = direct
+                target = commit
             code, _, gerr = _run([git, "-C", repo, "update-ref", ref, target], timeout=30, env=env)
             if code != 0:
                 return f"could not copy {ref} into the {phase} repository: {gerr.strip()}"
-        code, sym, _ = _run([git, "-C", top, "symbolic-ref", "-q", "HEAD"], timeout=30, env=env)
-        if code == 0 and sym.strip():
-            code, _, gerr = _run([git, "-C", repo, "symbolic-ref", "HEAD", sym.strip()],
-                                 timeout=30, env=env)
-            if code != 0:
-                return f"could not set HEAD in the {phase} repository: {gerr.strip()}"
         # The phase repository names no attributes or ignore file of its own, so git would open
         # its default user ones (~/.config/git/attributes and .../ignore, the worker's to write on a
         # one-uid host): a FIFO there blocked this checkout (PR #724 re-attack). Pinned to
@@ -4541,7 +4584,7 @@ class _Transcript:
         return files
 
     @classmethod
-    def build(cls, args, exit_code, fatal, notes, raw=None, files=None):
+    def build(cls, args, exit_code, fatal, notes, raw=None, files=None, *, skip_git=False):
         """The verdict object: what was judged (manifest path AND bytes, the unit it names), with
         what (the full argument tuple — unset flags included, so an omitted authority is visibly
         omitted), what was found (the printed lists, verbatim), the exit code, the toolchain, when.
@@ -4555,10 +4598,13 @@ class _Transcript:
         if raw is not None:
             manifest_sha = hashlib.sha256(raw).hexdigest()
             try:
-                unit = json.loads(raw.decode("utf-8")).get("unit")
+                parsed = json.loads(raw.decode("utf-8"))
+                unit = parsed.get("unit") if isinstance(parsed, dict) else None
             except (ValueError, AttributeError):
                 unit = None
-        _, git_version, _ = _run([_Authority.git_bin(), "--version"], env=_Authority.git_env())
+        git_version = ""
+        if not skip_git:
+            _, git_version, _ = _run([_Authority.git_bin(), "--version"], env=_Authority.git_env())
         # W3-11: `files` is the toolchain as hashed BEFORE verify() ran — the bytes that judged.
         # Hashed here, after the executed control had run worker code, a mid-run rewrite of a
         # sibling was recorded as if it were the verifier.
@@ -4628,7 +4674,9 @@ def _manifest_nc_values(m):
     nc_artifact_sha256 is derived, not declared: the record signs the CONTENT of the control's
     artifact, so the gate hashes the file the manifest points at rather than trusting a digest the
     same manifest supplies. Unreadable is None here and fails closed at the comparison."""
-    nc = m.get("negative_control") or {}
+    nc = m.get("negative_control")
+    if not isinstance(nc, dict):
+        nc = {}
     paths = nc.get("paths")
     digest = None
     art = nc.get("artifact")
@@ -4683,7 +4731,11 @@ def check_dispatch_provenance(m, contract_digest, unit_class, lighting, record_r
         return [f"dispatch pubkey unreadable ({pubkey_ref}): {err}"]
     try:
         envelope = json.loads(rec_text.decode("utf-8"))
+        if not isinstance(envelope, dict):
+            return ["dispatch record malformed (envelope must be a JSON object)"]
         record = envelope["record"]
+        if not isinstance(record, dict):
+            return ["dispatch record malformed ('record' must be a JSON object)"]
         sig = base64.b64decode(envelope["sig_b64"], validate=True)  # as run_report/inventory (h409 O-2.2)
         pub = bytes.fromhex(pub_text.decode("utf-8").strip())
     except (ValueError, KeyError, TypeError) as exc:
@@ -4819,7 +4871,9 @@ def check_replay_request(m, is_mutation, execute_nc, nc_command):
     """Validate requested replay capabilities without entering the executor."""
     if not is_mutation or not execute_nc:
         return []
-    nc = m.get("negative_control") or {}
+    nc = m.get("negative_control")
+    if not isinstance(nc, dict):
+        nc = {}
     tool = nc.get("tool")
     if tool not in EXECUTABLE_NC_TOOLS or _Authority.unreplayable_tool(m, nc, tool):
         return [f"--execute-nc: no replay is implemented for negative_control.tool {tool!r} "
@@ -4864,14 +4918,18 @@ def verify(manifest_path, contract_source=None, contract_digest=None, repo=None,
     # clean provenance verdict; the provenance check below re-verifies with the adopted values,
     # so a record swapped between the two reads fails there as a substitution.
     if dispatch_record and dispatch_pubkey and (lane is None or lighting is None):
-        verdict = check_dispatch_provenance(m, contract_digest, unit_class, lighting,
-                                            dispatch_record, dispatch_pubkey, no_gh=no_gh,
-                                            lane=lane, execute_nc=execute_nc,
-                                            allow_static_nc=allow_static_nc)
+        try:
+            verdict = check_dispatch_provenance(m, contract_digest, unit_class, lighting,
+                                                dispatch_record, dispatch_pubkey, no_gh=no_gh,
+                                                lane=lane, execute_nc=execute_nc,
+                                                allow_static_nc=allow_static_nc)
+        except Exception:
+            verdict = ["malformed dispatch record"]
         rec_text, rec_err = read_source(dispatch_record)
         if all(line.startswith("NOTE:") for line in verdict) and not rec_err:
             try:
-                signed = json.loads(rec_text.decode("utf-8"))["record"]
+                parsed_env = json.loads(rec_text.decode("utf-8"))
+                signed = parsed_env["record"] if isinstance(parsed_env, dict) else {}
             except (ValueError, KeyError, TypeError):
                 signed = {}
             if isinstance(signed, dict):
@@ -5074,9 +5132,7 @@ def main(argv=None):
     if args.provenance in _Authority.SOUND_PROVENANCE:
         early_lane = f"provenance={args.provenance}"
     elif args.dispatch_record and args.dispatch_pubkey:
-        _, sep, ref = args.dispatch_pubkey.partition("@")
-        if sep and ref and (ref.startswith("refs/remotes/")
-                            or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", ref.lower())):
+        if _Authority.key_source(args.dispatch_pubkey, "--dispatch-pubkey", probe_git=False)[2]:
             early_lane = "enforcement (signed dispatch record + pubkey)"
     if early_lane and _Authority.git_custody != "system":
         _Authority.lane = early_lane
@@ -5085,6 +5141,14 @@ def main(argv=None):
                "binary the graded worker could have replaced; fail-closed (h409 R2)")
         print(f"FAIL: {msg}", file=sys.stderr)
         print("verify: 1 invariant(s) failed — unit is NOT done", file=sys.stderr)
+        if args.transcript_out is not None:
+            try:
+                raw_manifest = Path(args.manifest).read_bytes()
+            except OSError:
+                raw_manifest = None
+            record = _Transcript.build(args, 2, [msg], [], raw=raw_manifest,
+                                       files=_Transcript.hash_files(), skip_git=True)
+            _Transcript.write(args.transcript_out, record, None)
         return 2
     if args.transcript_key is not None:
         seed, err = _Transcript.seed(args.transcript_key)

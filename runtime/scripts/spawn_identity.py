@@ -66,6 +66,7 @@ if (__name__ == "__main__" and not getattr(sys.flags, "safe_path", False) and sy
 
 import argparse
 import os
+import pwd
 import re
 import subprocess
 import tempfile
@@ -426,6 +427,37 @@ def _profile(text: str) -> str:
     return word if word in PROFILES else "invalid"
 
 
+_PROFILE_RANK = {"ro": 0, "rw": 1, "danger": 2}
+
+
+def _more_restrictive(a: str, b: str) -> str:
+    if a not in _PROFILE_RANK or b not in _PROFILE_RANK:
+        return "invalid"
+    return a if _PROFILE_RANK[a] <= _PROFILE_RANK[b] else b
+
+
+def _uid_home() -> str | None:
+    try:
+        pw_dir = pwd.getpwuid(os.getuid()).pw_dir
+    except (KeyError, OSError):
+        return None
+    return pw_dir or None
+
+
+def _read_only_live(reg: Registry, name: str) -> list[str]:
+    """Entries whose process may still be running, without mutating `reg`."""
+    return [k for k in reg.entries(name) if alive(k) is not False]
+
+
+def _read_only_live_roots(reg: Registry) -> dict[str, str]:
+    out = {}
+    for k in _read_only_live(reg, ".roots"):
+        text = reg.read(".roots", k)
+        if text is not None:
+            out[k] = _profile(text)
+    return out
+
+
 def whoami(reg: Registry, pid: int) -> list[str]:
     """Lines: ROOT <profile> <key> per recorded root among pid's ancestors; INTREE yes|no;
     ANCHORED yes|no; LIVE <profile> per live root anywhere; RESERVATION <profile> <inflight> <path>
@@ -443,8 +475,28 @@ def whoami(reg: Registry, pid: int) -> list[str]:
     if not mine:
         raise Unknown("cannot read this process's ancestry")
     ancestors = set(mine)
-    lines = [f"ROOT {prof} {k}" for k, prof in live.items() if k in ancestors]
     hosts = reg.live(".hosts")
+    # W4-04 HOME-switch defense: a capped worker that runs `HOME=/tmp/empty spawn_worker.sh`
+    # points `--registry` at an empty directory while its true pane root/host lives in the uid's
+    # passwd home directory. Consult that registry read-only whenever it differs and fold its
+    # records when THIS process's own ancestor tree matches a live root or host there.
+    pw_dir = _uid_home()
+    if pw_dir:
+        uid_reg = Registry(str(Path(pw_dir) / ".open-fleet" / "spawn-profiles"))
+        if os.path.realpath(str(uid_reg.root)) != os.path.realpath(str(reg.root)) and uid_reg.root.is_dir():
+            uid_live = _read_only_live_roots(uid_reg)
+            uid_hosts = _read_only_live(uid_reg, ".hosts")
+            if ancestors & (set(uid_live) | set(uid_hosts)):
+                for k, prof in uid_live.items():
+                    live[k] = _more_restrictive(live[k], prof) if k in live else prof
+                for hk in uid_hosts:
+                    if hk not in hosts:
+                        hosts.append(hk)
+                for name in uid_reg.entries(".pending", re.compile(r"r\.")):
+                    text = uid_reg.read(".pending", name)
+                    if text is not None:
+                        snapshot.append((uid_reg._dir(".pending") / name, text.split()))
+    lines = [f"ROOT {prof} {k}" for k, prof in live.items() if k in ancestors]
     lines.append("INTREE " + ("yes" if ancestors & set(hosts) else "no"))
     # An anchor counts only while it is certainly alive and no live root and no host descends from
     # it; a root or host whose ancestry cannot be read could shadow any of them, so then none counts.

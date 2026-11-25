@@ -93,6 +93,13 @@ def _load_ed25519():
     return mod
 
 
+def _load_gitexec():
+    spec = importlib.util.spec_from_file_location("gitexec", _HERE / "gitexec.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 # The signed fields — the dispatch tuple a worker must not be able to forge. Canonicalized HERE
 # only: verify.py loads this file and verifies over canonical_record, so the bytes the signature
 # covers cannot drift between signer and gate (2026-10-23 review, P2-2).
@@ -254,24 +261,37 @@ def _in_unignored_worktree(path: Path) -> bool:
         if ancestor == ancestor.parent:
             break
         ancestor = ancestor.parent
+    gx = _load_gitexec()
+    base_env = gx.custody_env()
+    env_probe = dict(base_env)
+    for var in ("GIT_DIR", "GIT_WORK_TREE"):
+        if var in os.environ:
+            env_probe[var] = os.environ[var]
+    from_env = False
     if not under_git:
         # No .git ancestor — the only remaining way `git add` could stage this path is a repo
-        # resolved from the environment (GIT_DIR, core.worktree). Ask git itself.
+        # resolved from the environment (GIT_DIR, core.worktree). Ask git itself under a
+        # hardened custody floor (scrubbing GIT_EXEC_PATH, GIT_CONFIG_PARAMETERS, global/system
+        # config, hooks and fsmonitor) while preserving only GIT_DIR/GIT_WORK_TREE.
         try:
-            top = subprocess.run(_git_cmd("rev-parse", "--show-toplevel"),
-                                 cwd=probe, capture_output=True, text=True)
-        except OSError:
+            top = subprocess.run(gx.argv("rev-parse", "--show-toplevel"),
+                                 cwd=probe, capture_output=True, text=True,
+                                 timeout=30, env=env_probe, stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.SubprocessError):
             return False  # no .git ancestor AND no git binary: nothing can stage the file
         if top.returncode != 0:
             return False  # proven: no work tree claims the path — the out-of-repo layout
         toplevel = Path(top.stdout.strip()).resolve()
         under_git = resolved == toplevel or toplevel in resolved.parents
+        from_env = under_git
     if not under_git:
         return False
+    check_env = env_probe if from_env else base_env
     try:
-        check = subprocess.run(_git_cmd("check-ignore", "-q", "--", str(resolved)),
-                               cwd=probe, capture_output=True)
-    except OSError:
+        check = subprocess.run(gx.argv("check-ignore", "-q", "--", str(resolved)),
+                               cwd=probe, capture_output=True, timeout=30,
+                               env=check_env, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
         return True  # in a work tree but git won't run — cannot prove the path is ignored
     return check.returncode != 0  # 0 = ignored (safe); 1 = not ignored; anything else = unknown
 

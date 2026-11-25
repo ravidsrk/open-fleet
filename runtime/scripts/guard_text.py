@@ -67,6 +67,7 @@ if (__name__ == "__main__" and not getattr(sys.flags, "safe_path", False) and sy
 import argparse
 import os
 import re
+import shutil
 import subprocess
 import unicodedata
 
@@ -335,25 +336,35 @@ _GH_API_RO_SHORT_VAL = "HqtpR"
 _ORCA_RO_SERVICES = frozenset({"linear", "jira"})
 _ORCA_RO_ACTIONS = frozenset({"list", "search", "issue", "view", "get"})
 _RO_HTTP_METHODS = frozenset({"GET", "HEAD"})
+_ORCA_CLI_SIBLING = os.path.realpath(
+    os.path.join(os.path.dirname(os.path.realpath(__file__)), "orca_cli.py")
+)
 _CURL_MUTATING_LONG_PREFIXES = (
     "--data", "--json", "--form", "--upload-file", "--output", "--remote-name",
     "--remote-header-name", "--dump-header", "--cookie-jar", "--config", "--trace",
+    "--stderr", "--hsts", "--etag-save", "--libcurl", "--expand", "--alt-svc",
+    "--variable", "--next", "--quote", "--create-dirs", "--ssl-sessions",
+    "--mail-from", "--mail-rcpt", "--mail-auth", "--ftp-create-dirs",
+    "--unix-socket", "--abstract-unix-socket",
 )
 _CURL_RO_LONG_VAL = frozenset({
     "--header", "--user-agent", "--referer", "--max-time", "--connect-timeout",
     "--cookie", "--proxy", "--user", "--url", "--resolve", "--retry", "--retry-delay",
     "--cacert", "--cert", "--key", "--interface", "--range", "--write-out", "--url-query",
 })
-_WGET_MUTATING_LONG_PREFIXES = (
-    "--output", "--append-output", "--directory-prefix", "--post-data", "--post-file",
-    "--body-data", "--body-file", "--save-cookies", "--config", "--data", "--form",
-    "--upload-file", "--request",
-)
-_WGET_RO_LONG_VAL = frozenset({
-    "--header", "--user-agent", "--referer", "--timeout", "--tries", "--wait",
-    "--load-cookies", "--ca-certificate", "--certificate", "--private-key",
-    "--user", "--password", "--http-user", "--http-password",
+_WGET_RO_LONG_FLAGS = frozenset({
+    "--quiet", "--no-verbose", "--verbose", "--spider", "--no-check-certificate",
+    "--content-on-error", "--inet4-only", "--inet6-only", "--no-cookies",
+    "--no-cache", "--no-dns-cache", "--no-proxy", "--server-response",
 })
+_WGET_RO_LONG_VAL = frozenset({
+    "--header", "--user-agent", "--referer", "--timeout", "--dns-timeout",
+    "--connect-timeout", "--read-timeout", "--tries", "--wait", "--max-redirect",
+    "--load-cookies", "--ca-certificate", "--certificate", "--private-key",
+    "--user", "--password", "--http-user", "--http-password", "--compression",
+})
+_WGET_RO_SHORT_FLAGS = "qvS46"
+_WGET_RO_SHORT_VAL = "UtTw"
 
 
 def _validate_gh_fetch(rest):
@@ -446,11 +457,91 @@ def _validate_orca_fetch(rest):
         raise RuntimeError("fetch refused: only read-only orca linear/jira subcommands are allowed")
 
 
+def _has_path_sep(tok):
+    return "/" in tok or os.sep in tok or (bool(os.altsep) and os.altsep in tok)
+
+
+def _resolve_bare_binary(name):
+    abs_dirs = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p and os.path.isabs(p)]
+    if not abs_dirs:
+        return None
+    return shutil.which(name, path=os.pathsep.join(abs_dirs))
+
+
 def _validate_http_fetch(tool, rest):
-    mut_prefixes = _CURL_MUTATING_LONG_PREFIXES if tool == "curl" else _WGET_MUTATING_LONG_PREFIXES
-    ro_long_val = _CURL_RO_LONG_VAL if tool == "curl" else _WGET_RO_LONG_VAL
-    mut_shorts = "dFToODcKJ" if tool == "curl" else "oOPadFT"
-    ro_short_val = "HAeumbxUrwEzYyC" if tool == "curl" else "UtTw"
+    if tool == "wget":
+        stdout_output = False
+        is_head = False
+        is_spider = False
+        i = 0
+        while i < len(rest):
+            w = rest[i]
+            if w == "--":
+                break
+            if w.startswith("--"):
+                opt, eq, val = w.partition("=")
+                if opt == "--method":
+                    method = val if eq else (rest[i + 1] if i + 1 < len(rest) else "")
+                    if method.upper() not in _RO_HTTP_METHODS:
+                        raise RuntimeError(f"fetch refused: wget {opt} {method!r} is not read-only")
+                    if method.upper() == "HEAD":
+                        is_head = True
+                    i += 1 if eq else 2
+                    continue
+                if opt == "--output-document":
+                    target = val if eq else (rest[i + 1] if i + 1 < len(rest) else "")
+                    if target != "-":
+                        raise RuntimeError(f"fetch refused: wget {opt} {target!r} is not read-only")
+                    stdout_output = True
+                    i += 1 if eq else 2
+                    continue
+                if opt in _WGET_RO_LONG_FLAGS and not eq:
+                    if opt == "--spider":
+                        is_spider = True
+                    i += 1
+                    continue
+                if opt in _WGET_RO_LONG_VAL:
+                    if not eq and i + 1 >= len(rest):
+                        raise RuntimeError(f"fetch refused: wget flag {opt!r} missing value")
+                    i += 1 if eq else 2
+                    continue
+                raise RuntimeError(f"fetch refused: wget flag {opt!r} is not in the read-only allowlist")
+            if w == "-nv":
+                i += 1
+                continue
+            if w.startswith("-") and len(w) > 1:
+                cluster = w[1:]
+                step = 1
+                for k, ch in enumerate(cluster):
+                    if ch == "O":
+                        rem = cluster[k + 1:]
+                        target = rem if rem else (rest[i + 1] if i + 1 < len(rest) else "")
+                        if target != "-":
+                            raise RuntimeError(f"fetch refused: wget -O {target!r} is not read-only")
+                        stdout_output = True
+                        if not rem:
+                            step = 2
+                        break
+                    if ch in _WGET_RO_SHORT_VAL:
+                        if k == len(cluster) - 1:
+                            if i + 1 >= len(rest):
+                                raise RuntimeError(f"fetch refused: wget flag -{ch} missing value")
+                            step = 2
+                        break
+                    if ch in _WGET_RO_SHORT_FLAGS:
+                        continue
+                    raise RuntimeError(f"fetch refused: wget flag -{ch} is not in the read-only allowlist")
+                i += step
+                continue
+            i += 1
+        if not (stdout_output or is_head or is_spider):
+            raise RuntimeError(
+                "fetch refused: wget writes files by default; pass -O - or --output-document=-"
+            )
+        return
+
+    mut_shorts = "dFToODcKJQ:"
+    ro_short_val = "HAeumbxUrwEzYyC"
     i = 0
     while i < len(rest):
         w = rest[i]
@@ -461,12 +552,14 @@ def _validate_http_fetch(tool, rest):
             if opt in ("--request", "--method"):
                 method = val if eq else (rest[i + 1] if i + 1 < len(rest) else "")
                 if method.upper() not in _RO_HTTP_METHODS:
-                    raise RuntimeError(f"fetch refused: {tool} {opt} {method!r} is not read-only")
+                    raise RuntimeError(f"fetch refused: curl {opt} {method!r} is not read-only")
                 i += 1 if eq else 2
                 continue
-            if any(opt == p or opt.startswith(p + "-") for p in mut_prefixes):
-                raise RuntimeError(f"fetch refused: {tool} flag {opt!r} is not read-only")
-            if opt in ro_long_val and not eq:
+            if any(opt == p or opt.startswith(p + "-") for p in _CURL_MUTATING_LONG_PREFIXES) or opt.startswith(
+                ("--expand", "--data")
+            ):
+                raise RuntimeError(f"fetch refused: curl flag {opt!r} is not read-only")
+            if opt in _CURL_RO_LONG_VAL and not eq:
                 i += 2
                 continue
             i += 1
@@ -476,12 +569,12 @@ def _validate_http_fetch(tool, rest):
             step = 1
             for k, ch in enumerate(cluster):
                 if ch in mut_shorts:
-                    raise RuntimeError(f"fetch refused: {tool} flag -{ch} is not read-only")
+                    raise RuntimeError(f"fetch refused: curl flag -{ch} is not read-only")
                 if ch == "X":
                     rem = cluster[k + 1:]
                     method = rem if rem else (rest[i + 1] if i + 1 < len(rest) else "")
                     if method.upper() not in _RO_HTTP_METHODS:
-                        raise RuntimeError(f"fetch refused: {tool} -X {method!r} is not read-only")
+                        raise RuntimeError(f"fetch refused: curl -X {method!r} is not read-only")
                     if not rem:
                         step = 2
                     break
@@ -496,8 +589,24 @@ def _validate_http_fetch(tool, rest):
 
 def _validate_fetch_argv(argv):
     """Fail-closed allowlist for `--fetch`: only read-only fetch tools and subcommands (#780)."""
-    head = os.path.basename(argv[0])
+    raw0 = argv[0]
+    if not raw0:
+        raise RuntimeError("fetch refused: empty command")
+    head = os.path.basename(raw0)
     rest = list(argv[1:])
+    if _has_path_sep(raw0):
+        if (head == "orca_cli.py" and os.path.isfile(_ORCA_CLI_SIBLING)
+                and os.path.exists(raw0) and os.path.realpath(raw0) == _ORCA_CLI_SIBLING):
+            _validate_orca_fetch(rest)
+            return
+        raise RuntimeError(f"fetch refused: path-qualified command {raw0!r} is not allowed")
+    if head == "orca_cli.py":
+        found = _resolve_bare_binary(raw0)
+        if not (found and os.path.isfile(_ORCA_CLI_SIBLING)
+                and os.path.realpath(found) == _ORCA_CLI_SIBLING):
+            raise RuntimeError("fetch refused: orca_cli.py does not resolve to the fleet sibling script")
+        _validate_orca_fetch(rest)
+        return
     if re.fullmatch(r"python(3(\.\d+)?)?", head):
         i = 0
         while i < len(rest) and rest[i].startswith("-") and rest[i] != "--":
@@ -505,18 +614,18 @@ def _validate_fetch_argv(argv):
             if re.fullmatch(r"-[IusSEB]+", w):
                 i += 1
             else:
-                raise RuntimeError(f"fetch refused: python interpreter invocation {argv[0]!r} is not allowed")
+                raise RuntimeError(f"fetch refused: python interpreter invocation {raw0!r} is not allowed")
         if i >= len(rest) or os.path.basename(rest[i]) != "orca_cli.py":
             raise RuntimeError("fetch refused: python may only invoke sibling orca_cli.py read-only subcommands")
-        sibling = os.path.realpath(os.path.join(os.path.dirname(os.path.realpath(__file__)), "orca_cli.py"))
-        if os.path.isfile(sibling) and os.path.exists(rest[i]) and os.path.realpath(rest[i]) != sibling:
+        if not (os.path.isfile(_ORCA_CLI_SIBLING) and os.path.exists(rest[i])
+                and os.path.realpath(rest[i]) == _ORCA_CLI_SIBLING):
             raise RuntimeError("fetch refused: orca_cli.py path does not match the fleet sibling script")
         _validate_orca_fetch(rest[i + 1:])
         return
     if head == "gh":
         _validate_gh_fetch(rest)
         return
-    if head in ("orca", "orca-ide", "orca_cli.py"):
+    if head in ("orca", "orca-ide"):
         _validate_orca_fetch(rest)
         return
     if head in ("curl", "wget"):
@@ -527,7 +636,7 @@ def _validate_fetch_argv(argv):
         if not paths or any(not p or (rest[:1] != ["--"] and p.startswith("-")) for p in paths):
             raise RuntimeError("fetch refused: cat requires explicit file path argument(s)")
         return
-    raise RuntimeError(f"fetch refused: command {argv[0]!r} is not in the read-only fetch allowlist")
+    raise RuntimeError(f"fetch refused: command {raw0!r} is not in the read-only fetch allowlist")
 
 
 def _sanitize_stderr(stderr_text):
@@ -548,8 +657,14 @@ def fetch(argv, timeout):
     if not argv:
         raise ValueError("--fetch needs a command")
     _validate_fetch_argv(argv)
+    run_argv = list(argv)
+    if not _has_path_sep(run_argv[0]):
+        resolved = _resolve_bare_binary(run_argv[0])
+        if not resolved:
+            raise RuntimeError(f"fetch could not be launched: command {run_argv[0]!r} not found on PATH")
+        run_argv[0] = resolved
     try:
-        r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(run_argv, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as err:
         raise RuntimeError(f"fetch timed out after {timeout}s: {argv[0]}") from err
     except (OSError, subprocess.SubprocessError) as err:

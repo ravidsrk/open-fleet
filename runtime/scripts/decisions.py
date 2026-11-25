@@ -282,6 +282,14 @@ def _has_invisible_cf(text):
     return any(unicodedata.category(ch) == "Cf" for ch in (text or ""))
 
 
+_LINE_BREAK_CHARS = ("\n", "\r", "\u2028", "\u2029", "\x85", "\x0b", "\x0c")
+
+
+def _has_line_break(text):
+    """True when `text` contains LF, CR, or any Unicode/ASCII vertical line break."""
+    return any(ch in (text or "") for ch in _LINE_BREAK_CHARS)
+
+
 def _canon(token):
     token = _FORMS.get(token, token)
     token = _SYNONYMS.get(token, token)
@@ -463,7 +471,7 @@ def _pin_at_ref(root, ref):
     def git(*args):
         try:
             return subprocess.run(gitexec.argv("-C", str(root), *args), capture_output=True,
-                                  timeout=60, env=gitexec.env(), stdin=subprocess.DEVNULL)
+                                  timeout=60, env=gitexec.custody_env(), stdin=subprocess.DEVNULL)
         except (OSError, subprocess.SubprocessError) as err:
             raise DecisionsError(f"git {args[0]} failed to run: {err}") from err
 
@@ -668,6 +676,13 @@ def validate(record, net, grant_pub=None):
             "invisible format/bidi control character (Unicode Cf) in ledger record — "
             "refusing hidden text (#772)"
         )
+    if (_has_line_break(record.get("raw", ""))
+            or any(_has_line_break(record.get(k, ""))
+                   for k in ("ts", "id", "class", "answer", "why", "task_id"))):
+        problems.append(
+            "embedded carriage return or Unicode line break in ledger record — "
+            "refusing line-break injection (one record, one line)"
+        )
     if _instant(record.get("ts", "")) == _UNDATED:
         problems.append(f"ts {record.get('ts')!r} is not a readable timestamp — a record whose time "
                         "cannot be read sorts before everything and would pass for history")
@@ -759,6 +774,10 @@ def _is_standing_malformed(record):
             or any(_has_invisible_cf(record.get(k, ""))
                    for k in ("ts", "id", "class", "answer", "why", "task_id"))):
         return True
+    if (_has_line_break(record.get("raw", ""))
+            or any(_has_line_break(record.get(k, ""))
+                   for k in ("ts", "id", "class", "answer", "why", "task_id"))):
+        return True
     suffix = HUMAN_SOURCE_SUFFIX.search(record.get("why", ""))
     if record.get("class") != "one-way" and suffix and suffix.group(2):
         return True
@@ -830,7 +849,7 @@ def read_lines(path):
     except OSError as err:
         raise DecisionsError(f"{path} is unreadable: {err}") from err
     out = []
-    for i, line in enumerate(text.splitlines(), 1):
+    for i, line in enumerate(text.split("\n"), 1):
         record = parse_line(line)
         if record:
             record["lineno"] = i
@@ -978,10 +997,10 @@ def cmd_append(args, net):
             why = f"{why} [source={args.source} sig={effective_sig.lower()}]"
         else:
             why = f"{why} [source={args.source}]"
-    for name, value in (("id", args.id), ("answer", args.answer), ("why", why),
+    for name, value in (("ts", ts), ("id", args.id), ("answer", args.answer), ("why", why),
                         ("task", args.task or "")):
-        if SEP_CHAR in value or "\n" in value:
-            print(f"decisions: {name} may not contain '{SEP_CHAR}' or a newline "
+        if SEP_CHAR in value or _has_line_break(value):
+            print(f"decisions: {name} may not contain '{SEP_CHAR}' or a line break "
                   "(one record, one line)", file=sys.stderr)
             return EXIT_VIOLATION
     line = format_line(ts, args.id.strip(), args.klass, args.answer.strip(), why.strip(),
@@ -1209,9 +1228,21 @@ def cmd_grant_keygen(args, _net):
 
 def cmd_sign_grant(args, _net):
     """Print the grant signature (hex only) for one exact decision line."""
+    key_path = Path(args.key).expanduser()
     try:
-        seed = bytes.fromhex(Path(args.key).expanduser().read_text(
-            encoding="utf-8").strip())
+        mode = stat.S_IMODE(key_path.stat().st_mode)
+    except OSError as err:
+        raise DecisionsError(f"grant key {args.key} is not a readable hex seed: {err}") from err
+    if mode & 0o077:
+        print(f"decisions: seed custody: {key_path} is mode {mode:04o} — readable beyond its owner; "
+              "refusing (chmod 0600, or grant-keygen anew)", file=sys.stderr)
+        return EXIT_VIOLATION
+    if _seed_in_unignored_worktree(key_path):
+        print(f"decisions: seed custody: {key_path} is inside a git work tree that does not ignore it — "
+              "one `git add -A` would commit the private seed; refusing", file=sys.stderr)
+        return EXIT_VIOLATION
+    try:
+        seed = bytes.fromhex(key_path.read_text(encoding="utf-8").strip())
     except (OSError, ValueError) as err:
         raise DecisionsError(f"grant key {args.key} is not a readable hex seed: {err}") from err
     if len(seed) != 32:

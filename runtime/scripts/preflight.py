@@ -119,8 +119,9 @@ def _run(cmd: list[str], timeout: float | None = None) -> tuple[int | None, str,
     limit = _GIT_TIMEOUT if timeout is None else timeout
     env = None
     if cmd[:1] == ["git"]:
-        # Every git leg reads the target repo: the absolute git, under the hardened env.
-        cmd, env = gitexec.argv(*cmd[1:]), gitexec.env()
+        # Every git leg reads the target repo: the absolute git, under the custody env
+        # (scrubbing inherited GIT_DIR/GIT_EXEC_PATH/GIT_CONFIG_PARAMETERS and disabling hooks/fsmonitor).
+        cmd, env = gitexec.argv(*cmd[1:]), gitexec.custody_env()
     try:
         # No stdin (#629): a git hook, or any leg, must never wait on an inherited pipe.
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=limit, env=env,
@@ -550,24 +551,33 @@ def main(argv: list[str]) -> int:
         help="Emit structured JSON summary alongside preflight status.",
     )
     args = parser.parse_args(argv)
+    effective_mode = args.mode
+    cap_info: dict[str, Any] | None = None
+
+    def _fail(msg: str, code: int, *, extra: dict[str, Any] | None = None) -> int:
+        if args.json:
+            payload: dict[str, Any] = dict(cap_info) if cap_info is not None else {}
+            payload.update({"ok": False, "exit": code, "mode": effective_mode, "error": msg})
+            if extra:
+                payload.update(extra)
+            print(json.dumps(payload))
+        print(f"preflight: ERROR: {msg}", file=sys.stderr)
+        return code
 
     # The catalog root binds the deny-list and capability table below: two spellings naming
     # two catalogs is refused before either is read.
     try:
         _fleet_root_env()
     except FleetRootConflict as err:
-        print(f"preflight: ERROR: {err}", file=sys.stderr)
-        return 2
+        return _fail(str(err), 2)
 
     runtime_provider = _active_runtime(args.runtime)
-    effective_mode = args.mode
 
     # Capability check (#586): when --runtime (or OPEN_FLEET_RUNTIME /
     # ORCA_FLEET_RUNTIME) is active, or a --mission is named (the active
     # provider then defaults to orca, exactly as dispatch resolves it),
     # validate provider and mission capabilities fail-closed before
     # usage/branch checks so incompatible missions exit 2.
-    cap_info: dict[str, Any] | None = None
     if runtime_provider is None and args.mission:
         runtime_provider = "orca"
     if runtime_provider:
@@ -583,11 +593,9 @@ def main(argv: list[str]) -> int:
     # Usage errors are exit 1 (contract: 0=OK, 1=usage/dependency, 2=invariant).
     # _UsageExit1Parser remaps argparse's own SystemExit(2) the same way.
     if effective_mode == "write" and not args.base:
-        print("preflight: ERROR: --base is required unless --mode readonly", file=sys.stderr)
-        return 1
+        return _fail("--base is required unless --mode readonly", 1)
     if args.offline and not args.default:
-        print("preflight: ERROR: --default is required with --offline (no gh to derive it)", file=sys.stderr)
-        return 1
+        return _fail("--default is required with --offline (no gh to derive it)", 1)
 
     errors: list[str] = []
     warnings: list[str] = []
@@ -605,6 +613,11 @@ def main(argv: list[str]) -> int:
             warnings.append("gitleaks not on PATH — integrator secret scan step will be skipped")
 
     if errors:
+        if args.json:
+            payload = dict(cap_info) if cap_info is not None else {}
+            payload.update({"ok": False, "exit": 1, "mode": effective_mode,
+                            "error": "; ".join(errors), "errors": errors})
+            print(json.dumps(payload))
         for e in errors:
             print(f"preflight: ERROR: {e}", file=sys.stderr)
         return 1
@@ -612,8 +625,7 @@ def main(argv: list[str]) -> int:
     # 2. In a git repo, with a gh-visible remote.
     rc, _, _ = _run(["git", "rev-parse", "--git-dir"])
     if rc != 0:
-        print("preflight: ERROR: not inside a git repository", file=sys.stderr)
-        return 1
+        return _fail("not inside a git repository", 1)
 
     # 2b. Quarantine (#558): a quarantined mission may not start, in either
     #     mode — readonly fleets dispatch missions too. Before the readonly
@@ -621,12 +633,13 @@ def main(argv: list[str]) -> int:
     #     only valid empty policies allow generic diagnostics.
     refusal = _quarantine_refusal(args.mission)
     if refusal:
-        print(f"preflight: ERROR: QUARANTINED {refusal}", file=sys.stderr)
-        return 2
+        return _fail(f"QUARANTINED {refusal}", 2, extra={"quarantined": True})
 
     if effective_mode == "readonly":
-        if args.json and cap_info is not None:
-            print(json.dumps(cap_info))
+        if args.json:
+            payload = dict(cap_info) if cap_info is not None else {}
+            payload.update({"ok": True, "mode": "readonly"})
+            print(json.dumps(payload))
         else:
             rt_suffix = f", runtime={cap_info['runtime']}" if cap_info else ""
             print(f"preflight: OK — mode=readonly{rt_suffix} (binary + repo checks only; no BASE/PR invariants)")
@@ -641,74 +654,67 @@ def main(argv: list[str]) -> int:
             timeout=_GH_TIMEOUT,
         )
         if rc != 0 or not repo:
-            print(
-                f"preflight: ERROR: `gh repo view` failed: {gh_err or 'no output'}. "
+            return _fail(
+                f"`gh repo view` failed: {gh_err or 'no output'}. "
                 "If this host is intentionally offline, rerun with --offline --default <branch> "
                 "(gh skipped; all git-based BASE invariants still run).",
-                file=sys.stderr,
+                1,
             )
-            return 1
 
     # 3. Derive default branch if not given.
     # Dependency/config lane (exit 1): gh answered but gave no default branch —
     # nothing invariant-shaped has been checked yet.
     default_branch = args.default or _default_branch_via_gh()
     if not default_branch:
-        print("preflight: ERROR: could not derive default branch (pass --default)", file=sys.stderr)
-        return 1
+        return _fail("could not derive default branch (pass --default)", 1)
 
     # 4. BASE != DEFAULT_BRANCH (the M-5 guardrail), on CANONICAL names so ref
     #    aliases (`origin/main`, `refs/remotes/origin/main`) cannot slip past.
     canon_base = _canon_branch(args.base)
     canon_default = _canon_branch(default_branch)
     if canon_base == canon_default:
-        print(
-            f"preflight: ERROR: BASE ({args.base!r} -> {canon_base!r}) is the DEFAULT_BRANCH "
+        return _fail(
+            f"BASE ({args.base!r} -> {canon_base!r}) is the DEFAULT_BRANCH "
             f"({default_branch!r} -> {canon_default!r}). "
             "Every per-finding PR is merged into BASE; if BASE is the default branch, fixes land "
             "straight on production and bypass both the anti-inflation gate and the human "
             "promotion review. Create a dedicated integration branch (e.g. `<maintainer>/fleet-integration`) "
             "off the current run's fork point and rerun.",
-            file=sys.stderr,
+            2,
         )
-        return 2
 
     # 5. BASE exists AS A BRANCH (tags and raw SHAs are rejected — a PR base must
     #    be a branch, and accepting any rev would weaken the alias guard above).
     if not _branch_exists(canon_base):
-        print(
-            f"preflight: ERROR: BASE {args.base!r} is not a local or origin branch "
+        return _fail(
+            f"BASE {args.base!r} is not a local or origin branch "
             "(tags and raw SHAs are not accepted as an integration BASE).",
-            file=sys.stderr,
+            2,
         )
-        return 2
 
     # 6. BASE forks from a commit reachable from DEFAULT_BRANCH (guards against a BASE
     #    created off an unrelated history — e.g. a stale branch someone accidentally reused).
     mb = _merge_base(args.base, default_branch)
     if not mb:
-        print(
-            f"preflight: ERROR: no merge-base between {args.base!r} and {default_branch!r}; "
+        return _fail(
+            f"no merge-base between {args.base!r} and {default_branch!r}; "
             "BASE does not appear to fork from the default branch's history.",
-            file=sys.stderr,
+            2,
         )
-        return 2
 
     # 6b. Freshness: with --fork-point, the merge-base must BE this run's fork point —
     #     a stale BASE from an earlier run has a merge-base too, but an older one.
     if args.fork_point:
         rc, fp_sha, _ = _run(["git", "rev-parse", "--verify", f"{args.fork_point}^{{commit}}"])
         if rc != 0:
-            print(f"preflight: ERROR: --fork-point {args.fork_point!r} is not a commit.", file=sys.stderr)
-            return 1
+            return _fail(f"--fork-point {args.fork_point!r} is not a commit.", 1)
         if fp_sha.strip() != mb:
-            print(
-                f"preflight: ERROR: merge-base(BASE, {default_branch}) is {mb[:12]}, not the "
+            return _fail(
+                f"merge-base(BASE, {default_branch}) is {mb[:12]}, not the "
                 f"declared fork-point {fp_sha.strip()[:12]} — BASE is stale or reused from an "
                 "earlier run. Recreate BASE off the current fork point.",
-                file=sys.stderr,
+                2,
             )
-            return 2
 
     # 7. Same-tip advisory: a freshly created integration branch legitimately shares
     #    the default tip, so this is a warning, not a violation.
@@ -724,10 +730,23 @@ def main(argv: list[str]) -> int:
             print(f"preflight: WARN: {w}", file=sys.stderr)
     _print_fallback_notes(cap_info)
 
-    print(
-        f"preflight: OK — repo={repo}, base={args.base}, default={default_branch}, "
-        f"fork_point={mb[:12]}"
-    )
+    if args.json:
+        payload = dict(cap_info) if cap_info is not None else {}
+        payload.update({
+            "ok": True,
+            "mode": "write",
+            "repo": repo,
+            "base": args.base,
+            "default": default_branch,
+            "fork_point": mb,
+            "warnings": warnings,
+        })
+        print(json.dumps(payload))
+    else:
+        print(
+            f"preflight: OK — repo={repo}, base={args.base}, default={default_branch}, "
+            f"fork_point={mb[:12]}"
+        )
     return 0
 
 
