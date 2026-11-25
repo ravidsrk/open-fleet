@@ -34,6 +34,17 @@
       "commit": "4ad16df406c6df3bb2d13f0037ec274802666b61",
       "wtree": "8990f9d2d5b781167926a87bf7cea163cff7c270",
       "artifact": "docs/runs/2026-11-25-reshape-it-selfrun/tests.txt"
+    },
+    {
+      "label": "verifier",
+      "ts": "2026-11-25T17:32:57Z",
+      "cmd": "python3 runtime/scripts/verify.py --manifest docs/runs/2026-11-25-reshape-it-selfrun/manifest.json --contract-source docs/runs/2026-11-25-reshape-it-selfrun/contract.json@ce5dc5ae838ada69a9b77daccf18e04537845df6 --contract-digest sha256:37d6f05a80f4775abbf74535c5ce628c88de4890f0037ed75880dc4ebfaee799 --unit-class mutation --lighting dark-eligible --lane A --execute-nc --nc-command 'python3 -m unittest tests.test_reshape_net_verify_diff'",
+      "cmd_sha256": "8b8a39c01e8a6cf1d60573d59d2aad55e5bd9f961ee7c01bf1413b9346c918c4",
+      "exit": 0,
+      "duration_s": 5.477,
+      "commit": "1e0eb50eb1dcde2fe3a794901bbef6347d9120b6",
+      "wtree": "55a239b3e343371629828b1f9234f8286149832e",
+      "artifact": "docs/runs/2026-11-25-reshape-it-selfrun/verifier.txt"
     }
   ],
   "negative_control": {
