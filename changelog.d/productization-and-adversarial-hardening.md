@@ -17,8 +17,12 @@
   teardown fail-closed exit, `bundle.py` pre-install abort, `run_index.py` binding cross-checks,
   `bench/vf-bench/replay.py` static `allow_static_nc`, CI workflow pinning, and doc drift
   reconciliation. Adds root [`pyproject.toml`](../pyproject.toml) and the zero-dependency `open_fleet`
-  package delivering the unified `open-fleet` CLI (`doctor`, `setup`, `missions`, `route`, `status`,
-  `certify`, `demo`, `preflight`, `verify`, `floor`, `mcp`, `ui`), a JSON-RPC 2.0 stdio MCP server
-  (`open-fleet mcp`: 12 tools, 8 resources, and mission prompts), and the interactive Mission Control
-  web cockpit ([`docs/cli-and-mcp.md`](../docs/cli-and-mcp.md),
+  package delivering the unified `open-fleet` CLI (`doctor`, `setup`, `missions`, `route`, `session`,
+  `solo-review`, `ci-check`, `readiness`, `status`, `certify`, `demo`, `preflight`, `verify`, `floor`,
+  `mcp`, `ui`), a JSON-RPC 2.0 stdio MCP server (`open-fleet mcp`: 19 tools, 10 resources, and mission
+  prompts), progressive `<5K`-token/phase mission state machines (`open_fleet/sessions.py`), an honest
+  solo-developer verified review lane (`open_fleet/solo_review.py`), a reusable composite PR
+  verification GitHub Action (`.github/actions/open-fleet-verify/action.yml` + `open_fleet/ci_action.py`),
+  an honest proof-graduation & certification readiness workbench (`open_fleet/readiness.py`), and the
+  interactive 6-tab Mission Control web cockpit ([`docs/cli-and-mcp.md`](../docs/cli-and-mcp.md),
   [`docs/product-blueprint.md`](../docs/product-blueprint.md)).

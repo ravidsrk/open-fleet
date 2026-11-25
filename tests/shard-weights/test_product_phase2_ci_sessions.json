@@ -1,0 +1,10 @@
+{
+  "seconds": 22.1,
+  "measured": "2026-11-25: one local run of tests.test_product_phase2_ci_sessions (8 tests, Python 3.12.3), x2 to the CI lane",
+  "classes": {
+    "TestProgressiveSessions": 2.5,
+    "TestReadinessMCPCLIAndExpandedUI": 16.3,
+    "TestSoloReviewAndCIAction": 3.3
+  },
+  "fixture_seconds": 2.3
+}

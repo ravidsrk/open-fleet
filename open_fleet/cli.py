@@ -16,13 +16,25 @@ from open_fleet.catalog import (
     list_missions,
     route_intent,
 )
+from open_fleet.ci_action import render_step_summary, render_workflow_snippet, run_ci_verify
 from open_fleet.mcp_server import (
     OpenFleetMCPServer,
     run_inert_first_run,
     run_negative_control_demo,
     serve_stdio,
 )
+from open_fleet.readiness import readiness_report, run_negative_probes
+from open_fleet.sessions import (
+    advance_session,
+    approve_gate,
+    benchmark_progressive_savings,
+    build_phase_packet,
+    list_sessions,
+    load_session,
+    start_session,
+)
 from open_fleet.setup import HOST_PROFILES, build_mcp_config, doctor, setup_host
+from open_fleet.solo_review import run_solo_review
 from open_fleet.state import read_workspace_status
 from open_fleet.ui_server import serve_ui
 
@@ -199,6 +211,216 @@ def _cmd_demo(args: argparse.Namespace, root: Path) -> int:
     return 0 if nc["ok"] and (fr is None or fr["ok"]) else 1
 
 
+def _cmd_session(args: argparse.Namespace, root: Path) -> int:
+    action = args.session_action or "list"
+    repo = Path(args.repo).expanduser().resolve() if getattr(args, "repo", None) else Path.cwd().resolve()
+    sdir = Path(args.sessions_dir).expanduser().resolve() if getattr(args, "sessions_dir", None) else None
+    try:
+        if action == "benchmark":
+            bench = benchmark_progressive_savings(root)
+            if args.json:
+                _print_json(bench)
+                return 0
+            print(f"Progressive Phase Budget Benchmark ({bench['mission_count']} missions · ceiling={bench['ceiling_tokens']} tok · avg reduction={bench['avg_reduction_pct']}%)")
+            print(f"{'MISSION':16s} {'FULL':8s} {'MAX_PHASE':10s} {'REDUCTION':10s} {'<5K'}")
+            print("-" * 58)
+            for row in bench["missions"]:
+                print(
+                    f"{row['mission']:16s} {row['full_budget_tokens']:8d} {row['max_phase_tokens']:10d} "
+                    f"{row['reduction_pct']:9.1f}% {'OK' if row['within_5k_ceiling'] else 'OVER'}"
+                )
+            return 0 if bench["all_within_ceiling"] else 1
+        if action == "list":
+            items = list_sessions(repo=repo, sessions_dir=sdir)
+            if args.json:
+                _print_json({"sessions": items})
+                return 0
+            if not items:
+                print("No progressive sessions yet. Start one with: open-fleet session start <mission> \"<goal>\"")
+                return 0
+            for item in items:
+                print(
+                    f"{item['session_id']}  [{item['status']:9s}]  mission={item['mission']:14s} "
+                    f"phase={item['current_phase']} ({item['current_phase_index'] + 1}/{item['total_phases']})  "
+                    f"terminal={item['terminal_state'] or '—'}"
+                )
+            return 0
+        if action == "start":
+            res = start_session(
+                args.mission,
+                " ".join(args.goal).strip(),
+                root=root,
+                repo=repo,
+                sessions_dir=sdir,
+                base_branch=args.base or "",
+                runtime=args.runtime or "auto",
+            )
+            if args.json:
+                _print_json(res)
+                return 0
+            pkt = res["packet"]
+            tb = pkt["token_budget"]
+            print(f"Started session: {pkt['session_id']}  (mission={pkt['mission']} · phase={pkt['phase']['id']})")
+            print(f"Token budget:    ~{tb['phase_tokens_est']:,} tokens (vs ~{tb['full_activation_budget_tokens']:,} full load -> {tb['reduction_pct']}% reduction)")
+            print(f"Directive:       {pkt['phase']['directive']}")
+            return 0
+        if action == "packet":
+            st = load_session(args.session_id, repo=repo, sessions_dir=sdir)
+            pkt = build_phase_packet(st, root)
+            if args.json:
+                _print_json(pkt)
+                return 0
+            tb = pkt["token_budget"]
+            print(f"Session {pkt['session_id']} · mission={pkt['mission']} · phase={pkt['phase']['id']} ({pkt['phase']['index'] + 1}/{pkt['phase']['total']})")
+            print(f"Tokens:   ~{tb['phase_tokens_est']:,} / {tb['phase_ceiling_tokens']:,} ({tb['reduction_pct']}% saved)")
+            print(f"Blockers: {'; '.join(pkt['blocking_requirements']) or 'none (ready to advance)'}")
+            print(f"Playbooks loaded: {', '.join(d['name'] for d in pkt['phase_playbooks']) or 'none'}")
+            return 0
+        if action == "approve":
+            res = approve_gate(
+                args.session_id,
+                args.gate,
+                args.actor,
+                args.rationale,
+                contract_digest=args.contract_digest or "",
+                root=root,
+                repo=repo,
+                sessions_dir=sdir,
+            )
+            if args.json:
+                _print_json(res)
+                return 0
+            print(f"Approved gate '{res['approval']['gate']}' by {res['approval']['actor']} (digest={res['approval']['contract_digest'] or 'n/a'})")
+            return 0
+        if action == "advance":
+            rec = None
+            if args.receipt_json:
+                rec = json.loads(args.receipt_json)
+            elif args.ok:
+                rec = {"ok": True}
+            res = advance_session(
+                args.session_id,
+                receipt=rec,
+                terminal_state=args.terminal or "",
+                root=root,
+                repo=repo,
+                sessions_dir=sdir,
+            )
+            if args.json:
+                _print_json(res)
+                return 0
+            if res.get("closed"):
+                st = res["session"]
+                print(f"Closed session {st['session_id']}: terminal={st['terminal_state']} ({st['terminal_class']})")
+            else:
+                print(f"Advanced {args.session_id}: {res['from_phase']} -> {res['to_phase']}")
+            return 0
+    except (ValueError, FileNotFoundError, PermissionError, OSError) as exc:
+        if getattr(args, "json", False):
+            _print_json({"ok": False, "error": str(exc)})
+        else:
+            print(f"open-fleet session: FAIL: {exc}", file=sys.stderr)
+        return 1
+    return 2
+
+
+def _cmd_solo_review(args: argparse.Namespace, root: Path) -> int:
+    repo = Path(args.repo).expanduser().resolve() if args.repo else Path.cwd().resolve()
+    try:
+        res = run_solo_review(
+            base=args.base,
+            root=root,
+            repo=repo,
+            contract_path=args.contract or "",
+            builder_harness=args.builder or "",
+            manifest=args.manifest or "",
+            lighting=args.lighting,
+            nc_command=args.nc_command or "",
+            no_gh=not args.with_gh,
+            transcript_out=args.transcript_out or "",
+            transcript_key=args.transcript_key or "",
+            packet_out=args.packet_out or "",
+        )
+    except (ValueError, FileNotFoundError, PermissionError, OSError) as exc:
+        if args.json:
+            _print_json({"ok": False, "error": str(exc)})
+        else:
+            print(f"open-fleet solo-review: FAIL: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        _print_json(res)
+        return 0 if res["ok"] else 1
+    print(f"open-fleet solo-review ({res['review_mode']}) · base={res['base']} · head={res['git']['head_sha'][:12]}")
+    print(f"Floor guard:  {'CLEAN' if res['floor_guard']['ok'] else 'FAIL'}")
+    print(f"Risk lenses:  {', '.join(res['diff_scope']['triggered_risk_lenses']) or 'none'}")
+    print(f"Lighting:     {res['lighting']['effective']} — {res['lighting']['reason']}")
+    if res["cross_model_reviewers"]:
+        print("Local cross-model reviewer options:")
+        for sug in res["cross_model_reviewers"][:4]:
+            print(f"  - {sug['harness']:12s}: {sug['command']}")
+    if res.get("packet_out"):
+        print(f"Build-blind review packet written to: {res['packet_out']}")
+    return 0 if res["ok"] else 1
+
+
+def _cmd_ci_check(args: argparse.Namespace, root: Path) -> int:
+    if args.workflow_snippet:
+        print(render_workflow_snippet(base_branch=args.workflow_base, include_manifest=args.with_manifest_example), end="")
+        return 0
+    repo = Path(args.repo).expanduser().resolve() if args.repo else Path.cwd().resolve()
+    res = run_ci_verify(
+        base=args.base,
+        root=root,
+        repo=repo,
+        run_floor_guard=not args.skip_floor,
+        run_diff_scope=not args.skip_scope,
+        strict_scope=args.strict_scope,
+        fail_on_risk_lenses=args.fail_on_risk_lenses,
+        manifest=args.manifest or "",
+        contract_source=args.contract_source or "",
+        contract_digest=args.contract_digest or "",
+        execute_nc=args.execute_nc,
+        nc_command=args.nc_command or "",
+        allow_static_nc=args.allow_static_nc,
+        no_gh=args.no_gh,
+    )
+    if args.json:
+        _print_json(res)
+    else:
+        print(render_step_summary(res))
+    return 0 if res["ok"] else 1
+
+
+def _cmd_readiness(args: argparse.Namespace, root: Path) -> int:
+    rep = readiness_report(root, run_cert_check=args.check_cert)
+    probes = run_negative_probes(root) if args.probes else None
+    payload = {**rep, "negative_probes": probes} if probes is not None else rep
+    ok = (
+        (rep["certification_check"]["ok"] if rep.get("certification_check") else True)
+        and (probes["ok"] if probes is not None else True)
+    )
+    if args.json:
+        _print_json(payload)
+        return 0 if ok else 1
+    print(f"open-fleet readiness · proven={rep['proven_count']}/{rep['total_missions']} · binding_runs={rep['binding_runs_count']}")
+    print("\nTop Proof-Graduation Candidates (doctrine-only -> self-run):")
+    for cand in rep["graduation_backlog"][:8]:
+        print(f"  {cand['mission']:16s} [{cand['recommended_runtime']:5s}]  {cand['preflight_cmd']}")
+    print("\nLocally Actionable Harnesses for Live Certification:")
+    if rep["locally_actionable_harnesses"]:
+        for h in rep["harness_certification_backlog"]:
+            if h["harness"] in rep["locally_actionable_harnesses"]:
+                print(f"  {h['harness']:12s} (live={h['live_witnessed_profiles']}/2)  {h['inert_probe_cmd']}")
+    else:
+        print("  (none installed beyond already-witnessed harnesses)")
+    if rep.get("certification_check"):
+        cc = rep["certification_check"]
+        print(f"\ncertification.py check: {'PASS' if cc['ok'] else 'FAIL'} — {cc['summary']}")
+    if probes is not None:
+        print(f"first_run.py probes:    {'PASS' if probes['ok'] else 'FAIL'} (exit={probes['returncode']})")
+    return 0 if ok else 1
+
+
 def _passthrough(script: Path, passthrough_args: list[str], root: Path, *, default_auto: bool = False) -> int:
     env = dict(os.environ)
     env["OPEN_FLEET_ROOT"] = str(root)
@@ -278,6 +500,88 @@ def build_parser() -> argparse.ArgumentParser:
     p_ui.add_argument("--port", type=int, default=8765, help="HTTP port (default: 8765)")
     p_ui.add_argument("--repo", help="target repository path")
 
+    p_sess = sub.add_parser("session", help="progressive (<5K-token/phase) mission state machines with enforced human gates")
+    s_sub = p_sess.add_subparsers(dest="session_action")
+    p_ss = s_sub.add_parser("start", help="start a progressive mission session")
+    p_ss.add_argument("mission", help="mission name")
+    p_ss.add_argument("goal", nargs="+", help="bounded engineering goal")
+    p_ss.add_argument("--base", default="", help="integration BASE branch")
+    p_ss.add_argument("--runtime", default="auto")
+    p_ss.add_argument("--repo", help="target repository path")
+    p_ss.add_argument("--sessions-dir", help="custom session storage directory")
+    p_ss.add_argument("--json", action="store_true")
+
+    p_sl = s_sub.add_parser("list", help="list progressive sessions")
+    p_sl.add_argument("--repo", help="target repository path")
+    p_sl.add_argument("--sessions-dir", help="custom session storage directory")
+    p_sl.add_argument("--json", action="store_true")
+
+    p_sp = s_sub.add_parser("packet", help="show the <5K-token active phase packet")
+    p_sp.add_argument("session_id")
+    p_sp.add_argument("--repo", help="target repository path")
+    p_sp.add_argument("--sessions-dir", help="custom session storage directory")
+    p_sp.add_argument("--json", action="store_true")
+
+    p_sa = s_sub.add_parser("approve", help="record explicit human approval for a one-way gate")
+    p_sa.add_argument("session_id")
+    p_sa.add_argument("--gate", required=True, help="gate name (freeze, promote)")
+    p_sa.add_argument("--actor", required=True, help="human approver identity")
+    p_sa.add_argument("--rationale", required=True, help="decision rationale")
+    p_sa.add_argument("--contract-digest", default="")
+    p_sa.add_argument("--repo", help="target repository path")
+    p_sa.add_argument("--sessions-dir", help="custom session storage directory")
+    p_sa.add_argument("--json", action="store_true")
+
+    p_sv = s_sub.add_parser("advance", help="advance a progressive session by one phase (fail-closed)")
+    p_sv.add_argument("session_id")
+    p_sv.add_argument("--ok", action="store_true", help="record a passing receipt for the current phase")
+    p_sv.add_argument("--receipt-json", default="", help="JSON receipt payload for the current phase")
+    p_sv.add_argument("--terminal", default="", help="terminal state when closing the final phase")
+    p_sv.add_argument("--repo", help="target repository path")
+    p_sv.add_argument("--sessions-dir", help="custom session storage directory")
+    p_sv.add_argument("--json", action="store_true")
+
+    p_sb = s_sub.add_parser("benchmark", help="measure <5K-token progressive savings across all missions")
+    p_sb.add_argument("--json", action="store_true")
+
+    p_solo = sub.add_parser("solo-review", help="honest solo-developer verified review lane (diff_scope + floor_guard + blind packet + verify.py)")
+    p_solo.add_argument("--base", default="origin/main", help="base git ref (default: origin/main)")
+    p_solo.add_argument("--repo", help="target repository path")
+    p_solo.add_argument("--contract", default="", help="frozen spec/contract file path")
+    p_solo.add_argument("--builder", default="", help="builder harness name (to recommend cross-vendor reviewers)")
+    p_solo.add_argument("--manifest", default="", help="optional unit manifest to verify via verify.py")
+    p_solo.add_argument("--lighting", choices=("auto", "lit", "dark-eligible"), default="auto")
+    p_solo.add_argument("--nc-command", default="", help="executed negative-control command for Lane-A dark-eligible verification")
+    p_solo.add_argument("--with-gh", action="store_true", help="require GitHub review lookup instead of --no-gh")
+    p_solo.add_argument("--transcript-out", default="")
+    p_solo.add_argument("--transcript-key", default="")
+    p_solo.add_argument("--packet-out", default="", help="write the build-blind reviewer prompt to a file")
+    p_solo.add_argument("--json", action="store_true")
+
+    p_ci = sub.add_parser("ci-check", help="run the reusable PR verification gate locally or emit workflow YAML")
+    p_ci.add_argument("--base", default="origin/main")
+    p_ci.add_argument("--repo", help="target repository path")
+    p_ci.add_argument("--skip-floor", action="store_true")
+    p_ci.add_argument("--skip-scope", action="store_true")
+    p_ci.add_argument("--strict-scope", action="store_true")
+    p_ci.add_argument("--fail-on-risk-lenses", action="store_true")
+    p_ci.add_argument("--manifest", default="")
+    p_ci.add_argument("--contract-source", default="")
+    p_ci.add_argument("--contract-digest", default="")
+    p_ci.add_argument("--execute-nc", action="store_true")
+    p_ci.add_argument("--nc-command", default="")
+    p_ci.add_argument("--allow-static-nc", action="store_true")
+    p_ci.add_argument("--no-gh", action="store_true")
+    p_ci.add_argument("--workflow-snippet", action="store_true", help="print copy-ready GitHub Actions workflow YAML")
+    p_ci.add_argument("--workflow-base", default="main")
+    p_ci.add_argument("--with-manifest-example", action="store_true")
+    p_ci.add_argument("--json", action="store_true")
+
+    p_rdy = sub.add_parser("readiness", help="honest proof-graduation & harness certification workbench")
+    p_rdy.add_argument("--check-cert", action="store_true", help="also execute runtime/scripts/certification.py check")
+    p_rdy.add_argument("--probes", action="store_true", help="also execute runtime/scripts/first_run.py probes")
+    p_rdy.add_argument("--json", action="store_true")
+
     p_pre = sub.add_parser("preflight", help="pass-through to runtime/scripts/preflight.py (defaults runtime to auto)")
     p_pre.add_argument("extra", nargs=argparse.REMAINDER)
 
@@ -326,6 +630,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "ui":
         repo = Path(args.repo).expanduser().resolve() if args.repo else Path.cwd().resolve()
         return serve_ui(root=root, repo=repo, host=args.host, port=args.port)
+    if args.command == "session":
+        return _cmd_session(args, root)
+    if args.command == "solo-review":
+        return _cmd_solo_review(args, root)
+    if args.command == "ci-check":
+        return _cmd_ci_check(args, root)
+    if args.command == "readiness":
+        return _cmd_readiness(args, root)
     if args.command == "preflight":
         extra = [a for a in args.extra if a != "--"]
         return _passthrough(root / "runtime" / "scripts" / "preflight.py", extra, root, default_auto=True)

@@ -40,6 +40,7 @@ Each **mission** is a complete engineering workflow: a coordinator decomposes yo
 
 | Your goal | Start here |
 |---|---|
+| **Install the unified CLI, MCP server, or Mission Control UI** | [CLI, MCP & Mission Control](docs/cli-and-mcp.md) · [Product blueprint](docs/product-blueprint.md) |
 | **Run your first mission in 5 minutes** | [Install](docs/install.md) → [Your first `review-it` dry run](docs/getting-started.md#your-first-mission-a-review-it-dry-run) |
 | **Roll out fleets on a greenfield or legacy codebase** | [Greenfield vs. Brownfield adoption guide](docs/adoption-guide.md) |
 | **Pick the right workflow for a task** | [Mission catalog by category](#the-mission-catalog) · [Prompt recipes](docs/recipes.md) |
@@ -72,6 +73,17 @@ Each **mission** is a complete engineering workflow: a coordinator decomposes yo
 </details>
 
 ## Quick start
+
+**Unified CLI, MCP server & Mission Control UI** (Python 3.11+ stdlib only, zero external dependencies — see [CLI, MCP & Mission Control](docs/cli-and-mcp.md)):
+
+```bash
+git clone https://github.com/ravidsrk/open-fleet.git && cd open-fleet
+pip install --no-build-isolation -e .   # or run directly via `python3 -m open_fleet`
+open-fleet doctor                       # check Python, git, runtime, harnesses & hooks
+open-fleet demo --include-first-run     # see verify.py catch a gamed manifest live (zero spend)
+open-fleet route "review PR #42"        # pick the right mission + copy-ready launch prompt
+open-fleet ui --port 8765               # launch interactive Mission Control cockpit
+```
 
 **One-command install** (validates the catalog, links missions into `~/.claude/skills`, and prints completion-gate setup; verified in CI by a from-scratch install into an empty `HOME` ([`install.yml`](.github/workflows/install.yml)), with a one-off clean-container [transcript](docs/completion/evidence/414-clean-container-install.txt) retained):
 
@@ -421,6 +433,7 @@ Start with Phase 1 non-landing missions that never merge production code (`revie
 ## Repository layout
 
 ```text
+open_fleet/      Zero-dependency unified CLI, MCP server, progressive sessions, solo review & Mission Control UI
 skills/          Discoverable missions (one SKILL.md per outcome)
 playbooks/       Callable phase protocols composed by missions
 runtime/         Runtime policies, control files, RPI provider adapters (runtime/providers/), and CLI helpers incl. the deny hook (runtime/scripts/)
@@ -450,7 +463,7 @@ Explore the documentation by audience tier in **[docs/README.md](docs/README.md)
 
 | Tier | Key guides |
 |---|---|
-| **1. User & Operator Guides** | [Getting started](docs/getting-started.md) · [Install](docs/install.md) · [Adoption guide](docs/adoption-guide.md) · [Mission guides](docs/missions/README.md) · [Prompt recipes](docs/recipes.md) · [Runtimes & harnesses](docs/runtimes.md) · [Anatomy of a run](docs/guides/anatomy-of-a-run.md) · [Troubleshooting](docs/troubleshooting.md) |
+| **1. User & Operator Guides** | [Getting started](docs/getting-started.md) · [CLI, MCP & Mission Control](docs/cli-and-mcp.md) · [Install](docs/install.md) · [Adoption guide](docs/adoption-guide.md) · [Mission guides](docs/missions/README.md) · [Prompt recipes](docs/recipes.md) · [Runtimes & harnesses](docs/runtimes.md) · [Anatomy of a run](docs/guides/anatomy-of-a-run.md) · [Troubleshooting](docs/troubleshooting.md) |
 | **2. Architecture & Reference** | [Concepts & glossary](docs/concepts.md) · [Ecosystem comparison](docs/comparison.md) · [ARCHITECTURE.md](ARCHITECTURE.md) · [Verify gate & trust boundary](docs/verify-gate.md) · [Runtime scripts CLI reference](docs/runtime-scripts.md) · [A2A export](docs/a2a-export.md) · [Compliance provenance](docs/compliance-provenance.md) · [Platform ride](docs/platform-ride.md) |
 | **3. Contributors, Ops & Archives** | [Local development](docs/development.md) · [Contributing](.github/CONTRIBUTING.md) · [Certification](docs/certification.md) · [Distribution](docs/distribution.md) · [Roadmap](docs/roadmap.md) · [Maintainer ops](docs/ops.md) · [Retained runs](docs/runs/README.md) · [Research archive](docs/research/README.md) |
 

@@ -20,12 +20,24 @@ from open_fleet.catalog import (
     load_retained_runs,
     route_intent,
 )
+from open_fleet.ci_action import render_workflow_snippet
 from open_fleet.mcp_server import (
     OpenFleetMCPServer,
     run_inert_first_run,
     run_negative_control_demo,
 )
+from open_fleet.readiness import readiness_report, run_certification_check, run_negative_probes
+from open_fleet.sessions import (
+    advance_session,
+    approve_gate,
+    benchmark_progressive_savings,
+    build_phase_packet,
+    list_sessions,
+    load_session,
+    start_session,
+)
 from open_fleet.setup import HOST_PROFILES, build_mcp_config, doctor, setup_host
+from open_fleet.solo_review import run_solo_review
 from open_fleet.state import read_decisions, read_workspace_status
 
 MAX_POST_BYTES = 16 * 1024
@@ -90,6 +102,33 @@ class MissionControlApp:
             return self._json(HTTPStatus.OK, read_workspace_status(self.repo))
         if path == "/api/decisions":
             return self._json(HTTPStatus.OK, read_decisions(self.repo, limit=100))
+        if path == "/api/sessions":
+            return self._json(
+                HTTPStatus.OK,
+                {
+                    "sessions": list_sessions(repo=self.repo),
+                    "benchmark": benchmark_progressive_savings(self.root),
+                },
+            )
+        if path.startswith("/api/sessions/"):
+            sid = unquote(path.removeprefix("/api/sessions/")).strip()
+            try:
+                st = load_session(sid, repo=self.repo)
+            except (ValueError, FileNotFoundError) as exc:
+                return self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+            return self._json(HTTPStatus.OK, {"session": st, "packet": build_phase_packet(st, self.root)})
+        if path == "/api/readiness":
+            return self._json(HTTPStatus.OK, readiness_report(self.root))
+        if path == "/api/ci-workflow":
+            base_branch = (query.get("base") or ["main"])[0]
+            inc_manifest = (query.get("manifest") or ["false"])[0].lower() in ("1", "true", "yes")
+            return self._json(
+                HTTPStatus.OK,
+                {
+                    "action_path": ".github/actions/open-fleet-verify/action.yml",
+                    "workflow_yaml": render_workflow_snippet(base_branch=base_branch, include_manifest=inc_manifest),
+                },
+            )
         if path == "/api/setup/preview":
             host = (query.get("host") or ["claude"])[0]
             runtime = (query.get("runtime") or ["auto"])[0]
@@ -172,6 +211,87 @@ class MissionControlApp:
                 {"mission": mission, "mode": "readonly", "runtime": runtime, "repo": str(self.repo)},
             )
             return self._json(HTTPStatus.OK, tool_out["structuredContent"])
+
+        if path == "/api/sessions":
+            mission = str(payload.get("mission") or "").strip()
+            goal = str(payload.get("goal") or "").strip()
+            base = str(payload.get("base") or "").strip()
+            runtime = str(payload.get("runtime") or "auto").strip()
+            try:
+                res = start_session(mission, goal, root=self.root, repo=self.repo, base_branch=base, runtime=runtime)
+            except (ValueError, OSError) as exc:
+                return self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return self._json(HTTPStatus.OK, res)
+
+        if path == "/api/sessions/approve":
+            try:
+                res = approve_gate(
+                    str(payload.get("session_id") or ""),
+                    str(payload.get("gate") or ""),
+                    str(payload.get("actor") or ""),
+                    str(payload.get("rationale") or ""),
+                    contract_digest=str(payload.get("contract_digest") or ""),
+                    root=self.root,
+                    repo=self.repo,
+                )
+            except (ValueError, FileNotFoundError, PermissionError, OSError) as exc:
+                return self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return self._json(HTTPStatus.OK, res)
+
+        if path == "/api/sessions/advance":
+            receipt = payload.get("receipt") if isinstance(payload.get("receipt"), dict) else None
+            try:
+                res = advance_session(
+                    str(payload.get("session_id") or ""),
+                    receipt=receipt,
+                    terminal_state=str(payload.get("terminal_state") or ""),
+                    root=self.root,
+                    repo=self.repo,
+                )
+            except (ValueError, FileNotFoundError, PermissionError, OSError) as exc:
+                return self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return self._json(HTTPStatus.OK, res)
+
+        if path == "/api/solo-review":
+            base_ref = str(payload.get("base") or "origin/main").strip()
+            builder = str(payload.get("builder") or "").strip()
+            nc_cmd = str(payload.get("nc_command") or "").strip()
+            lighting = str(payload.get("lighting") or "auto").strip()
+            try:
+                res = run_solo_review(
+                    base=base_ref,
+                    root=self.root,
+                    repo=self.repo,
+                    builder_harness=builder,
+                    nc_command=nc_cmd,
+                    lighting=lighting,
+                )
+            except (ValueError, FileNotFoundError, PermissionError, OSError) as exc:
+                return self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return self._json(HTTPStatus.OK, res)
+
+        if path == "/api/floor-check":
+            base_ref = str(payload.get("base") or "origin/main").strip()
+            tool_out = self.mcp.call_tool("fleet_floor_check", {"base": base_ref, "repo": str(self.repo)})
+            return self._json(HTTPStatus.OK, tool_out["structuredContent"])
+
+        if path == "/api/readiness/cert-check":
+            if not self._demo_lock.acquire(blocking=False):
+                return self._json(HTTPStatus.TOO_MANY_REQUESTS, {"error": "a verification task is already running"})
+            try:
+                res = run_certification_check(self.root)
+            finally:
+                self._demo_lock.release()
+            return self._json(HTTPStatus.OK, res)
+
+        if path == "/api/readiness/probes":
+            if not self._demo_lock.acquire(blocking=False):
+                return self._json(HTTPStatus.TOO_MANY_REQUESTS, {"error": "a verification task is already running"})
+            try:
+                res = run_negative_probes(self.root)
+            finally:
+                self._demo_lock.release()
+            return self._json(HTTPStatus.OK, res)
 
         return self._json(HTTPStatus.NOT_FOUND, {"error": f"not found: {path}"})
 

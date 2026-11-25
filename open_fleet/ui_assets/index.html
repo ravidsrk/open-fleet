@@ -500,8 +500,9 @@
     <nav class="nav" role="tablist" aria-label="Mission Control sections">
       <button class="active" data-tab="overview">Control Room</button>
       <button data-tab="missions">Mission Router</button>
+      <button data-tab="sessions">Sessions &amp; Solo Review</button>
       <button data-tab="verify">Verification Lab</button>
-      <button data-tab="runtimes">Runtime Matrix</button>
+      <button data-tab="runtimes">Runtime &amp; Readiness</button>
       <button data-tab="setup">Setup &amp; MCP</button>
     </nav>
 
@@ -684,7 +685,7 @@
         </div>
       </div>
 
-      <div class="card">
+      <div class="card" style="margin-top: 16px;">
         <div class="card-header">
           <h2 class="card-title">3. Live Mission Preflight Capability Gate</h2>
           <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
@@ -706,6 +707,105 @@
           <code>cap:orca-self-audit</code>) vs <code>ship-it</code> or <code>review-it</code> on <code>posix</code> (passes).
         </p>
         <pre id="pf-output" class="terminal">Pick a mission + runtime and click "Check Preflight"…</pre>
+      </div>
+
+      <div class="grid-2" style="margin-top: 16px;">
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">4. Pre-Launch Negative Safety Probes (first_run.py probes)</h2>
+            <button id="btn-run-probes" class="btn btn-primary btn-sm">Run 5 Probes</button>
+          </div>
+          <p class="muted" style="margin-top:0;">
+            Verifies unsupported profiles, privilege escalations, unarmed deny hooks, malformed runtime responses, and missing capabilities all fail closed BEFORE worker launch (zero LLM spend).
+          </p>
+          <div id="probes-summary" style="margin-bottom: 10px;"></div>
+          <pre id="probes-output" class="terminal">Click "Run 5 Probes" to execute runtime/scripts/first_run.py probes…</pre>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">5. Quality-Floor Regression Guard (floor_guard.py)</h2>
+            <div style="display:flex; gap:8px; align-items:center;">
+              <input id="fg-base" type="text" value="origin/main" style="width:140px; padding:5px 8px; font-size:12px;" />
+              <button id="btn-run-fg" class="btn btn-primary btn-sm">Check Floor</button>
+            </div>
+          </div>
+          <p class="muted" style="margin-top:0;">
+            Checks the diff against the chosen base ref for silenced checkers, weakened test assertions, unfinished markers, or frozen guard-surface edits.
+          </p>
+          <div id="fg-summary" style="margin-bottom: 10px;"></div>
+          <pre id="fg-output" class="terminal">Click "Check Floor" to run runtime/scripts/floor_guard.py…</pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB: SESSIONS, SOLO REVIEW & PR CI ACTION -->
+    <section id="tab-sessions" class="tab-panel">
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">Progressive Mission State Machine (&lt;5K Tokens / Phase)</h2>
+            <span id="sess-bench-pill" class="pill pill-ok">loading benchmark…</span>
+          </div>
+          <p class="muted" style="margin-top:0;">
+            Loads only the active phase's compact brief and required playbooks via MCP instead of ~25K–35K tokens upfront, enforcing one-way human gates and receipts in code.
+          </p>
+          <div class="toolbar">
+            <select id="sess-mission" style="padding:6px 9px; font-size:12.5px;"></select>
+            <input id="sess-goal" type="text" placeholder="Bounded goal (e.g. Add GET /healthz with tests)" style="flex:1; min-width:180px; padding:6px 10px; font-size:12.5px;" />
+            <input id="sess-base" type="text" value="fleet/integration" style="width:135px; padding:6px 9px; font-size:12.5px;" />
+            <button id="btn-sess-start" class="btn btn-primary btn-sm">Start Session</button>
+          </div>
+          <div class="table-wrap" style="max-height:190px; margin-bottom:12px;">
+            <table style="table-layout:fixed;">
+              <thead>
+                <tr>
+                  <th style="width:36%;">Session ID</th>
+                  <th style="width:18%;">Mission</th>
+                  <th style="width:18%;">Phase</th>
+                  <th style="width:14%;">Status</th>
+                  <th style="width:14%;">Terminal</th>
+                </tr>
+              </thead>
+              <tbody id="sessions-tbody"></tbody>
+            </table>
+          </div>
+          <div id="session-active-box">
+            <div class="muted">Start or select a progressive session to inspect its &lt;5K-token phase packet and gates.</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">Solo-Developer Verified Review Lane &amp; PR CI Action</h2>
+            <button id="btn-run-solo" class="btn btn-primary btn-sm">Run Solo Review</button>
+          </div>
+          <p class="muted" style="margin-top:0;">
+            Runs <code>diff_scope.py</code> + <code>floor_guard.py</code>, enforces the irreversibility stop-list (<code>AUTH</code>/<code>SECURITY</code>/<code>MIGRATIONS</code> stay strictly <code>lit</code>), and emits a build-blind review packet without spoofing GitHub approvals.
+          </p>
+          <div class="toolbar">
+            <label class="muted">Base:</label>
+            <input id="solo-base" type="text" value="origin/main" style="width:135px; padding:6px 9px; font-size:12.5px;" />
+            <label class="muted">Builder:</label>
+            <select id="solo-builder" style="padding:6px 9px; font-size:12.5px;">
+              <option value="claude">claude</option>
+              <option value="codex">codex</option>
+              <option value="gemini">gemini</option>
+              <option value="opencode">opencode</option>
+            </select>
+            <button id="btn-copy-blind" class="btn btn-sm">Copy Blind Packet</button>
+          </div>
+          <div id="solo-summary" style="margin-bottom:10px;"></div>
+          <pre id="solo-output" class="terminal" style="max-height:210px;">Click "Run Solo Review" to inspect this branch against origin/main…</pre>
+
+          <div style="margin-top:14px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+              <span class="kpi-label">Drop-In Reusable PR GitHub Action (.github/actions/open-fleet-verify)</span>
+              <button id="btn-copy-ci" class="btn btn-sm">Copy Workflow YAML</button>
+            </div>
+            <pre id="ci-workflow-yaml" class="terminal" style="max-height:190px;">Loading workflow snippet…</pre>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -740,16 +840,42 @@
         </div>
       </div>
 
-      <div class="card">
+      <div class="card" style="margin-bottom: 16px;">
         <div class="card-header">
           <h2 class="card-title">Coding-Agent Harnesses (Detected Locally + Certification Tier)</h2>
+          <button id="btn-cert-check" class="btn btn-primary btn-sm">Verify certification.py check</button>
         </div>
+        <div id="cert-check-banner" style="margin-bottom: 10px;"></div>
         <div style="overflow-x:auto;">
           <table>
             <thead>
               <tr><th>Harness</th><th>Installed Here</th><th>Certified Version</th><th>Live</th><th>Fixture</th><th>Unsupported</th></tr>
             </thead>
             <tbody id="harnesses-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h2 class="card-title">Proof-Graduation Workbench (Doctrine-Only &rarr; Bound Self-Run)</h2>
+          <span id="readiness-pill" class="pill pill-warn">loading…</span>
+        </div>
+        <p class="muted" style="margin-top:0;">
+          Honest priority queue of ungraduated missions. Advancing any row requires a retained run report with a
+          <code>RUN:</code> header, unit manifest, and SHA-256 inventory verified by <code>run_report.py</code>.
+        </p>
+        <div class="table-wrap" style="max-height:280px;">
+          <table style="table-layout:fixed;">
+            <thead>
+              <tr>
+                <th style="width:140px;">Mission</th>
+                <th style="width:155px;">Category</th>
+                <th style="width:85px;">Runtime</th>
+                <th>Preflight Entry Command</th>
+              </tr>
+            </thead>
+            <tbody id="readiness-tbody"></tbody>
           </table>
         </div>
       </div>
@@ -833,6 +959,12 @@
       missions: [],
       certification: null,
       runs: [],
+      sessions: [],
+      sessionBenchmark: null,
+      activeSession: null,
+      readiness: null,
+      soloPacket: "",
+      ciWorkflowYaml: "",
       selectedMission: null,
     };
 
@@ -1172,17 +1304,165 @@
         : "";
     }
 
+    function renderReadiness() {
+      const rdy = STATE.readiness;
+      if (!rdy) return;
+      document.getElementById("readiness-pill").textContent =
+        `${rdy.proven_count} proven · ${rdy.doctrine_only_count} doctrine-only`;
+      document.getElementById("readiness-tbody").innerHTML = (rdy.graduation_backlog || []).map((c) => `
+        <tr>
+          <td class="mono" style="font-weight:700;">${esc(c.mission)}</td>
+          <td class="muted">${esc(c.category)}</td>
+          <td class="mono">${pill(c.recommended_runtime, c.recommended_runtime === "posix" ? "ok" : "warn")}</td>
+          <td class="mono" style="font-size:11.5px;">${esc(c.preflight_cmd)}</td>
+        </tr>
+      `).join("");
+    }
+
+    function renderSessionsList() {
+      const bench = STATE.sessionBenchmark;
+      if (bench) {
+        const bp = document.getElementById("sess-bench-pill");
+        bp.textContent = `${bench.all_within_ceiling ? "ALL <5K" : "CHECK"} · avg ${bench.avg_reduction_pct}% saved`;
+        bp.className = "pill " + (bench.all_within_ceiling ? "pill-ok" : "pill-warn");
+      }
+      const tbody = document.getElementById("sessions-tbody");
+      tbody.innerHTML = (STATE.sessions || []).map((s) => `
+        <tr class="clickable ${STATE.activeSession && STATE.activeSession.session.session_id === s.session_id ? "selected" : ""}" data-sid="${esc(s.session_id)}">
+          <td class="mono" style="font-size:11.5px;">${esc(s.session_id)}</td>
+          <td class="mono">${esc(s.mission)}</td>
+          <td class="mono">${esc(s.current_phase)} (${s.current_phase_index + 1}/${s.total_phases})</td>
+          <td>${pill(s.status, s.status === "completed" ? "ok" : s.status === "degraded" ? "fail" : "info")}</td>
+          <td class="mono">${esc(s.terminal_state || "—")}</td>
+        </tr>
+      `).join("") || `<tr><td colspan="5" class="muted">No progressive sessions recorded yet. Start one above.</td></tr>`;
+      tbody.querySelectorAll("tr[data-sid]").forEach((tr) => {
+        tr.addEventListener("click", () => selectSession(tr.dataset.sid));
+      });
+    }
+
+    async function selectSession(sid) {
+      const data = await apiGet("/api/sessions/" + encodeURIComponent(sid));
+      if (data.error) {
+        showToast(data.error);
+        return;
+      }
+      STATE.activeSession = data;
+      renderSessionsList();
+      renderActiveSession();
+    }
+
+    function renderActiveSession() {
+      const box = document.getElementById("session-active-box");
+      if (!STATE.activeSession) return;
+      const st = STATE.activeSession.session;
+      const pkt = STATE.activeSession.packet;
+      const tb = pkt.token_budget || {};
+      const ph = pkt.phase || {};
+      const blockers = pkt.blocking_requirements || [];
+      const gateForm = (st.status === "active" && ph.requires_human_gate)
+        ? `<div style="margin-top:10px; padding:10px; border:1px solid var(--amber); border-radius:8px; background:var(--bg);">
+             <div class="kpi-label" style="margin-bottom:6px;">One-Way Human Gate Required: ${esc(ph.gate_name)}</div>
+             <div class="toolbar" style="margin:0;">
+               <input id="gate-actor" type="text" placeholder="Human name (e.g. Ravindra Kumar)" style="flex:1; min-width:140px; padding:5px 8px; font-size:12px;" />
+               <input id="gate-rationale" type="text" placeholder="Decision rationale" style="flex:1.4; min-width:160px; padding:5px 8px; font-size:12px;" />
+               <button id="btn-approve-gate" class="btn btn-sm">Approve Gate</button>
+             </div>
+           </div>`
+        : "";
+      const advanceRow = (st.status === "active")
+        ? `<div class="toolbar" style="margin-top:10px; margin-bottom:0;">
+             ${ph.next_phase === "COMPLETE"
+               ? `<input id="adv-terminal" type="text" value="${esc((st.declared_terminals && st.declared_terminals[0]) || "PROMOTION_READY")}" style="width:180px; padding:5px 8px; font-size:12px;" />`
+               : ""}
+             <button id="btn-advance-ok" class="btn btn-primary btn-sm">${ph.next_phase === "COMPLETE" ? "Close Session" : "Record Passing Receipt & Advance"}</button>
+           </div>`
+        : "";
+      box.innerHTML = `
+        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:8px;">
+          <strong class="mono">${esc(st.session_id)}</strong>
+          ${pill(`phase ${ph.index + 1}/${ph.total}: ${ph.id}`, "info")}
+          ${pill(`~${(tb.phase_tokens_est || 0).toLocaleString()} tok (${tb.reduction_pct || 0}% saved)`, tb.within_ceiling ? "ok" : "warn")}
+        </div>
+        <div class="muted" style="font-size:12.5px; margin-bottom:8px;">${esc(ph.directive || "")}</div>
+        <div style="font-size:12px; margin-bottom:8px;">
+          <strong>Playbooks loaded for this phase:</strong>
+          <span class="mono">${esc((pkt.phase_playbooks || []).map((d) => d.name).join(", ") || "none")}</span>
+        </div>
+        <div style="font-size:12px; margin-bottom:8px;">
+          <strong>Blockers:</strong> ${blockers.length ? esc(blockers.join(" · ")) : pill("Ready to advance", "ok")}
+        </div>
+        ${gateForm}
+        ${advanceRow}
+      `;
+      const approveBtn = document.getElementById("btn-approve-gate");
+      if (approveBtn) {
+        approveBtn.addEventListener("click", async () => {
+          const actor = document.getElementById("gate-actor").value.trim();
+          const rationale = document.getElementById("gate-rationale").value.trim();
+          const res = await apiPost("/api/sessions/approve", {
+            session_id: st.session_id,
+            gate: ph.gate_name,
+            actor,
+            rationale,
+          });
+          if (res.error) {
+            showToast("Gate refused: " + res.error);
+            return;
+          }
+          STATE.activeSession = { session: res.session, packet: res.packet };
+          await refreshSessions();
+          renderActiveSession();
+          showToast("Recorded human approval for " + ph.gate_name);
+        });
+      }
+      const advBtn = document.getElementById("btn-advance-ok");
+      if (advBtn) {
+        advBtn.addEventListener("click", async () => {
+          const termEl = document.getElementById("adv-terminal");
+          const res = await apiPost("/api/sessions/advance", {
+            session_id: st.session_id,
+            receipt: { ok: true, source: "mission-control-ui" },
+            terminal_state: termEl ? termEl.value.trim() : "",
+          });
+          if (res.error) {
+            showToast("Advance blocked: " + res.error);
+            return;
+          }
+          STATE.activeSession = { session: res.session, packet: res.packet };
+          await refreshSessions();
+          renderActiveSession();
+          showToast(res.closed ? "Closed session: " + res.session.terminal_state : "Advanced to " + res.to_phase);
+        });
+      }
+    }
+
+    async function refreshSessions() {
+      const resp = await apiGet("/api/sessions");
+      STATE.sessions = resp.sessions || [];
+      STATE.sessionBenchmark = resp.benchmark || null;
+      renderSessionsList();
+    }
+
     async function loadAll() {
-      const [overview, missionsResp, cert, runsResp] = await Promise.all([
+      const [overview, missionsResp, cert, runsResp, sessResp, rdyResp, ciResp] = await Promise.all([
         apiGet("/api/overview"),
         apiGet("/api/missions"),
         apiGet("/api/certification"),
         apiGet("/api/runs"),
+        apiGet("/api/sessions"),
+        apiGet("/api/readiness"),
+        apiGet("/api/ci-workflow"),
       ]);
       STATE.overview = overview;
       STATE.missions = missionsResp.missions || [];
       STATE.certification = cert;
       STATE.runs = runsResp.runs || [];
+      STATE.sessions = sessResp.sessions || [];
+      STATE.sessionBenchmark = sessResp.benchmark || null;
+      STATE.readiness = rdyResp;
+      STATE.ciWorkflowYaml = ciResp.workflow_yaml || "";
+      document.getElementById("ci-workflow-yaml").textContent = STATE.ciWorkflowYaml;
 
       const cats = [...new Set(STATE.missions.map((m) => m.category))].sort();
       const catSel = document.getElementById("filter-category");
@@ -1198,10 +1478,19 @@
       ).join("");
       pfSel.value = prevPf;
 
+      const sessSel = document.getElementById("sess-mission");
+      const prevSess = sessSel.value || "ship-it";
+      sessSel.innerHTML = STATE.missions.map((m) =>
+        `<option value="${esc(m.name)}">${esc(m.name)}</option>`
+      ).join("");
+      sessSel.value = prevSess;
+
       renderOverview();
       renderRuns();
       renderMissionsTable();
       renderCertification();
+      renderReadiness();
+      renderSessionsList();
       if (!STATE.selectedMission && STATE.missions.length) {
         const flagship = STATE.missions.find((m) => m.name === "ship-it") || STATE.missions[0];
         selectMission(flagship.name);
@@ -1299,6 +1588,108 @@
       } finally {
         btn.disabled = false;
       }
+    });
+
+    document.getElementById("btn-run-probes").addEventListener("click", async (ev) => {
+      const btn = ev.currentTarget;
+      btn.disabled = true;
+      document.getElementById("probes-output").textContent = "Running runtime/scripts/first_run.py probes --json…";
+      try {
+        const res = await apiPost("/api/readiness/probes", {});
+        document.getElementById("probes-summary").innerHTML = pill(res.ok ? "ALL 5 PROBES PASS" : "PROBE FAIL", res.ok ? "ok" : "fail");
+        document.getElementById("probes-output").textContent = res.receipt
+          ? JSON.stringify(res.receipt, null, 2)
+          : (res.stdout || "") + (res.stderr ? "\n" + res.stderr : "");
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    document.getElementById("btn-run-fg").addEventListener("click", async (ev) => {
+      const btn = ev.currentTarget;
+      const base = document.getElementById("fg-base").value.trim() || "origin/main";
+      btn.disabled = true;
+      document.getElementById("fg-output").textContent = `Running floor_guard.py --base ${base}…`;
+      try {
+        const res = await apiPost("/api/floor-check", { base });
+        document.getElementById("fg-summary").innerHTML = pill(res.ok ? "FLOOR CLEAN" : "VIOLATION", res.ok ? "ok" : "fail");
+        document.getElementById("fg-output").textContent = (res.stdout || "") + (res.stderr ? "\n" + res.stderr : "");
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    document.getElementById("btn-cert-check").addEventListener("click", async (ev) => {
+      const btn = ev.currentTarget;
+      btn.disabled = true;
+      document.getElementById("cert-check-banner").innerHTML = pill("Running certification.py check…", "info");
+      try {
+        const res = await apiPost("/api/readiness/cert-check", {});
+        document.getElementById("cert-check-banner").innerHTML =
+          pill(res.fresh ? "CERTIFICATION VALID & FRESH" : "CHECK FAILED", res.fresh ? "ok" : "fail") +
+          ` <span class="mono muted" style="font-size:12px;">${esc(res.summary || "")}</span>`;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    // Sessions & Solo Review listeners
+    document.getElementById("btn-sess-start").addEventListener("click", async (ev) => {
+      const btn = ev.currentTarget;
+      const mission = document.getElementById("sess-mission").value;
+      const goal = document.getElementById("sess-goal").value.trim() || `Run ${mission} with verified evidence`;
+      const base = document.getElementById("sess-base").value.trim();
+      btn.disabled = true;
+      try {
+        const res = await apiPost("/api/sessions", { mission, goal, base });
+        if (res.error) {
+          showToast(res.error);
+          return;
+        }
+        STATE.activeSession = res;
+        await refreshSessions();
+        renderActiveSession();
+        showToast("Started session " + res.session.session_id);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    document.getElementById("btn-run-solo").addEventListener("click", async (ev) => {
+      const btn = ev.currentTarget;
+      const base = document.getElementById("solo-base").value.trim() || "origin/main";
+      const builder = document.getElementById("solo-builder").value;
+      btn.disabled = true;
+      document.getElementById("solo-output").textContent = `Running diff_scope + floor_guard + solo-review packet against ${base}…`;
+      try {
+        const res = await apiPost("/api/solo-review", { base, builder });
+        if (res.error) {
+          document.getElementById("solo-summary").innerHTML = pill("ERROR", "fail");
+          document.getElementById("solo-output").textContent = res.error;
+          return;
+        }
+        STATE.soloPacket = res.blind_review_packet || "";
+        const lenses = (res.diff_scope && res.diff_scope.triggered_risk_lenses) || [];
+        document.getElementById("solo-summary").innerHTML =
+          pill("FLOOR: " + (res.floor_guard.ok ? "CLEAN" : "FAIL"), res.floor_guard.ok ? "ok" : "fail") + " " +
+          pill("LIGHTING: " + res.lighting.effective.toUpperCase(), res.lighting.effective === "lit" ? "warn" : "ok") + " " +
+          pill("LENSES: " + (lenses.join(", ") || "none"), lenses.length ? "info" : "ok");
+        document.getElementById("solo-output").textContent = STATE.soloPacket;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    document.getElementById("btn-copy-blind").addEventListener("click", () => {
+      if (!STATE.soloPacket) {
+        showToast("Run Solo Review first to generate the build-blind packet");
+        return;
+      }
+      copyText(STATE.soloPacket, "build-blind review packet");
+    });
+
+    document.getElementById("btn-copy-ci").addEventListener("click", () => {
+      copyText(STATE.ciWorkflowYaml, "PR verification workflow YAML");
     });
 
     // Setup Studio listeners

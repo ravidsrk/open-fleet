@@ -29,3 +29,7 @@ dist/
 
 # Local Node dependencies installed under docs/assets/diagrams/generator/.
 node_modules/
+
+# Local Python wheel / editable build artifacts from pyproject.toml.
+build/
+*.egg-info/

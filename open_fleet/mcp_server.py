@@ -26,7 +26,18 @@ from open_fleet.catalog import (
     load_quarantine,
     route_intent,
 )
+from open_fleet.readiness import readiness_report, run_negative_probes
+from open_fleet.sessions import (
+    advance_session,
+    approve_gate,
+    benchmark_progressive_savings,
+    build_phase_packet,
+    list_sessions,
+    load_session,
+    start_session,
+)
 from open_fleet.setup import build_mcp_config, doctor
+from open_fleet.solo_review import run_solo_review
 from open_fleet.state import read_decisions, read_workspace_status
 
 PROTOCOL_VERSION = "2025-03-26"
@@ -207,7 +218,7 @@ class OpenFleetMCPServer:
                     "type": "object",
                     "properties": {
                         "base": {"type": "string", "description": "Base git ref or commit"},
-                        "head": {"type": "string", "default": "HEAD"},
+                        "strict": {"type": "boolean", "default": False},
                         "repo": {"type": "string"},
                     },
                     "required": ["base"],
@@ -251,8 +262,109 @@ class OpenFleetMCPServer:
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "kind": {"type": "string", "enum": ["negative-control", "first-run"], "default": "negative-control"},
+                        "kind": {"type": "string", "enum": ["negative-control", "first-run", "probes"], "default": "negative-control"},
                         "profile": {"type": "string", "enum": ["ro", "rw"], "default": "ro"},
+                    },
+                },
+            },
+            {
+                "name": "fleet_session_start",
+                "description": "Start a progressive MCP-backed mission state machine (<5K tokens/phase) persisted under .orca/sessions/.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "mission": {"type": "string", "description": "Mission name (e.g. ship-it, review-it, clean-sweep)"},
+                        "goal": {"type": "string", "description": "Bounded engineering goal"},
+                        "base": {"type": "string", "description": "Integration BASE branch (for write missions)"},
+                        "runtime": {"type": "string", "default": "auto"},
+                        "repo": {"type": "string"},
+                        "sessions_dir": {"type": "string"},
+                    },
+                    "required": ["mission", "goal"],
+                },
+            },
+            {
+                "name": "fleet_session_packet",
+                "description": "Fetch the <5K-token progressive context packet for a session's active phase (required playbooks, gate blockers, and token savings).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string"},
+                        "repo": {"type": "string"},
+                        "sessions_dir": {"type": "string"},
+                    },
+                    "required": ["session_id"],
+                },
+            },
+            {
+                "name": "fleet_session_approve_gate",
+                "description": "Record an explicit human approval for a one-way gate (freeze/promote). Refuses blank or agent/bot actor identities.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string"},
+                        "gate": {"type": "string", "description": "Gate name (e.g. freeze, promote)"},
+                        "actor": {"type": "string", "description": "Human approver identity (name or email)"},
+                        "rationale": {"type": "string", "description": "Reason for the human decision"},
+                        "contract_digest": {"type": "string", "description": "Optional frozen spec sha256 digest"},
+                        "repo": {"type": "string"},
+                        "sessions_dir": {"type": "string"},
+                    },
+                    "required": ["session_id", "gate", "actor", "rationale"],
+                },
+            },
+            {
+                "name": "fleet_session_advance",
+                "description": "Advance a progressive mission session by one phase (fail-closed on missing receipts, unapproved one-way gates, or invalid terminal states).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string"},
+                        "receipt": {"type": "object", "description": "Optional phase receipt object (e.g. {ok: true, ...})"},
+                        "terminal_state": {"type": "string", "description": "Terminal state when closing the final phase"},
+                        "repo": {"type": "string"},
+                        "sessions_dir": {"type": "string"},
+                    },
+                    "required": ["session_id"],
+                },
+            },
+            {
+                "name": "fleet_session_list",
+                "description": "List progressive mission sessions in the workspace plus per-mission <5K token reduction metrics.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repo": {"type": "string"},
+                        "sessions_dir": {"type": "string"},
+                        "include_benchmark": {"type": "boolean", "default": False},
+                    },
+                },
+            },
+            {
+                "name": "fleet_solo_review",
+                "description": "Run the honest solo-developer verified review lane: diff_scope + floor_guard + lighting eligibility + build-blind review packet + optional verify.py (never spoofs GitHub APPROVE).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "base": {"type": "string", "description": "Base git ref (e.g. origin/main or integration BASE)"},
+                        "repo": {"type": "string"},
+                        "contract_path": {"type": "string"},
+                        "builder_harness": {"type": "string"},
+                        "manifest": {"type": "string"},
+                        "lighting": {"type": "string", "enum": ["auto", "lit", "dark-eligible"], "default": "auto"},
+                        "nc_command": {"type": "string"},
+                        "no_gh": {"type": "boolean", "default": True},
+                    },
+                    "required": ["base"],
+                },
+            },
+            {
+                "name": "fleet_readiness",
+                "description": "Compute the honest proof-graduation & multi-harness certification backlog, optionally running certification.py check live.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "check_cert": {"type": "boolean", "default": False},
                     },
                 },
             },
@@ -308,6 +420,18 @@ class OpenFleetMCPServer:
                 "description": "Parsed mechanical, taste, and one-way gate decisions from docs/DECISIONS.md.",
                 "mimeType": "application/json",
             },
+            {
+                "uri": "open-fleet://sessions/list",
+                "name": "Progressive Mission Sessions",
+                "description": "Active and completed progressive (<5K-token) mission state machines in the workspace.",
+                "mimeType": "application/json",
+            },
+            {
+                "uri": "open-fleet://readiness/report",
+                "name": "Proof Graduation & Certification Readiness",
+                "description": "Ranked doctrine-only mission graduation backlog and locally actionable harness certification cells.",
+                "mimeType": "application/json",
+            },
         ]
 
     def prompt_definitions(self) -> list[dict[str, Any]]:
@@ -345,6 +469,10 @@ class OpenFleetMCPServer:
             payload = read_workspace_status(self.repo)
         elif uri == "open-fleet://governance/decisions":
             payload = read_decisions(self.repo)
+        elif uri == "open-fleet://sessions/list":
+            payload = {"sessions": list_sessions(repo=self.repo), "benchmark": benchmark_progressive_savings(self.root)}
+        elif uri == "open-fleet://readiness/report":
+            payload = readiness_report(self.root)
         else:
             raise KeyError(f"unknown resource URI: {uri}")
         return {
@@ -470,7 +598,6 @@ class OpenFleetMCPServer:
             is_error = not result["ok"]
         elif name == "fleet_diff_scope":
             base_ref = str(args.get("base") or "").strip()
-            head_ref = str(args.get("head") or "HEAD")
             repo = Path(str(args.get("repo") or self.repo)).expanduser().resolve()
             if not base_ref:
                 is_error = True
@@ -480,12 +607,14 @@ class OpenFleetMCPServer:
                     sys.executable,
                     "-I",
                     str(self.root / "runtime" / "scripts" / "diff_scope.py"),
+                    "--repo",
+                    str(repo),
                     "--base",
                     base_ref,
-                    "--head",
-                    head_ref,
                     "--json",
                 ]
+                if args.get("strict"):
+                    cmd.append("--strict")
                 res = _run_helper(self.root, cmd, cwd=repo, timeout=60)
                 parsed = None
                 try:
@@ -511,9 +640,96 @@ class OpenFleetMCPServer:
             kind = str(args.get("kind") or "negative-control")
             if kind == "first-run":
                 result = run_inert_first_run(self.root, profile=str(args.get("profile") or "ro"))
+            elif kind == "probes":
+                result = run_negative_probes(self.root)
             else:
                 result = run_negative_control_demo(self.root)
             is_error = not result.get("ok", False)
+        elif name == "fleet_session_start":
+            repo = Path(str(args.get("repo") or self.repo)).expanduser().resolve()
+            sdir = Path(str(args["sessions_dir"])).expanduser().resolve() if args.get("sessions_dir") else None
+            try:
+                result = start_session(
+                    str(args.get("mission") or "").strip(),
+                    str(args.get("goal") or "").strip(),
+                    root=self.root,
+                    repo=repo,
+                    sessions_dir=sdir,
+                    base_branch=str(args.get("base") or ""),
+                    runtime=str(args.get("runtime") or "auto"),
+                )
+            except (ValueError, OSError) as exc:
+                is_error = True
+                result = {"error": str(exc)}
+        elif name == "fleet_session_packet":
+            repo = Path(str(args.get("repo") or self.repo)).expanduser().resolve()
+            sdir = Path(str(args["sessions_dir"])).expanduser().resolve() if args.get("sessions_dir") else None
+            try:
+                state = load_session(str(args.get("session_id") or ""), repo=repo, sessions_dir=sdir)
+                result = build_phase_packet(state, self.root)
+            except (ValueError, FileNotFoundError, OSError) as exc:
+                is_error = True
+                result = {"error": str(exc)}
+        elif name == "fleet_session_approve_gate":
+            repo = Path(str(args.get("repo") or self.repo)).expanduser().resolve()
+            sdir = Path(str(args["sessions_dir"])).expanduser().resolve() if args.get("sessions_dir") else None
+            try:
+                result = approve_gate(
+                    str(args.get("session_id") or ""),
+                    str(args.get("gate") or ""),
+                    str(args.get("actor") or ""),
+                    str(args.get("rationale") or ""),
+                    contract_digest=str(args.get("contract_digest") or ""),
+                    root=self.root,
+                    repo=repo,
+                    sessions_dir=sdir,
+                )
+            except (ValueError, FileNotFoundError, PermissionError, OSError) as exc:
+                is_error = True
+                result = {"error": str(exc)}
+        elif name == "fleet_session_advance":
+            repo = Path(str(args.get("repo") or self.repo)).expanduser().resolve()
+            sdir = Path(str(args["sessions_dir"])).expanduser().resolve() if args.get("sessions_dir") else None
+            try:
+                result = advance_session(
+                    str(args.get("session_id") or ""),
+                    receipt=args.get("receipt") if isinstance(args.get("receipt"), dict) else None,
+                    terminal_state=str(args.get("terminal_state") or ""),
+                    root=self.root,
+                    repo=repo,
+                    sessions_dir=sdir,
+                )
+            except (ValueError, FileNotFoundError, PermissionError, OSError) as exc:
+                is_error = True
+                result = {"error": str(exc)}
+        elif name == "fleet_session_list":
+            repo = Path(str(args.get("repo") or self.repo)).expanduser().resolve()
+            sdir = Path(str(args["sessions_dir"])).expanduser().resolve() if args.get("sessions_dir") else None
+            result = {"sessions": list_sessions(repo=repo, sessions_dir=sdir)}
+            if args.get("include_benchmark"):
+                result["benchmark"] = benchmark_progressive_savings(self.root)
+        elif name == "fleet_solo_review":
+            repo = Path(str(args.get("repo") or self.repo)).expanduser().resolve()
+            try:
+                result = run_solo_review(
+                    base=str(args.get("base") or ""),
+                    root=self.root,
+                    repo=repo,
+                    contract_path=str(args.get("contract_path") or ""),
+                    builder_harness=str(args.get("builder_harness") or ""),
+                    manifest=str(args.get("manifest") or ""),
+                    lighting=str(args.get("lighting") or "auto"),
+                    nc_command=str(args.get("nc_command") or ""),
+                    no_gh=bool(args.get("no_gh", True)),
+                )
+                is_error = not result["ok"]
+            except (ValueError, FileNotFoundError, PermissionError, OSError) as exc:
+                is_error = True
+                result = {"error": str(exc)}
+        elif name == "fleet_readiness":
+            result = readiness_report(self.root, run_cert_check=bool(args.get("check_cert")))
+            if args.get("check_cert") and result.get("certification_check"):
+                is_error = not result["certification_check"]["ok"]
         else:
             raise KeyError(f"unknown tool: {name}")
 
