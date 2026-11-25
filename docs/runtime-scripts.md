@@ -305,9 +305,14 @@ pinned) — and a caller that sets
 `ORCA_PROVENANCE`/`OPEN_FLEET_PROVENANCE` (a sound lane) cannot run at all (exit 2). `append` takes `--id`, `--class`, `--answer`,
 `--why`, `--task`, `--source`, `--grant-sig`, `--ts`; `active` takes `--json`; `tally` takes
 `--lens`, `--json`; `check` takes `--since YYYY-MM-DD` (records stamped earlier are counted, not
-judged — the repository's own ledger predates the human-source and class rules, so CI runs
-`check --since 2026-09-24`); `grant-keygen` takes `--out` (required) and `--in-repo-ok`;
-`sign-grant` takes `--key`, `--id`, `--answer`, `--why`, `--task`, `--ts`.
+judged — unless added or modified relative to `--base`) and `--base REF` (#772: every record
+newly added or modified relative to `REF` is validated regardless of `--since`, closing backdated
+timestamps; `REF` follows the same hardened ref/commit rule as `--pin-ref`). In CI
+(`.github/workflows/validate.yml`), `pull_request` runs invoke
+`decisions.py --pin-ref "refs/remotes/origin/${PR_BASE_REF}" check --since 2026-09-24 --base "refs/remotes/origin/${PR_BASE_REF}"`,
+while non-PR runs invoke `decisions.py check --since 2026-09-24`. `grant-keygen` takes `--out`
+(required) and `--in-repo-ok`; `sign-grant` takes `--key`, `--id`, `--answer`, `--why`, `--task`,
+`--source`, `--ts` (payload v3 binds `--source` alongside `ts`, class, id, answer, why and task).
 
 Log line format: `ts · gate-or-ask-id · class · answer · why · task?` with classes
 `mechanical`, `taste`, `one-way`. `append` refuses unknown classes (an argparse usage error,
@@ -1393,13 +1398,20 @@ fetch command; no shell).
 
 Flags: `--source` (required; one of `issue`, `pr`, `ci`, `web`), `--label` (provenance
 label, sanitized and capped), `--timeout` (fetch timeout seconds, default 60), `--fetch`
-(command argv; omit to read stdin).
+(command argv; omit to read stdin). `--fetch` enforces a fail-closed read-only command allowlist
+(#780) before spawning anything: `gh` read-only subcommands and read-only `gh api` (GET/HEAD only,
+no write/body/header-mutating flags), `orca` / `orca-ide` / `orca_cli.py` read-only `linear`/`jira`
+reads, `curl`/`wget` read-only GET/HEAD without file-output or upload flags, `cat` with explicit
+file paths, and `python` invoking only the sibling `orca_cli.py` read-only subcommands; anything
+else exits 2 with no subprocess started.
 
 Labels (`[INJECTION-PATTERN:...]`): instruction-override, authority-claim,
 suppression-request, command-execution, role-play-marker — matched over an NFKC-folded
-copy with Unicode format characters stripped; the emitted text is the original bytes
-except for forged banners inside the content, which are defused with a spliced
-zero-width space (so byte-for-byte identity holds only when no banner is defused).
+copy with Unicode format characters stripped, across single lines and sliding 2-line and 3-line
+windows (so directives split across consecutive lines are still detected). Before emitting,
+`_strip_emit_controls` strips ANSI/VT escape sequences, Unicode Tag characters (`U+E0000`–`U+E007F`),
+and bidirectional override/isolate controls from the emitted text, and forged banners inside the
+content are defused with a spliced zero-width space.
 Output is a rendering for a reader — never round-trip it into a live PR or issue.
 
 Grant claims (#605): `grant_labels(line)` returns `["grant-claim"]` for text that ASSERTS a
@@ -1441,9 +1453,10 @@ What a worker DOES with fenced text is graded separately, on tool events and git
 > unattended worker, and that text is requirements data, never authority. A clean scan is
 > not proof of safety, so clean text is enveloped too; a failed fetch produces NO
 > envelope, because an empty envelope must never read as a successful read of an empty
-> body. Matching runs over a normalized probe while the original bytes are emitted, and
-> forged banners (`runtime/scripts/guard_text.py:FORGED_BANNER`) are defused — content
-> must not close the envelope early and continue as trusted text. The five label
+> body. Matching runs over a normalized probe (including sliding 2- and 3-line windows) while
+> emitted text strips ANSI escapes, Unicode Tag characters and bidi overrides and defuses forged
+> banners (`runtime/scripts/guard_text.py:FORGED_BANNER`) — content must not smuggle terminal
+> controls or close the envelope early and continue as trusted text. The five label
 > families in `runtime/scripts/guard_text.py:INJECTION_PATTERNS` are detection only: a
 > label is evidence for the reader, never a verdict.
 
@@ -1844,11 +1857,21 @@ or non-object JSON, or an `error` envelope, and returns `result`; `nonzero` keep
 exit-status rule (`strict`, `no-receipt` for `runtime/scripts/check_reply.py`, `ignore` for
 `runtime/scripts/hitl_ask.py`).
 
-Order (upstream's own, skill-stubs/_shared/cli-resolution.md in stablyai/orca):
-`OPEN_FLEET_CLI_COMMAND`, else `ORCA_CLI_COMMAND`, when set (Orca exports the latter inside the
-sessions it manages; the test suite points it at a stub) → `orca_cli.py` itself when
-`OPEN_FLEET_RUNTIME`/`ORCA_FLEET_RUNTIME` selects a non-Orca runtime → `orca-dev` when
-`ORCA_DEV_REPO_ROOT` is set → `orca-ide` on Linux and WSL → `orca` elsewhere. Resolution never consults PATH; `--path` additionally
+Order (upstream's own, skill-stubs/_shared/cli-resolution.md in stablyai/orca, plus non-Orca
+isolation #775):
+1. `OPEN_FLEET_CLI_COMMAND`, when set, always wins (even on a non-Orca `OPEN_FLEET_RUNTIME` /
+   `ORCA_FLEET_RUNTIME`, so an explicit fleet-level override still points at a chosen CLI or test
+   stub).
+2. When `OPEN_FLEET_RUNTIME` / `ORCA_FLEET_RUNTIME` explicitly selects a non-Orca runtime (anything
+   other than `orca` or `auto`), `resolve` returns `orca_cli.py` itself and **ignores** any
+   inherited `ORCA_CLI_COMMAND` (which Orca exports inside sessions it manages), so an ambient Orca
+   env var cannot hijack a non-Orca runtime (#775).
+3. Under `OPEN_FLEET_RUNTIME=auto`, the registry (`active_provider_name`) decides whether Orca
+   answers; if it falls back to `posix`, `resolve` returns `orca_cli.py` itself.
+4. Otherwise (runtime `orca` or unset, or `auto` resolved to `orca`): `ORCA_CLI_COMMAND` when set →
+   `orca-dev` when `ORCA_DEV_REPO_ROOT` is set → `orca-ide` on Linux and WSL → `orca` elsewhere.
+
+Resolution never consults PATH; `--path` additionally
 looks the resolved name up and fails when it is absent.
 A configured command must name ONE executable — a bare name or an absolute path; a command line
 (`python3 /tmp/orca.py`), an option-shaped value, a cwd-relative path or a control character is
@@ -2378,7 +2401,14 @@ default cwd), `PROFILE`, `ORCA_COORD_ALLOW_AUTONOMOUS_WRITE` (must be 1 for rw),
 `ORCA_COORD_ALLOW_DANGER` (must be 1 for danger), `ORCA_SANDBOX_RECIPE`,
 `ORCA_SANDBOX_DOCTOR`, `WORKER_CMD` (generic override; needs
 `ORCA_COORD_ALLOW_CMD_OVERRIDE=1`), `SETTLE_SECS` (default 20, custom-argv lane), `SUBMIT_SECS`
-(default 30, how long the #680 `terminal send` waits to observe the submit).
+(default 30, how long the #680 `terminal send` waits to observe the submit),
+`OPEN_FLEET_MAX_BUDGET_USD` (optional per-worker spend cap, positive finite dollar amount strictly
+below `1000000`, passed as `--max-budget-usd` on headless `claude` spawns for `posix` and
+`worktrunk` when no `CLAUDE_CMD`/`WORKER_CMD` override is set; malformed values refuse with exit 2,
+and runtimes/lanes that cannot carry it emit a `SPAWN=NOTE`, #759), and `OPEN_FLEET_REQUIRE_BUDGET`
+(strict boolean switch: `1`/`true`/`yes`/`on` enable, empty/`0`/`false`/`no`/`off` disable, any
+other value refuses with exit 2; when enabled, refuses exit 2 any `claude` spawn where
+`OPEN_FLEET_MAX_BUDGET_USD` is unset or does not reach the launched command, #759).
 
 Exits: 0 dispatched · 1 spawn/dispatch step failed · 2 usage or policy refusal (every
 typed refusal code) · 3 custom-argv turn UNPROVEN (inspect, never respawn, never
@@ -2490,8 +2520,10 @@ negative past it). A missing or malformed `orca.next_review` or `--today` is exi
 0: a dated trigger that silently stops being read is the standing-issue gap it replaces
 (`runtime/scripts/upstream_probe.py:read_next_review`).
 
-`latest` follows `Link: rel="next"` for up to five pages — only on the first URL's scheme,
-host and port; a next link elsewhere exits 2 — sends `Authorization: Bearer $GITHUB_TOKEN`
+`latest` follows `Link: rel="next"` for up to five pages (`MAX_PAGES`) — only on the first URL's
+scheme, host and port; a next link elsewhere exits 2, and hitting the 5-page cap with a `rel="next"`
+page still unread fails closed with `ProbeError` (exit 2) rather than assessing drift from a
+partial tag list (#788) — sends `Authorization: Bearer $GITHUB_TOKEN`
 when that variable is set (the endpoint is public; the token only lifts the rate limit),
 over https or loopback http only and never across a redirect, and skips `-rc`, `mobile-*` and every other non-`vX.Y.Z` tag. Drift is
 `none` (the pin is the highest stable tag, or above it), `patch`, `minor` or `major` by

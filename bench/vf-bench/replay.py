@@ -327,6 +327,8 @@ def adapter_request(vf, trap, holder):
             coordinator["execute_nc"] = True
             if trap.get("nc_command"):
                 coordinator["nc_command"] = trap["nc_command"]
+        elif not trap.get("dispatch") and trap.get("unit_class", "mutation") not in ("report-only", "planning"):
+            coordinator["allow_static_nc"] = True
         cwd, env = vf.ROOT, dict(os.environ)
     manifest_path = coordinator.pop("manifest")
     request = {"contract": ADAPTER_CONTRACT, "case": {"token": case_token(trap["id"])},

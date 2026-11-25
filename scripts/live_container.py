@@ -129,6 +129,10 @@ ARMS = {
     "trajectories": ("scripts/eval.py", "run", "--suite", "trajectories"),
     "first_run": ("runtime/scripts/first_run.py",),
 }
+EXTRA_ARMS = {
+    "behavioral": ("scripts/eval.py", "run", "--suite", "behavioral"),
+}
+ALL_ARMS = {**ARMS, **EXTRA_ARMS}
 # Each arm's flags that name where its ledger and evidence go: each must be under /results, and an
 # arm whose ledger defaults to a temp dir must name one (Codex at 47e0616eac: destroying the
 # container erased it).
@@ -552,8 +556,8 @@ def inside(path, other):
 
 def run(args):
     """Check the request, then launch under the lock. Returns the exit code."""
-    if args.arm not in ARMS:
-        raise Refused(f"unknown arm {args.arm!r}: one of {', '.join(ARMS)}")
+    if args.arm not in ALL_ARMS:
+        raise Refused(f"unknown arm {args.arm!r}: one of {', '.join(ALL_ARMS)}")
     if not (math.isfinite(args.timeout) and args.timeout > 0):
         raise Refused("--timeout must be a positive finite number of seconds")
     if not (math.isfinite(args.cap_usd) and args.cap_usd > 0):
@@ -614,7 +618,7 @@ def launch(args, results, receipts, token_file, token, repo, commit, image):
     log_path, ledger_dir = base.with_suffix(".log"), base.with_suffix(".broker")
     staging = Path(tempfile.mkdtemp(prefix="of-live-"))
     limits = {"pids": args.pids_limit, "memory": args.memory, "cpus": args.cpus}
-    script, *prefix = ARMS[args.arm]
+    script, *prefix = ALL_ARMS[args.arm]
     cmd = ["timeout", "--kill-after=30", str(int(args.timeout) + BACKSTOP_S),
            "python3", f"{REPO_IN}/{script}", *prefix, *args.arm_args]
     receipt = {"schema": RECEIPT_SCHEMA, "arm": args.arm, "arm_args": args.arm_args, "argv": cmd,
@@ -635,7 +639,7 @@ def launch(args, results, receipts, token_file, token, repo, commit, image):
                "timed_out": False, "interrupted": None, "refused": None, "exit_status": None,
                "destroyed": {"verified": False, "check": None, "output": "no container was created", "errors": []},
                "log": str(log_path), "token_redactions": 0}
-    ids, refused, redactor, attempted = [], None, None, False
+    ids, refused, redactor, attempted, interrupted = [], None, None, False, None
     try:
         export, attestation = staging / "repo", staging / "attestation.json"
         # Every derived mount source passes the same rule as the caller's, before anything is made.
@@ -705,8 +709,10 @@ def launch(args, results, receipts, token_file, token, repo, commit, image):
             raise
         receipt["refused"], refused = str(err), err
     except (KeyboardInterrupt, SystemExit) as err:
+        if not attempted:
+            raise
         receipt["interrupted"] = getattr(err, "code", None) or 128 + signal.SIGINT
-        raise
+        interrupted = err
     finally:
         with _mask_teardown_signals():
             if attempted and not receipt["destroyed"]["verified"]:
@@ -729,6 +735,8 @@ def launch(args, results, receipts, token_file, token, repo, commit, image):
         print(f"live_container: FAIL-CLOSED: launch {nonce}'s containers could not be verified destroyed: "
               f"{receipt['destroyed']['output']}", file=sys.stderr)
         return EXIT_NOT_DESTROYED
+    if interrupted is not None:
+        raise interrupted
     if refused:
         raise refused
     if receipt["timed_out"]:
@@ -780,7 +788,7 @@ def build(args):
         exe = shutil.which("docker")
         if not exe:
             raise Refused("no `docker` on PATH (OrbStack or Docker Engine)")
-        rc = subprocess.run([exe, *argv], stdin=subprocess.DEVNULL).returncode
+        rc = subprocess.run([exe, *argv], env=docker_env(), stdin=subprocess.DEVNULL).returncode
         built = iidfile.read_text(encoding="ascii", errors="replace").strip() if iidfile.is_file() else ""
     if rc == 0 and _read_dockerfile(dockerfile) != committed:
         raise Refused(f"{dockerfile} changed while docker built it, so what docker read is unknown: the image "
@@ -809,7 +817,7 @@ def parser():
     b.add_argument("--context", default=None, help=argparse.SUPPRESS)
     b.add_argument("--images", default=IMAGES, help=argparse.SUPPRESS)
     r = sub.add_parser("run", help="run one arm in a fresh container, then destroy it")
-    r.add_argument("--arm", required=True, choices=sorted(ARMS))
+    r.add_argument("--arm", required=True, choices=sorted(ALL_ARMS))
     r.add_argument("--results", required=True, help="the host results directory, /results inside")
     r.add_argument("--timeout", type=float, required=True, help="wall-clock limit, seconds")
     r.add_argument("--cap-usd", type=float, required=True, dest="cap_usd",

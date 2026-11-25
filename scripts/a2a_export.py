@@ -28,11 +28,16 @@ Usage:
 
 Exit: 0 ok · 1 validation/export failure · 2 usage error.
 """
+import sys
+if (__name__ == "__main__" and not getattr(sys.flags, "safe_path", False) and sys.path
+        and ("os" not in sys.modules or sys.modules["os"].path.realpath(sys.path[0])
+             == sys.modules["os"].path.dirname(sys.modules["os"].path.realpath(__file__)))):
+    del sys.path[0]
+
 import argparse
 import importlib.util
 import ipaddress
 import json
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent

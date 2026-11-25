@@ -1437,7 +1437,13 @@ def _evidence_locates(evidence: object, trace: str, spent: set[str]) -> bool:
 
 
 def _agent_cmd(env_key: str, default: str) -> list[str]:
-    return shlex.split(os.environ.get(env_key) or default)
+    raw = (os.environ.get(env_key) or "").strip()
+    if not raw:
+        return shlex.split(default)
+    tokens = shlex.split(raw)
+    if not tokens or not tokens[0]:
+        return shlex.split(default)
+    return tokens
 
 
 def _process_error(err: OSError | subprocess.SubprocessError) -> str:

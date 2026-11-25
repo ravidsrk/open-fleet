@@ -68,6 +68,7 @@ jobs:
         env:
           # Every expression reaches a script through env:, never inline (2026-10-23 review, §5 CI).
           SHARD: ${{ matrix.shard }}
+          COVERAGE_RCFILE: .coveragerc
         run: |
           if command -v gitleaks >/dev/null; then
             echo "::error::the scanner-absent test environment unexpectedly contains Gitleaks"

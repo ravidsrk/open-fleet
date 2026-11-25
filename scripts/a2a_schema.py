@@ -35,13 +35,18 @@ Usage:
 
 Exit: 0 valid · 1 invalid card or pin drift · 2 usage error.
 """
+import sys
+if (__name__ == "__main__" and not getattr(sys.flags, "safe_path", False) and sys.path
+        and ("os" not in sys.modules or sys.modules["os"].path.realpath(sys.path[0])
+             == sys.modules["os"].path.dirname(sys.modules["os"].path.realpath(__file__)))):
+    del sys.path[0]
+
 import argparse
 import hashlib
 import ipaddress
 import json
 import math
 import re
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit

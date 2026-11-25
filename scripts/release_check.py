@@ -1178,8 +1178,9 @@ def main(argv=None):
         prog="release_check.py",
         description="Run docs/release-1.0-checklist.md as commands: one PASS / FAIL / "
                     "SKIP(<reason>) line per check, then a summary.",
-        epilog="exit 0: every check PASS · 1: any FAIL · 2: could not run. A SKIP never "
-               "counts as a PASS; the summary counts it.")
+        epilog="exit 0: every check PASS · 1: any FAIL · 2: could not run · "
+               "3: incomplete (at least one SKIP). A SKIP never counts as a PASS; "
+               "the summary counts it.")
     parser.add_argument("--repo", default=str(DEFAULT_REPO),
                         help="the checkout to gate (default: the repo this script lives in)")
     parser.add_argument("--fast", action="store_true",
