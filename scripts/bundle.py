@@ -137,7 +137,7 @@ MANUAL_SUBSTITUTION_NOTE = ('Runtime invocations below already name\n'
 REQUIRED_RUNTIME = tuple(f"runtime/scripts/{name}" for name in (
     # The shared catalog grammar: proof_status.py and quarantine_check.py (preflight's quarantine
     # gate) load it beside themselves (2026-10-23 review, P1-9 / P1-10).
-    "_catalog_grammar.py",
+    "_catalog_grammar.py", "_verify_diff.py", "_verify_sig.py",
     # Process containment: first_run.py loads it beside itself, and every paid runner's marker sweep
     # and host probe live there (PR #668 review).
     "containment.py",

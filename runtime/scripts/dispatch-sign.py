@@ -177,7 +177,7 @@ TRANSCRIPT_FIELDS = ("unit", "manifest", "manifest_sha256", "args", "fatal", "no
 # by run_report.TOOLCHAIN_FILES). sign-transcript re-hashes them against ITS OWN siblings before
 # signing (h409 O-2.4): the offline signer is otherwise a rubber stamp over any well-shaped
 # object, and after F-6 it is the seed-safe way to sign an executed-control verdict.
-TOOLCHAIN_FILES = ("verify.py", "_verify_sig.py", "diff_scope.py", "ed25519.py", "dispatch-sign.py",
+TOOLCHAIN_FILES = ("verify.py", "_verify_sig.py", "_verify_diff.py", "diff_scope.py", "ed25519.py", "dispatch-sign.py",
                    "inventory.py", "gitexec.py")
 
 
