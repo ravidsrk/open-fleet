@@ -8,7 +8,8 @@
 
 | I want to… | Start here | Next step |
 |---|---|---|
-| **Install `open-fleet` and run my first mission** | [Install guide](install.md) | [Getting started walkthrough](getting-started.md) |
+| **Install `open-fleet` and run my first mission** | [Install guide](install.md) | [Getting started walkthrough](getting-started.md) · [CLI, MCP & Mission Control](cli-and-mcp.md) |
+| **Use the unified CLI, MCP server, or Mission Control UI** | [CLI, MCP & Mission Control](cli-and-mcp.md) | [Product blueprint & strategy](product-blueprint.md) |
 | **Roll out `open-fleet` on a greenfield or brownfield repo** | [Greenfield vs. Brownfield adoption guide](adoption-guide.md) | [Mission catalog & selector](missions/README.md#choose-by-task) |
 | **Pick the right mission for an engineering job** | [Mission catalog & selector](missions/README.md#choose-by-task) | [Copy-ready prompt recipes](recipes.md) |
 | **Compare `open-fleet` with `gstack`, `agent-skills`, `mattpocock`, & `superpowers`** | [Ecosystem comparison & pack composition](comparison.md) | [Concepts & glossary](concepts.md#one-router-per-worker) |
@@ -28,6 +29,7 @@ Step-by-step tutorials, installation procedures, team rollout playbooks, prompt 
 | Guide | Quadrant | What it covers |
 |---|---|---|
 | **[Getting started](getting-started.md)** | Tutorial | End-to-end walkthrough of your first read-only `review-it` run and your first `ship-it` build, where evidence lands, human gates, and per-mission CLI prerequisites. |
+| **[CLI, MCP & Mission Control](cli-and-mcp.md)** | How-To / Ref | Unified `open-fleet` CLI (`doctor`, `setup`, `missions`, `route`, `status`, `demo`, `ui`), zero-dependency MCP JSON-RPC 2.0 server (`open-fleet mcp`), and Mission Control web dashboard. |
 | **[Install](install.md)** | How-To | Comparison and setup instructions for symlink installs (`sh scripts/install.sh`), the Claude Code plugin, non-Claude coordinator hosts, anti-stacking rules, completion-gate hook wiring, and `dist/` bundles. |
 | **[Adoption guide (Greenfield vs. Brownfield)](adoption-guide.md)** | How-To | Day 0 greenfield setup and a 4-phase incremental brownfield rollout (Zero Production Changes → Stabilize the Oracle → Bounded Drains → Full Delivery). |
 | **[Mission guides](missions/README.md)** | Reference / Catalog | Deep-dive reference for every mission grouped by job-to-be-done: inputs, phases, terminal states, observable `"It's working if…"` behavioral tells, human gates, and failure modes. |
@@ -70,7 +72,7 @@ Guides for developing `open-fleet`, cutting releases, and inspecting retained ru
 - **[Frozen quality bar](../CONSTRAINTS.md)** — Enforced CI thresholds, the floor-guard surface, and ratchet baselines ([CI workflow](../.github/workflows/validate.yml)).
 - **[Security policy](../.github/SECURITY.md)** — Vulnerability disclosure process and secret-handling rules.
 - **[Maintainer ops](ops.md)** — Account inventory, maintainer roles, the merge gate, release cut and publishing, and incident response. (Weekly pin probes: [`runtime/orca-pin.md`](../runtime/orca-pin.md); component quarantine: [`quarantine_check.py`](runtime-scripts.md#quarantine_checkpy).)
-- **[1.0 release checklist](release-1.0-checklist.md)** & **[Product roadmap](roadmap.md)** — Exit criteria for 1.0 and prioritized engineering roadmap.
+- **[1.0 release checklist](release-1.0-checklist.md)**, **[Product roadmap](roadmap.md)** & **[Product blueprint](product-blueprint.md)** — Exit criteria for 1.0, prioritized engineering roadmap, and first-principles productization architecture.
 - **[Live experiment harness](guides/live-harness.md)** — Running controlled live experiment arms in disposable containers ([WIP-curve experiment](experiments/wip-curve-prereg.md): mutation-wave caps measured and kept · [Instruction-load ablation pre-registration](experiments/ablation-prereg.md): current activation load kept).
 - **[Repository metadata](about.md)** — Canonical GitHub repository description and topics.
 
