@@ -571,10 +571,13 @@ class WorkflowAndTargetAppHardeningTests(unittest.TestCase):
             ).stdout.strip()
             self.assertEqual(out, "v0.10.0")
 
-    def test_verdict_gate_uses_equals_for_head_repo_and_branch_c12(self):
+    def test_verdict_gate_disambiguates_head_repo_and_branch_c12(self):
         wf = (ROOT / ".github" / "workflows" / "verdict-gate.yml").read_text(encoding="utf-8")
-        self.assertIn('--head-repo="$RUN_HEAD_REPO" --head-branch="$RUN_HEAD_BRANCH"', wf)
-        self.assertNotIn('--head-repo "$RUN_HEAD_REPO"', wf)
+        self.assertIn('--head-repo "$RUN_HEAD_REPO" --head-branch "$RUN_HEAD_BRANCH"', wf)
+        vc = _load("verdict_check_c12", "scripts/verdict_check.py")
+        # Option-shaped head-repo / head-branch values cannot trigger argparse ambiguity or match valid refs.
+        self.assertIsNone(vc.SAFE_REF_RE.match("-evil/repo"))
+        self.assertIsNone(vc.SAFE_REF_RE.match("--resolve-pr"))
 
     def test_target_app_compose_pipefail_readme_and_seed_c17(self):
         compose = (ROOT / "evals" / "demo" / "target-app" / "compose.yaml").read_text(encoding="utf-8")

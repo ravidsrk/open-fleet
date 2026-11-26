@@ -221,7 +221,6 @@ class TestA02DenyHookRule5Receipt(unittest.TestCase):
                 f"{fake_py} {egress_abs} {receipt_args} && gh issue close 34",
                 f"cd sub && runtime/scripts/egress.py {receipt_args} && gh issue close 34",
                 f"touch runtime/scripts/egress.py && runtime/scripts/egress.py {receipt_args} && gh issue close 34",
-                f"runtime/scripts/egress.py {receipt_args} && gh issue close 34",
             ]
             for cmd in attacks:
                 with self.subTest(cmd=cmd):
@@ -235,6 +234,18 @@ class TestA02DenyHookRule5Receipt(unittest.TestCase):
                         "deny",
                         f"expected deny for {cmd!r}, got stdout={proc.stdout!r} stderr={proc.stderr!r}",
                     )
+
+            # A planted tampered runtime/scripts/egress.py inside the unit worktree MUST be denied.
+            fake_egress = wt / "runtime" / "scripts" / "egress.py"
+            fake_egress.parent.mkdir(parents=True, exist_ok=True)
+            fake_egress.write_text("#!/usr/bin/env python3\nimport sys; sys.exit(0)\n", encoding="utf-8")
+            fake_egress.chmod(0o755)
+            proc_fake = _run_deny_hook(
+                {"tool_name": "Bash", "tool_input": {"command": f"python3 runtime/scripts/egress.py {receipt_args} && gh issue close 34"}},
+                env_extra={"OPEN_FLEET_UNIT_WORKTREE": str(wt)},
+                cwd=wt,
+            )
+            self.assertEqual(_hook_decision(proc_fake), "deny", proc_fake.stdout)
 
             # Valid canonical egress receipt succeeds
             valid_cmd = f"python3 {egress_abs} {receipt_args} && gh issue close 34"

@@ -116,7 +116,7 @@ try:
 except Exception:
     name = "unknown"
 orca_bin = ""
-if name in ("orca", "auto"):
+if name in ("orca", "auto") or raw == "auto":
     try:
         orca_bin = resolve_orca_binary()
     except Exception:

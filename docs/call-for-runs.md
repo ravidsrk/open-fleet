@@ -44,7 +44,6 @@ it is still listed, the promotion has not landed yet.
 - [ ] `access-it` — needs a web UI: an external repo with an axe-core baseline.
 - [ ] `attest-it` — this catalog against the agentskills.io spec at a digest.
 - [ ] `deflake-it` — needs an observed flake: an external suite with a known one.
-- [ ] `document-it` — this catalog's undocumented surface, or an external repo whose API lacks reference docs.
 - [ ] `field-test-it` — needs a device/emulator app: an external mobile repo plus a paired device.
 - [ ] `floor-it` — this catalog: prove each gate fires on an injected violation, then guard them.
 - [ ] `map-it` — this catalog (report-only: freeze commit, verified DAG).
@@ -54,9 +53,6 @@ it is still listed, the promotion has not landed yet.
 - [ ] `oncall-it` — this catalog's blind spots, or an external service missing alerts and runbooks.
 - [ ] `oss-contribute` — the next upstream tracker, with artifacts retained in the run directory this time.
 - [ ] `pin-it` — this catalog's runtime doctrine against the installed Orca CLI.
-- [ ] `reshape-it` — this catalog's churn-hot modules, characterization net pinned first.
-- [ ] `root-cause` — the next real defect filed here, or an open bug in a small OSS repo.
-
 - [ ] `speed-it` — the catalog-gates journey against a declared wall-clock budget, guarded in CI.
 
 <!-- call-for-runs:open:end -->

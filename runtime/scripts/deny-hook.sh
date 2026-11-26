@@ -2147,8 +2147,6 @@ def _is_egress_script(word, dir_changed=False, wrote_egress=False):
                     return False
             return False
         return norm == "runtime/scripts/egress.py"
-    if os.environ.get("OPEN_FLEET_UNIT_WORKTREE") or os.environ.get("ORCA_UNIT_WORKTREE"):
-        return False
     if os.path.isdir(os.path.join(os.getcwd(), "runtime", "scripts")):
         return False
     return norm == "runtime/scripts/egress.py"

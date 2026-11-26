@@ -61,7 +61,7 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-_DEFAULT_ROOT = ROOT
+_default_root = ROOT
 
 # Load the eval validator so `scripts/validate.py` also catches broken eval JSON.
 _eval_spec = importlib.util.spec_from_file_location("_eval_validator", ROOT / "scripts" / "eval.py")
@@ -1086,7 +1086,6 @@ def check_doc_counts():
 PIN_LINT_FILES = ("README.md", "docs/getting-started.md", "docs/install.md", "docs/distribution.md")
 ORCA_VERSION_RE = re.compile(r"\bv?\d+\.\d+\.\d+\b")
 PIN_CONTEXT_RE = re.compile(r"(?i)\bpins?\b|≥|>=|at or above")
-ORCA_SUBJECT_RE = re.compile(r"(?i)\b(?:orca|pins?)\b")
 
 
 def check_pin_version_claims():
@@ -1096,17 +1095,18 @@ def check_pin_version_claims():
         pin = json.loads(pins.read_text(encoding="utf-8"))["orca"]["version"].lstrip("v")
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as err:
         return [f"runtime/pins.json: cannot read orca.version ({err})"]
+    subject_re = re.compile(r"(?i)\b(?:orca|pins?)\b")
     failures = []
     for rel in PIN_LINT_FILES:
         p = ROOT / rel
         if not p.exists():
-            if p.parent.is_dir() or ROOT == _DEFAULT_ROOT:
+            if p.parent.is_dir() or ROOT == _default_root:
                 failures.append(
                     f"{rel}: listed in PIN_LINT_FILES but missing — restore the "
                     "surface or remove it from the list deliberately")
             continue
         for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
-            if not (PIN_CONTEXT_RE.search(line) and ORCA_SUBJECT_RE.search(line)):
+            if not (PIN_CONTEXT_RE.search(line) and subject_re.search(line)):
                 continue
             for m in ORCA_VERSION_RE.finditer(line):
                 if m.group(0).lstrip("v") != pin:
