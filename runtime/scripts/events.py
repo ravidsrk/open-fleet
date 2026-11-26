@@ -9,10 +9,11 @@ object per observed lifecycle transition, appended to ``.orca/events.jsonl`` (mo
 
 Status, stated first: local evidence tooling, not a telemetry service — no network, no daemon.
 The observation sources that already exist are READ, never modified: the local-state DB
-(``ingest-state``: launches, worker_done mail, deaths), verify.py's ``--transcript-out`` verdict
-(``ingest-transcript``) and a Claude worker's stream-json result line (``ingest-usage``). Waves,
-reviews, closes and parks have no machine output yet, so the coordinator records them with
-``emit``. R04 (#597) launch-intent and R06 (#599) merge-queue receipts are later sources.
+(``ingest-state``: launches, worker_done mail, deaths; ``ingest-launch``: R04 #597 launch-intent
+rows), the R06 (#599) merge-queue DB (``ingest-merge-queue``: ``mq_receipts`` closes, parks and
+bounces), verify.py's ``--transcript-out`` verdict (``ingest-transcript``) and a Claude worker's
+stream-json result line (``ingest-usage``). Waves and reviews have no machine output yet, so the
+coordinator records them with ``emit``.
 
 Record (keys sorted on the line)::
 
@@ -46,6 +47,8 @@ Record (keys sorted on the line)::
 Subcommands
     emit               append one coordinator-observed event
     ingest-state       read a local-state DB (strictly read-only) for one run
+    ingest-launch      read R04 (#597) launch-intent rows (strictly read-only) for one run
+    ingest-merge-queue read R06 (#599) merge-queue receipts (strictly read-only) for one run
     ingest-transcript  record a verify.py --transcript-out verdict
     ingest-usage       record model usage from a Claude stream-json log
     verify             recompute the chain, print the head
@@ -1442,6 +1445,251 @@ def cmd_ingest_state(args):
     return _record(args, events)
 
 
+def _parse_json_obj(raw):
+    """A JSON object from a TEXT column, or {} when absent, malformed or not an object."""
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _valid_sha(value):
+    return value if isinstance(value, str) and SHA_RE.fullmatch(value) else None
+
+
+def _valid_id(value):
+    return value if isinstance(value, str) and ID_RE.fullmatch(value) else None
+
+
+def cmd_ingest_merge_queue(args):
+    """Closes, parks, bounces and voided reviews from R06 (#599) merge_queue.py's `mq_receipts`,
+    opened strictly read-only via watchdog.py:_ro_connect (#763).
+
+    Every event id is content-derived from the receipt's immutable facts (repo, base, entry_id,
+    receipt kind, timestamp, body, emitted kind/task/data), so re-ingesting the same DB — even
+    under a later epoch or from a copy — collapses as a duplicate rather than double-counting.
+    Acknowledged/merged receipts bind `unit.closed` to the unit's verified accepted/reviewed head
+    (and reviewed tree when recorded), matching verify.verdict's head so derive_unit classifies
+    the unit verified-closed and checks review freshness accurately."""
+    import sqlite3
+    db = Path(args.db)
+    if not db.is_file():
+        raise UsageError(f"--db {db} is not a file")
+    watchdog = _sibling("watchdog", "watchdog.py")
+    try:
+        conn = watchdog._ro_connect(db)
+        try:
+            rows = conn.execute(
+                "SELECT r.id, r.repo, r.base, r.entry_id, r.kind, r.epoch, r.holder, "
+                "r.body_json, r.created_at, e.run_id, e.unit, e.reviewed_sha, "
+                "e.reviewed_tree, e.accepted_head, e.merge_sha, e.merged_tree, e.state "
+                "FROM mq_receipts r JOIN mq_entries e ON r.entry_id = e.entry_id "
+                "WHERE e.run_id = ? ORDER BY r.created_at, r.id",
+                (args.run,),
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as err:
+        raise EventsError(f"{db} is not a readable merge-queue DB: {err}") from err
+    events, skipped = [], []
+    common = {"producer": "merge_queue", "basis": "occurred"}
+
+    def add(row, body, task, at, body_sha, kind, data):
+        key = _canonical({
+            "repo": row["repo"], "base": row["base"], "entry_id": row["entry_id"],
+            "receipt_kind": row["kind"], "created_at": at, "body": body,
+            "kind": kind, "task": task, "data": data,
+        })
+        events.append(_build(
+            args, kind, task=task, observed_at=at,
+            source_ref=f"merge-queue:mq_receipts/{row['id']}", source_sha256=body_sha,
+            data=data, event_id=f"merge-queue:{kind}:{sha256_hex(key)[:32]}", **common))
+
+    for row in rows:
+        task = _valid_id(row["unit"])
+        if task is None:
+            skipped.append(row["id"])
+            continue
+        body_raw = row["body_json"] or "{}"
+        body = _parse_json_obj(body_raw)
+        at = _db_time(row["created_at"])
+        body_sha = sha256_hex(body_raw.encode("utf-8"))
+        rkind = row["kind"]
+        if (rkind in ("acknowledged", "merged", "closed")
+                or (rkind == "reconciled" and body.get("resolution") == "merged")):
+            head = (
+                _valid_sha(body.get("acceptedHead"))
+                or _valid_sha(body.get("headSha"))
+                or _valid_sha(body.get("head_sha"))
+                or _valid_sha(row["accepted_head"])
+                or _valid_sha(row["reviewed_sha"])
+                or _valid_sha(body.get("mergeSha"))
+                or _valid_sha(row["merge_sha"])
+            )
+            if head is None:
+                skipped.append(row["id"])
+                continue
+            wtree = _valid_sha(body.get("reviewedTree")) or _valid_sha(row["reviewed_tree"])
+            add(row, body, task, at, body_sha, "unit.closed",
+                {"head_sha": head, "head_wtree": wtree})
+        elif rkind == "returned_to_review":
+            add(row, body, task, at, body_sha, "unit.suspect", {})
+            reviewed = _valid_sha(body.get("reviewedSha")) or _valid_sha(row["reviewed_sha"])
+            moved = _valid_sha(body.get("head"))
+            if reviewed and moved and moved != reviewed:
+                add(row, body, task, at, body_sha, "review.voided",
+                    {"reviewed_sha": reviewed, "head_sha": moved})
+        elif rkind == "failed" or (rkind == "reconciled" and body.get("resolution") == "failed"):
+            add(row, body, task, at, body_sha, "unit.suspect", {})
+        elif rkind == "resolved":
+            action = body.get("action")
+            if action == "drop":
+                park_class = _valid_id(body.get("park_class")) or "merge-dropped"
+                head = _valid_sha(row["accepted_head"]) or _valid_sha(row["reviewed_sha"])
+                add(row, body, task, at, body_sha, "unit.parked",
+                    {"park_class": park_class, "head_sha": head})
+            elif action == "bounce":
+                add(row, body, task, at, body_sha, "unit.suspect", {})
+        elif rkind == "parked":
+            park_class = _valid_id(body.get("park_class")) or "merge-parked"
+            head = (
+                _valid_sha(body.get("headSha"))
+                or _valid_sha(body.get("head_sha"))
+                or _valid_sha(row["accepted_head"])
+                or _valid_sha(row["reviewed_sha"])
+            )
+            add(row, body, task, at, body_sha, "unit.parked",
+                {"park_class": park_class, "head_sha": head})
+    if skipped:
+        print(f"events: {len(skipped)} merge-queue receipt(s) could not bind a valid unit or "
+              f"head SHA and were skipped: {skipped}", file=sys.stderr)
+    if not events:
+        print(f"events: nothing to record from merge-queue DB for run {args.run}", file=sys.stderr)
+        return EXIT_INCOMPLETE
+    return _record(args, events)
+
+
+def cmd_ingest_launch(args):
+    """R04 (#597) launch-intent rows of one run, opened strictly read-only (#763).
+
+    Only settled intents whose worker ran (`outcome == 'completed'`, or a failed/fenced intent
+    whose dispatch row records `monitor_started_at`) emit `dispatch.launched`, with a
+    content-derived event id so re-ingesting collapses as a duplicate. Failed intents that never
+    launched are skipped (not counted as retries or usage to cover), and open/unknown intents are
+    deferred until settled. A recovery receipt that settled a dead monitor also emits
+    `dispatch.died`."""
+    import sqlite3
+    db = Path(args.db)
+    if not db.is_file():
+        raise UsageError(f"--db {db} is not a file")
+    watchdog = _sibling("watchdog", "watchdog.py")
+    try:
+        conn = watchdog._ro_connect(db)
+        try:
+            has_dispatches = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'dispatches'"
+            ).fetchone() is not None
+            if has_dispatches:
+                rows = conn.execute(
+                    "SELECT l.intent_id, l.task_id, l.run_id, l.dispatch_id, l.phase, "
+                    "l.outcome, l.receipt_json, l.created_at, l.updated_at, "
+                    "d.agent AS dispatch_agent, "
+                    "d.monitor_started_at AS dispatch_monitor_started_at "
+                    "FROM launch_intents l "
+                    "LEFT JOIN dispatches d ON l.dispatch_id = d.dispatch_id "
+                    "WHERE l.run_id = ? ORDER BY l.created_at, l.intent_id",
+                    (args.run,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT intent_id, task_id, run_id, dispatch_id, phase, outcome, "
+                    "receipt_json, created_at, updated_at, "
+                    "NULL AS dispatch_agent, NULL AS dispatch_monitor_started_at "
+                    "FROM launch_intents WHERE run_id = ? ORDER BY created_at, intent_id",
+                    (args.run,),
+                ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as err:
+        raise EventsError(f"{db} is not a readable launch-intents DB: {err}") from err
+    events, never, unresolved, skipped = [], [], [], []
+    common = {"producer": "launch_intent", "basis": "occurred"}
+
+    for row in rows:
+        iid = row["intent_id"]
+        outcome = row["outcome"]
+        if outcome is None or outcome == "unknown":
+            unresolved.append(iid)
+            continue
+        ran_before_fence = row["dispatch_monitor_started_at"] is not None
+        if outcome == "failed" and not ran_before_fence:
+            never.append(iid)
+            continue
+        if outcome not in ("completed", "failed"):
+            skipped.append(iid)
+            continue
+        task = _valid_id(row["task_id"])
+        did = _valid_id(row["dispatch_id"])
+        if task is None or did is None:
+            skipped.append(iid)
+            continue
+        receipt_raw = row["receipt_json"] or ""
+        receipt = _parse_json_obj(receipt_raw)
+        agent = (
+            _valid_id(row["dispatch_agent"])
+            or _valid_id((receipt.get("effective") or {}).get("agent")
+                         if isinstance(receipt.get("effective"), dict) else None)
+            or _valid_id((receipt.get("launchEffective") or {}).get("agent")
+                         if isinstance(receipt.get("launchEffective"), dict) else None)
+            or _valid_id(receipt.get("agent"))
+        )
+        created = _db_time(row["created_at"])
+        source_ref = f"local-state:launch_intents/{iid}"
+        source_sha = sha256_hex(receipt_raw.encode("utf-8")) if receipt_raw else None
+        key = _canonical({
+            "intent_id": iid, "task_id": task, "dispatch_id": did,
+            "created_at": created, "kind": "dispatch.launched", "agent": agent,
+        })
+        events.append(_build(
+            args, "dispatch.launched", task=task, dispatch=did, observed_at=created,
+            source_ref=source_ref, source_sha256=source_sha, data={"agent": agent},
+            event_id=f"launch-intent:dispatch.launched:{sha256_hex(key)[:32]}", **common))
+        disp_info = receipt.get("dispatch") if isinstance(receipt.get("dispatch"), dict) else {}
+        if (receipt.get("kind") == "launch_recovery"
+                and receipt.get("resolution") == "exited"
+                and disp_info.get("after") == "died"):
+            rec_at = receipt.get("reconciledAt")
+            died_at = (_db_time(rec_at)
+                       if isinstance(rec_at, (int, float)) and not isinstance(rec_at, bool)
+                       else _db_time(row["updated_at"]))
+            dkey = _canonical({
+                "intent_id": iid, "task_id": task, "dispatch_id": did,
+                "died_at": died_at, "kind": "dispatch.died",
+            })
+            events.append(_build(
+                args, "dispatch.died", task=task, dispatch=did, observed_at=died_at,
+                source_ref=source_ref, source_sha256=source_sha, data={},
+                event_id=f"launch-intent:dispatch.died:{sha256_hex(dkey)[:32]}", **common))
+    if never:
+        print(f"events: {len(never)} launch intent(s) failed before any worker ran and are not "
+              f"recorded: {never}", file=sys.stderr)
+    if unresolved:
+        print(f"events: {len(unresolved)} launch intent(s) are still open or unknown and are "
+              f"deferred until settled: {unresolved}", file=sys.stderr)
+    if skipped:
+        print(f"events: {len(skipped)} launch intent(s) were skipped (unrecognized outcome or "
+              f"invalid task/dispatch id): {skipped}", file=sys.stderr)
+    if not events:
+        print(f"events: nothing to record from launch_intents for run {args.run}" + (
+            " yet" if never or unresolved else ": the DB holds no settled launch intent for it"),
+            file=sys.stderr)
+        return EXIT_INCOMPLETE
+    return _record(args, events)
+
+
 def cmd_ingest_transcript(args):
     """verify.py's verdict object (or its signed envelope) as a verify.verdict event. The head
     comes from the manifest the verdict judged — and only when its bytes still hash to the
@@ -1673,6 +1921,15 @@ def build_parser():
     s.add_argument("--db", required=True, help="the local-state runtime.db (opened read-only)")
     _binding(s)
 
+    li = sub.add_parser("ingest-launch", help="record one run's R04 launch-intent rows from a DB")
+    li.add_argument("--db", required=True, help="the local-state runtime.db (opened read-only)")
+    _binding(li)
+
+    mq = sub.add_parser("ingest-merge-queue",
+                        help="record one run's R06 merge-queue receipts from a queue DB")
+    mq.add_argument("--db", required=True, help="the merge-queue SQLite DB (opened read-only)")
+    _binding(mq)
+
     t = sub.add_parser("ingest-transcript", help="record a verify.py --transcript-out verdict")
     t.add_argument("--transcript", required=True)
     t.add_argument("--manifest", default=None,
@@ -1704,6 +1961,8 @@ def build_parser():
 def main(argv=None):
     args = build_parser().parse_args(argv)
     handlers = {"emit": cmd_emit, "ingest-state": cmd_ingest_state,
+                "ingest-launch": cmd_ingest_launch,
+                "ingest-merge-queue": cmd_ingest_merge_queue,
                 "ingest-transcript": cmd_ingest_transcript, "ingest-usage": cmd_ingest_usage,
                 "verify": cmd_verify, "report": cmd_report, "check": cmd_check}
     try:

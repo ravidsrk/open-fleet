@@ -1585,6 +1585,53 @@ class ScriptHygiene(unittest.TestCase):
                        "orca-ide", "never exit 0"):
             self.assertIn(needle, header)
 
+    def test_max_pages_flag_allows_walking_past_default_five_and_rejects_zero(self):
+        # Issue #755: upstream stablyai/orca exceeded 500 tags (>5 pages), so --max-pages lifts
+        # the walk cap while keeping the 5-page default intact and failing closed on <1.
+        with tempfile.TemporaryDirectory() as tmp:
+            pins = write_pins(tmp)
+            zero = run("latest", "--pins", pins, "--tags-json", write_tags(tmp, [PIN]),
+                       "--max-pages", "0", env=clean_env())
+            self.assertEqual(zero.returncode, 2, zero.stdout)
+            self.assertIn("--max-pages", zero.stderr)
+
+        class _SevenPageHandler(http.server.BaseHTTPRequestHandler):
+            seen = []
+
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                self.seen.append(self.path)
+                page = int(self.path.split("page=")[-1]) if "page=" in self.path else 1
+                self.send_response(200)
+                if page < 7:
+                    base = f"http://127.0.0.1:{self.server.server_address[1]}"
+                    self.send_header("Link", f'<{base}/tags?page={page + 1}>; rel="next"')
+                self.end_headers()
+                self.wfile.write(json.dumps([{"name": f"v1.4.{215 + page}"}]).encode("utf-8"))
+
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _SevenPageHandler)
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        try:
+            base = f"http://127.0.0.1:{srv.server_address[1]}"
+            with tempfile.TemporaryDirectory() as tmp:
+                pins = write_pins(tmp)
+                env = clean_env(NO_PROXY="127.0.0.1,localhost", no_proxy="127.0.0.1,localhost")
+                r = run("latest", "--pins", pins, "--tags-url", base + "/tags?page=1",
+                        "--max-pages", "10", "--timeout", "10", "--json", env=env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(len(_SevenPageHandler.seen), 7)
+            self.assertEqual(json.loads(r.stdout),
+                             {"pin": PIN, "latest": "v1.4.222", "drift": "patch", "patches_behind": 7})
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+        wf = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("--max-pages 30", wf)
+
 
 if __name__ == "__main__":
     unittest.main()

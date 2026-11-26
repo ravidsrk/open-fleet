@@ -925,25 +925,25 @@ a test in `tests/test_wip_curve.py` that fails on `54fe725bee`:
 
 ## `events.py`
 
-Append-only lifecycle event record, and the WIP-curve rows derived from it (#603). One
+Append-only lifecycle event record, and the WIP-curve rows derived from it (#603, #763). One
 hash-chained JSON object per observed transition in `.orca/events.jsonl` (mode 0600). Source
-`runtime/scripts/events.py:1-61`; behavior pinned by `tests/test_events.py`, over the fixture
+`runtime/scripts/events.py:1-64`; behavior pinned by `tests/test_events.py`, over the fixture
 streams and golden reports in `tests/fixtures/events/`.
 
 Status: local evidence tooling, not telemetry — no network, no daemon. Existing observations
 are read, never modified: the local-state DB (`ingest-state`, strictly read-only through
-`runtime/scripts/watchdog.py:_ro_connect`), verify.py's `--transcript-out` verdict
+`runtime/scripts/watchdog.py:_ro_connect`; `ingest-launch`, reading R04 #597 `launch_intents`
+rows), the R06 (#599) merge-queue DB (`ingest-merge-queue`, reading `mq_receipts` strictly
+read-only with content-derived idempotent event ids for closes, parks, bounces and voided
+reviews), verify.py's `--transcript-out` verdict
 (`ingest-transcript`, bound to the judged manifest's head only while its bytes still hash to
 the transcript's `manifest_sha256`), and a Claude worker's stream-json `result` line
-(`ingest-usage`). Waves, reviews, closes and parks have no machine output yet: the coordinator
-records them with `emit`. No provider and no verifier calls `emit` itself. `ingest-state` reads
-the R04 (#597) launch gate (a monitor claim, or a gate closed before any claim) to tell a launch
-from a dispatch that never ran, but not its recovery receipts; those, and the R06 (#599)
-merge-queue receipts `merge_queue.py` now writes, are the next sources.
+(`ingest-usage`). Waves and reviews have no machine output yet: the coordinator
+records them with `emit`. No provider and no verifier calls `emit` itself.
 
-Usage: `events.py [--log PATH] <emit|ingest-state|ingest-transcript|ingest-usage|verify|report|check> ...`
+Usage: `events.py [--log PATH] <emit|ingest-state|ingest-launch|ingest-merge-queue|ingest-transcript|ingest-usage|verify|report|check> ...`
 
-Subcommands: `emit`, `ingest-state`, `ingest-transcript`, `ingest-usage`, `verify`, `report`,
+Subcommands: `emit`, `ingest-state`, `ingest-launch`, `ingest-merge-queue`, `ingest-transcript`, `ingest-usage`, `verify`, `report`,
 `check`.
 
 Flags: `--log` (default `$OPEN_FLEET_EVENTS_LOG`, `$ORCA_EVENTS_LOG` or `.orca/events.jsonl`).
@@ -952,7 +952,8 @@ Every writer takes `--run`, `--epoch` (the coordinator epoch: 1 at `run.start`, 
 machine; producers on one host share one label). `emit` takes `--kind`, `--task`, `--dispatch`,
 `--producer`, `--basis` (`occurred`, `observed` or `recovered`), `--observed-at`,
 `--source-ref`, `--source-sha256` or `--source-file`, `--event-id` (the idempotency key; default
-derived from the content) and `--data` (the kind's fields as JSON). `ingest-state` takes `--db`;
+derived from the content) and `--data` (the kind's fields as JSON). `ingest-state`,
+`ingest-launch`, and `ingest-merge-queue` each take `--db`;
 `ingest-transcript` takes `--transcript`, `--manifest` and `--task`; `ingest-usage` takes
 `--stream`, `--task`, `--dispatch` and `--observed-at`. `report` takes `--run` (required when
 the record holds several runs) and `--json`; `check` takes `--run-report` and `--run`; `verify`,
@@ -2506,8 +2507,9 @@ compare the highest to the pin), `review-date` (no network: the pin's dated quar
 trigger, `orca.next_review` in `runtime/pins.json`), `capture` (binary needed: dump the
 receipt surfaces into a directory), `diff` (compare a capture against a receipts directory).
 
-Flags: `latest` takes `--max-patches` (re-pin threshold, default 10), `--pins` (default
-`runtime/pins.json`), `--tags-json` (read the tags payload from a file — tests, offline),
+Flags: `latest` takes `--max-patches` (re-pin threshold, default 10), `--max-pages` (maximum
+`rel="next"` pages to walk before failing closed, default 5; `upstream-drift.yml` passes 30),
+`--pins` (default `runtime/pins.json`), `--tags-json` (read the tags payload from a file — tests, offline),
 `--tags-url` (default the GitHub tags endpoint for `stablyai/orca`), `--timeout`,
 `--json`; `review-date` takes `--pins`, `--today` (YYYY-MM-DD, default the current UTC
 date), `--json`; `capture` takes `--out` (required), `--timeout`; `diff` takes

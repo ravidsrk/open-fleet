@@ -66,7 +66,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           code=0
-          python3 runtime/scripts/upstream_probe.py latest --json > "${RUNNER_TEMP}/probe.json" || code=$?
+          python3 runtime/scripts/upstream_probe.py latest --json --max-pages 30 > "${RUNNER_TEMP}/probe.json" || code=$?
           cat "${RUNNER_TEMP}/probe.json"
           echo "code=${code}" >> "$GITHUB_OUTPUT"
           if [ "${code}" -eq 0 ] || [ "${code}" -eq 3 ]; then

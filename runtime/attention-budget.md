@@ -82,5 +82,5 @@ is a publishable point. A cap revised without a cited report is still ASSERTED.
 
 ## Completion
 
-Every dispatch wave respects the recorded WIP; judgment-heavy units are not fanned; the run
-report names any WIP override and why, and carries the per-wave WIP-curve rows (`events.py report`, #603).
+Every wave respects WIP; no fan-out on judgment-heavy units; the run report names any WIP
+override and WIP-curve rows (`events.py`: `ingest-merge-queue`, `ingest-launch`, `report`; #603, #763).
