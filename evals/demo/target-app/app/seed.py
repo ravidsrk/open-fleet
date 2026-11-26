@@ -3,7 +3,7 @@
 F1 ORACLE — issue-list N+1, measurable >500ms at 1k rows (documented flaw;
 fix only inside a mission run):
 
-  1. cd demo/target-app
+  1. cd evals/demo/target-app
   2. rm -f /tmp/f1.db && DATABASE_URL=sqlite:////tmp/f1.db \\
        uv run python -m app.seed --count 1000
   3. DATABASE_URL=sqlite:////tmp/f1.db \\

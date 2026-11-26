@@ -1,0 +1,10 @@
+{
+  "date": "2026-11-25",
+  "report": "2026-11-25-document-it-self-run.md",
+  "mission": "[document-it](2026-11-25-document-it-self-run.md)",
+  "target": "this catalog (open_fleet product surface & doc-embedded AST anchors)",
+  "ran_as": "self-run",
+  "binds": "yes",
+  "outcome": "DOCUMENTED (16 CLI, 19 MCP tools, 10 resources, 18 AST anchors; R3 GO)",
+  "summary": "live open_fleet product-surface extraction, doc-embedded AST anchors, rename-to-RED controls, and CI wiring"
+}

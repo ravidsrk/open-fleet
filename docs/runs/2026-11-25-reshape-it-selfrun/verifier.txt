@@ -1,0 +1,8 @@
+NOTE: redaction: gitleaks at /home/aq-users/mDn3vRscxATUnCmKRdQLXELIVrl1/.local/bin/gitleaks is worker-writable — it can only add hits above the built-in floor, so it is consulted and recorded (h409 R2)
+NOTE: --base not given — ancestry check skipped (pre-merge/offline)
+NOTE: --base not given — base_sha, the content the executed control restores, is bound to no branch (worker-chosen on this lane)
+NOTE: commands ledger FRESH — 1 exit-0 record(s) bound to head_sha's tree 8990f9d2d5b7. This is the worker's own runner, so the coordinator's clean-env re-run at head_sha still stands as the stronger authority (evidence-manifest.md §2)
+NOTE: negative control EXECUTED — with the hand control applied at head_sha the bound command exited 1 on an assertion failure (RED, as required)
+NOTE: the same command exits 0 at clean head_sha, before AND after the control run — the RED above is the control's doing, not a broken suite or a first-run side effect
+NOTE: independent review waived — dark-eligible unit (gate-classification.md); the EXECUTED negative control + tests are the oracle, not a human review
+verify: OK — all required checks passed

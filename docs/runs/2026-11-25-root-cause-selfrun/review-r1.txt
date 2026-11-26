@@ -1,0 +1,14 @@
+# Acceptance Review — `root-cause-2026-11-25-hidepid` (Round 1 of 3)
+
+- **Unit ID:** `root-cause-2026-11-25-hidepid`
+- **Reviewed SHA:** `4b2e99e523fe235fd30aab2e68612d616787c3dc`
+- **Reviewer mode:** `same-vendor-fresh` (independent build-blind `research` subagent `c74730fc-9ba2-4c42-9110-8b80ef127919`)
+- **Review round:** `1 of 3`
+- **Verdict:** **NO-GO**
+
+## Summary of Findings (Round 1)
+1. **[Critical — W4-04 Security Bypass in FIX-AC2]:** Stopping `chain(pid)` at an invisible `ppid` whenever all keys in `live` satisfy `alive(k) is True` ignored transitivity: a visible `ro` worker root `R` could spawn a non-dumpable (`PR_SET_DUMPABLE=0`) or setuid intermediate `S` (invisible under `hidepid=invisible`) that execs child `C`; `FIX-AC2` would stop at `S`, miss `R` and its host, and let `C` escape as an uncapped coordinator. Sound replacement: stop at hidden ancestor `P` only when EVERY live root AND live host across both `reg` and `uid_reg` is visible (`alive == True`) AND its own upward walk terminates at the exact same live hidden parent `P` (re-verified via `stat(top_visible)[0] == P`).
+2. **[Critical — Broken Negative Control]:** Mocking `stat(other_root) -> None` means gone/pruned (`alive() is False`), not unreadable (`alive() is None`). Must mock `stat(other_root)` raising `Unknown` AND add a second negative control for the transitive `R -> hidden_S -> C` bypass.
+3. **[Required — Evidence & Fidelity]:** Paste exact executed commands + verbatim stdout/stderr in `repro-red.txt` and `falsification-probes.txt`; remove unbacked "26 tests" claim; record prior-art search; explicitly rank hypotheses before probes; test `own_proc()` and registry readability directly; fix probed starting PID vs topmost visible ancestor PID; keep `handoff-brief.md` strictly path-free / line-number-free per `playbooks/agent-brief.md` while placing `path:line` source proofs in `diagnosis-evidence.md`.
+
+Action taken: Rework wave executed to address every finding before Round 2 independent re-review.

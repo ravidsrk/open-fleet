@@ -231,7 +231,7 @@ def driver_blanks(repo, *, git_dir=None, base=None):
     where = ("--git-dir", str(git_dir)) if git_dir is not None else ("-C", str(repo))
     try:
         out = subprocess.run(argv(*where, "config", "--list", "-z", "--name-only"),
-                             capture_output=True, timeout=30, env=env(base),
+                             capture_output=True, timeout=30, env=custody_env(base),
                              stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError) as err:
         raise DriverQueryFailed(f"git config --list could not run in {where[1]}: {err}") from err

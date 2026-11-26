@@ -584,7 +584,7 @@ _SWITCH_ARGS = ("execute_nc", "allow_static_nc", "no_gh")
 # loads by path (verify.py _Transcript.TOOLCHAIN mirrors this). The transcript hashes each file;
 # the binding below checks every hash against the file at the graded pin, so a transcript proves
 # WHICH verifier ran (a substituted sibling fails to bind) — the verifier's identity, nothing more.
-TOOLCHAIN_FILES = ("verify.py", "_verify_sig.py", "diff_scope.py", "ed25519.py", "dispatch-sign.py",
+TOOLCHAIN_FILES = ("verify.py", "_verify_sig.py", "_verify_diff.py", "diff_scope.py", "ed25519.py", "dispatch-sign.py",
                    "inventory.py", "gitexec.py")
 
 

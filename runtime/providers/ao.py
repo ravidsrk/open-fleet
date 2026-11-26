@@ -110,7 +110,7 @@ class ComposioAOProvider(ExternalDispatchMixin, RuntimeProvider):
     def _default_runner(self, call: Any, **kwargs: Any) -> Any:
         timeout = kwargs.get("timeout", 60)
         if isinstance(call, list):
-            return run_cli(call, provider="ao", timeout=timeout)
+            return run_cli(call, provider="ao", timeout=timeout, env=self.env)
         return http_json(
             self.base_url,
             call.get("method", "GET"),

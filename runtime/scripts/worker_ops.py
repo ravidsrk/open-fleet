@@ -101,7 +101,7 @@ def parse_args(argv):
     read.add_argument("--source", default="auto", help="auto | transcript | terminal; transcript "
                       "CERTIFIES: a receipt from any other source is an evidence failure (exit 1)")
     read.add_argument("--cursor", default=None, help="opaque page cursor from the previous read, passed back unchanged")
-    read.add_argument("--limit", default=None, help="max entries, 1-100 (default: the host's)")
+    read.add_argument("--limit", default=None, help="max entries, a positive integer (default: the host's)")
     for verb in ("stop", "abandon", "release", "retain"):
         subs.add_parser(verb, parents=[dispatch, retry],
                         help=f"worker-{verb} one dispatch")
@@ -112,7 +112,7 @@ def parse_args(argv):
     wlist.add_argument("--include-remote", action="store_true",
                        help="read remote workers too; without it they render unverifiable")
     wlist.add_argument("--cursor", default=None, help="opaque page cursor from the previous list, passed back unchanged")
-    wlist.add_argument("--limit", default=None, help="rows per page, a positive integer")
+    wlist.add_argument("--limit", default=None, help="rows per page, 1-100")
     return parser.parse_args(argv)
 
 

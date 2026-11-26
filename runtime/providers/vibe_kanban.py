@@ -44,8 +44,20 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from ._external import _ensure_ctx_task_claimed, release_claim_on_failure
-from ._external import ExternalDispatchMixin, coerce_output, env_flag, env_lookup, http_json, quote_url_segment, real_worktree, run_cli
+from ._external import (
+    ExternalDispatchMixin,
+    _ensure_ctx_task_claimed,
+    coerce_output,
+    env_flag,
+    env_lookup,
+    foreign_dirty_paths,
+    http_json,
+    quote_url_segment,
+    real_worktree,
+    release_claim_on_failure,
+    run_cli,
+    without_contact_marking,
+)
 from .base import (
     ProviderError,
     RuntimeProvider,
@@ -115,7 +127,7 @@ class VibeKanbanProvider(ExternalDispatchMixin, RuntimeProvider):
         self.state = state or LocalStateStore(db_path=db_path, env=self.env)
         self._base_url = (base_url or env_lookup(self.env, "OPEN_FLEET_VIBE_KANBAN_URL", "ORCA_VIBE_KANBAN_URL")).rstrip("/")
         self._runner = runner or self._default_runner
-        self._git = git_runner or (lambda argv: run_cli(argv, provider="git", timeout=60))
+        self._git = git_runner or (lambda argv: run_cli(argv, provider="git", timeout=60, env=self.env))
         self._sleep = sleep or time.sleep
         self.exit_timeout_s = float(exit_timeout_s)
         self.settle_polls = max(2, int(settle_polls))
@@ -156,14 +168,15 @@ class VibeKanbanProvider(ExternalDispatchMixin, RuntimeProvider):
         res = self._git(["git", "-C", wt, *args])
         return str((res or {}).get("raw") if isinstance(res, dict) else res or "").strip()
 
-    def _dirty(self, wt: str) -> list[str]:
-        """Every path the exit monitor's commit would pick up (porcelain, untracked included)."""
-        res = self._git(["git", "-C", wt, "status", "--porcelain", "--untracked-files=all"])
+    def _git_text(self, argv: list[str]) -> str:
+        res = self._git(argv)
         if isinstance(res, dict):
-            text = str(res["stdout"] if res.get("stdout") is not None else res.get("raw") or "")
-        else:
-            text = coerce_output(res)
-        return [ln[3:].strip().strip('"') for ln in text.splitlines() if len(ln) > 3]
+            return str(res["stdout"] if res.get("stdout") is not None else res.get("raw") or "")
+        return coerce_output(res)
+
+    def _dirty(self, wt: str) -> list[str]:
+        """Every path the exit monitor's commit would pick up (porcelain -z + populated gitlinks)."""
+        return foreign_dirty_paths(self._git_text, wt)
 
     # --- executor profiles (SAFETY #1) ---------------------------------------------------
     def _profiles_doc(self) -> dict[str, Any]:
@@ -359,7 +372,8 @@ class VibeKanbanProvider(ExternalDispatchMixin, RuntimeProvider):
         executor_config: dict[str, Any] = {"executor": executor, "permission_policy": "PLAN" if profile == "ro" else "AUTO"}
         ro_cfg = None
         if profile == "ro":
-            ro_cfg = self.ensure_ro_profile()
+            with without_contact_marking():
+                ro_cfg = self.ensure_ro_profile()
             executor_config["variant"] = ORCA_RO_VARIANT
         body = {
             "name": name or task_id or None,

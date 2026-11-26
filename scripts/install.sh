@@ -104,8 +104,10 @@ ORCA_MIN="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["
 # resolved Orca binary (ORCA_CLI_COMMAND, orca-dev, orca-ide on Linux, orca
 # elsewhere) is on PATH, else posix. Prints "<requested>\t<provider>\t<orca-bin>".
 RUNTIME_PROBE="$(python3 -I - "$ROOT" 2>/dev/null <<'PY' || true
-import sys
-sys.path.insert(0, sys.argv[1])
+import os, sys
+pkg = type(sys)("runtime")
+pkg.__path__ = [os.path.join(sys.argv[1], "runtime")]
+sys.modules["runtime"] = pkg
 from runtime.providers import active_provider_name, resolve_orca_binary
 from runtime.providers.base import env_get
 raw = env_get("OPEN_FLEET_RUNTIME", "ORCA_FLEET_RUNTIME").lower() or "orca"
@@ -113,17 +115,25 @@ try:
     name = active_provider_name()
 except Exception:
     name = "unknown"
-print("\t".join(("_".join(raw.split()), name, resolve_orca_binary())))
+orca_bin = ""
+if name in ("orca", "auto") or raw == "auto":
+    try:
+        orca_bin = resolve_orca_binary()
+    except Exception:
+        orca_bin = ""
+print("\t".join(("_".join(raw.split()), name, orca_bin)))
 PY
 )"
 ACTIVE_RUNTIME="$(printf '%s' "$RUNTIME_PROBE" | awk -F '\t' '{print $1}')"
 ACTIVE_PROVIDER="$(printf '%s' "$RUNTIME_PROBE" | awk -F '\t' '{print $2}')"
 RESOLVED_ORCA="$(printf '%s' "$RUNTIME_PROBE" | awk -F '\t' '{print $3}')"
 ORCA_BIN=""
+PROBE_FAILED=0
 if [ -z "$ACTIVE_PROVIDER" ]; then
   warn "could not resolve the active runtime through runtime/providers; checking for the orca CLI"
   ACTIVE_RUNTIME=orca
   ACTIVE_PROVIDER=orca
+  PROBE_FAILED=1
 fi
 case "$ACTIVE_RUNTIME:$ACTIVE_PROVIDER" in
   auto:orca) ORCA_EXPECTED=required ;;
@@ -133,10 +143,28 @@ case "$ACTIVE_RUNTIME:$ACTIVE_PROVIDER" in
   *) ORCA_EXPECTED=none ;;
 esac
 if [ "$ORCA_EXPECTED" = required ]; then
-  # The binary dispatch will exec first; then the other platform's name (an
-  # explicit orca runtime still warns only when neither is installed).
-  ORCA_BIN="$(command -v "${RESOLVED_ORCA:-orca}" 2>/dev/null || command -v orca 2>/dev/null \
-    || command -v orca-ide 2>/dev/null || true)"
+  if [ -n "$RESOLVED_ORCA" ]; then
+    ORCA_BIN="$(command -v "$RESOLVED_ORCA" 2>/dev/null || true)"
+    if [ -z "$ORCA_BIN" ] && [ "$RESOLVED_ORCA" = "orca-ide" ]; then
+      # On Linux, /usr/bin/orca is commonly the GNOME screen reader: refuse system paths
+      # and GNOME screen-reader scripts without executing them.
+      _cand="$(command -v orca 2>/dev/null || true)"
+      case "$_cand" in
+        ""|/usr/bin/orca|/bin/orca|/usr/sbin/orca|/sbin/orca)
+          _cand="" ;;
+        *)
+          if [ -r "$_cand" ] && head -c 2048 "$_cand" 2>/dev/null \
+              | grep -qiE 'orca\.orca|orca\.debug|screen reader|pyatspi|gi\.repository|gnome'; then
+            _cand=""
+          fi ;;
+      esac
+      ORCA_BIN="$_cand"
+    elif [ -z "$ORCA_BIN" ]; then
+      ORCA_BIN="$(command -v orca-ide 2>/dev/null || true)"
+    fi
+  elif [ "$PROBE_FAILED" -eq 1 ]; then
+    ORCA_BIN="$(command -v orca-ide 2>/dev/null || command -v orca 2>/dev/null || true)"
+  fi
 fi
 if [ "$ORCA_EXPECTED" = unknown ]; then
   warn "runtime ${ACTIVE_RUNTIME} is not a registered provider (missions will refuse to dispatch); orca CLI checks skipped"

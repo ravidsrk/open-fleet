@@ -4,7 +4,7 @@
 
 > **Autonomy:** L4 (Osmani L0-L5, parallel delegation) — parallel scan and deepen waves behind a pinned characterization net; bounding the target surface and any API-break are your gates.
 > **Activation load:** ~31,700 tokens — this SKILL.md plus every playbook and runtime doc its Composes/rides clause makes mandatory, about 16% of a 200k-token context before the first dispatch ([why it is measured](../../ARCHITECTURE.md#instruction-budget))
-> **Proof:** doctrine-only — its 2026-09-16 self-test campaign run ([PARKED at CONFIRM-SURFACE](../runs/campaign-2026-09-16-reshape-it/)) and the [unpark](../runs/2026-09-16-reshape-it-unpark/) that followed claim no tier; the protocol is mechanism, not yet field-proven.
+> **Proof:** self-run — bound by the [2026-11-25 self-run](../runs/2026-11-25-reshape-it-self-run.md) (RV-D3 deepening of `runtime/scripts/verify.py` → `_verify_diff.py`, WIDTH 91 → 84, hand mutant KILLED + revert-width check, Round 1 build-blind review GO; prior campaign history: [campaign-2026-09-16-reshape-it](../runs/campaign-2026-09-16-reshape-it/)).
 
 > Point it at the codebase where every change touches twelve imports. Come back to hot modules
 > sitting behind smaller, testable interfaces — with the characterization net green on both sides

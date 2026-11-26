@@ -388,36 +388,50 @@ def last_release_badge_errors(root: Path = ROOT) -> list[str]:
     error, never a pass, and so is one that is not a full 40-hex commit name (W6-09: it is part of
     `git show`'s argv, where `--output=<path>` would be read as an option).
     """
-    data = json.loads((root / "docs" / "releases.json").read_text(encoding="utf-8"))
+    try:
+        data = json.loads((root / "docs" / "releases.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as err:
+        return [f"docs/releases.json: unreadable ({err})"]
+    if not isinstance(data, dict):
+        return ["docs/releases.json: expected a JSON object"]
     rel = f"{BADGES_REL}/{TESTS_BADGE}"
     if data.get("preparing"):
         return cut_badge_errors(root)
-    if not data.get("releases"):
+    releases = data.get("releases")
+    if not releases:
         return []
-    last = data["releases"][-1]
+    if not isinstance(releases, list):
+        return ["docs/releases.json: 'releases' must be a list"]
+    last = releases[-1]
     commit = last.get("commit") if isinstance(last, dict) else None
+    tag = last.get("tag") if isinstance(last, dict) else None
     if not isinstance(commit, str) or not FULL_SHA_RE.fullmatch(commit):
         return [f"docs/releases.json: the last release's commit {commit!r} is not a full 40-hex "
                 "commit name, so its badge is not read"]
+    if not isinstance(tag, str) or not tag:
+        return ["docs/releases.json: the last release is missing a 'tag' string"]
     # The cut's own badge path: today's, or the pre-move one for a release cut before the move.
     for src in (rel, f"{LEGACY_BADGES_REL}/{TESTS_BADGE}"):
-        shown = subprocess.run(["git", "-C", str(root), "show", f"{last['commit']}:{src}"],
+        shown = subprocess.run(["git", "-C", str(root), "show", f"{commit}:{src}"],
                                capture_output=True)
         if not shown.returncode:
             break
     if shown.returncode:
-        return [f"cannot read {last['tag']}'s {rel} at {last['commit'][:12]} (a shallow clone? "
+        return [f"cannot read {tag}'s {rel} at {commit[:12]} (a shallow clone? "
                 f"fetch the release commit): {shown.stderr.decode(errors='replace').strip()[:200]}"]
-    have = (root / rel).read_bytes()
+    try:
+        have = (root / rel).read_bytes()
+    except OSError as err:
+        return [f"{rel}: unreadable ({err})"]
     if have != shown.stdout:  # bytes, not parsed JSON: a reformat or a reorder is a change too
         def message(raw):
             try:
                 return json.loads(raw).get("message")
             except (ValueError, AttributeError):
                 return "unparseable"
-        return [f"{rel} is not byte for byte {last['tag']}'s ({last['commit'][:12]}): it says "
+        return [f"{rel} is not byte for byte {tag}'s ({commit[:12]}): it says "
                 f"{message(have)!r} where the release says {message(shown.stdout)!r} — restore it "
-                f"with: git show {last['commit']}:{src} > {rel}"]
+                f"with: git show {commit}:{src} > {rel}"]
     return []
 
 
@@ -434,7 +448,10 @@ def cut_badge_errors(root: Path = ROOT) -> list[str]:
     count = test_count(tests_dir)
     want = (json.dumps(badge("test functions", f"{count} in source", "6e7781"), indent=2)
             + "\n").encode("utf-8")
-    have = (root / rel).read_bytes()
+    try:
+        have = (root / rel).read_bytes()
+    except OSError as err:
+        return [f"{rel}: unreadable ({err})"]
     if have != want:
         try:
             said = json.loads(have).get("message")

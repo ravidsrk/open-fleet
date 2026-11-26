@@ -40,8 +40,8 @@ from .base import (
     require_id,
 )
 from .local_state import LocalStateStore
-from ._external import release_claim_on_failure
 from ._external import (
+    _ensure_ctx_task_claimed,
     call_runner,
     foreign_dirty_paths,
     insert_dispatch,
@@ -49,9 +49,11 @@ from ._external import (
     local_worker_list,
     preserve_worker_head,
     record_fence,
+    release_claim_on_failure,
     resolve_worker_list_run,
     run_cli_text,
     show_from_row,
+    without_contact_marking,
 )
 
 # hooks-deployer.ts: only these capabilities get Write/Edit blocks AND cannot spawn writers
@@ -106,7 +108,8 @@ class OverstoryProvider(RuntimeProvider):
         self.call_log: list[Any] = []
 
     def _default_runner(self, argv: list[str], **kwargs: Any) -> str:
-        return run_cli_text(argv, self.name, timeout=int(kwargs.get("timeout", 120)))
+        run_env = kwargs.get("env") if kwargs.get("env") is not None else self.env
+        return run_cli_text(argv, self.name, timeout=int(kwargs.get("timeout", 120)), env=run_env)
 
     def _run(self, argv: list[str], **kwargs: Any) -> str:
         self.call_log.append(list(argv))
@@ -168,9 +171,11 @@ class OverstoryProvider(RuntimeProvider):
         if not _is_placeholder(worktree):
             raise ProviderError("unsupported_operation", "ov sling always creates its own worktree; pass --worktree new-child")
         task_prompt = self.resolve_task_prompt(task_id, prompt)
+        _ensure_ctx_task_claimed()
 
-        spec = self._ov(["ov", "spec", "write", str(task_id), "--body", task_prompt, "--json"])
-        spec_path = require_id(spec, "path", provider=self.name, what="spec path")
+        with without_contact_marking():
+            spec = self._ov(["ov", "spec", "write", str(task_id), "--body", task_prompt, "--json"])
+            spec_path = require_id(spec, "path", provider=self.name, what="spec path")
         argv = [
             "ov", "sling", str(task_id),
             "--capability", cap,

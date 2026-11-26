@@ -1,0 +1,4 @@
+NOTE: redaction: gitleaks at /home/aq-users/mDn3vRscxATUnCmKRdQLXELIVrl1/.local/bin/gitleaks is worker-writable — it can only add hits above the built-in floor, so it is consulted and recorded (h409 R2)
+NOTE: --base not given — ancestry check skipped (pre-merge/offline)
+NOTE: planning (unsupervised) — claimed with no signed dispatch record. base_sha..head_sha changes prose (docs) only, so the class is consistent with the change, but nothing off-worker authorized it (#310)
+verify: OK — all required checks passed

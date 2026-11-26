@@ -1,0 +1,26 @@
+{
+  "seconds": 20.3,
+  "measured": "2026-11-25: one local run of tests.test_adversarial_security (30 tests, Python 3.12.3), x2 to the CI lane",
+  "classes": {
+    "TestA01GuardTextFetch": 0.1,
+    "TestA02DenyHookRule5Receipt": 1.9,
+    "TestA03DenyHookVerifySettings": 2.7,
+    "TestA04VerifyExecuteNcStaging": 1.1,
+    "TestA05DenyHookGnuRmPrefix": 1.4,
+    "TestA06FloorGuardReadAtFailClosed": 0.1,
+    "TestA07FloorGuardSurfaceEvasion": 0.4,
+    "TestA08UnhardenedGitCustody": 0.1,
+    "TestA09SpawnIdentityHomeEscapeAndWorktrunk": 0.1,
+    "TestA10VerifyMalformedRecords": 1.6,
+    "TestA11SpawnWorkerNoSysPathInsert": 0.1,
+    "TestA12VerifyOracleWrapperUnwrap": 0.1,
+    "TestA13VerifyExtractDiffSplitlines": 0.1,
+    "TestA14VerifyEarlySoundLaneTranscript": 0.3,
+    "TestA15DecisionsLineBreakAndSeedCustody": 2.8,
+    "TestA16DenyHookReadonlyDevSinksAndBoundedOne": 1.7,
+    "TestA17VerifyGatePubkeyAndProcessGroup": 6.1,
+    "TestA18SpawnWorkerDoctorCleanup": 0.1,
+    "TestA19PreflightJson": 0.3
+  },
+  "fixture_seconds": 0.0
+}

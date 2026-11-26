@@ -1,0 +1,15 @@
+{
+  "seconds": 36.5,
+  "measured": "2026-11-25: one local run of tests.test_adversarial_tooling (28 tests, Python 3.12.3), x2 to the CI lane",
+  "classes": {
+    "BundleHardeningTests": 14.6,
+    "InstallScriptHardeningTests": 4.5,
+    "LiveBrokerHardeningTests": 7.1,
+    "LiveContainerHardeningTests": 0.1,
+    "ReplayAndAdapterHardeningTests": 0.1,
+    "RunIndexHardeningTests": 9.6,
+    "ScriptHygieneAndDocsTests": 0.5,
+    "WorkflowAndTargetAppHardeningTests": 0.1
+  },
+  "fixture_seconds": 0.1
+}

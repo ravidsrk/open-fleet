@@ -4,7 +4,7 @@
 
 > **Autonomy:** L4 (Osmani L0-L5, parallel delegation) — a coordinator plus parallel per-cell writer workers, each reviewed build-blind; which entities deserve a tutorial or an explanation is your call.
 > **Activation load:** ~32,800 tokens — this SKILL.md plus every playbook and runtime doc its Composes/rides clause makes mandatory, about 16% of a 200k-token context before the first dispatch ([why it is measured](../../ARCHITECTURE.md#instruction-budget))
-> **Proof:** doctrine-only — it ran once, in the 2026-09-16 self-test campaign ([DOCUMENTED](../runs/campaign-2026-09-16-document-it/), 32/32 cells terminal), recorded history rather than a promotion bid; the protocol is mechanism, not yet field-proven.
+> **Proof:** self-run — bound by the [2026-11-25 self-run](../runs/2026-11-25-document-it-self-run.md) (16 CLI commands, 19 MCP tools, 10 MCP resources, 5 Action outputs, 18 AST-verified doc anchors, rename-to-RED control executed GREEN, 3-round build-blind review GO; prior campaign history: [campaign-2026-09-16-document-it](../runs/campaign-2026-09-16-document-it/)).
 
 > Point it at a public surface nobody has documented. Come back to a coverage map re-derived at
 > the final head with zero critical gaps — and every factual claim in every new page bound to a

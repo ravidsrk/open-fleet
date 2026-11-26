@@ -1,0 +1,96 @@
+{
+  "unit": "reshape-it-2026-11-25-RV-D3",
+  "base_sha": "6b8c2af3968482b35ec30b892411b8b6a435f3c5",
+  "head_sha": "4ad16df406c6df3bb2d13f0037ec274802666b61",
+  "base_branch": "main",
+  "contract": {
+    "source": "docs/runs/2026-11-25-reshape-it-selfrun/contract.json@ce5dc5ae838ada69a9b77daccf18e04537845df6",
+    "digest": "sha256:37d6f05a80f4775abbf74535c5ce628c88de4890f0037ed75880dc4ebfaee799",
+    "criterion_ids": [
+      "RV-D3-AC1",
+      "RV-D3-AC2"
+    ]
+  },
+  "criteria": [
+    {
+      "id": "RV-D3-AC1",
+      "text": "Extract unified-diff parsing and hunk-binding helpers (_diff_records, _iter_diff_target_paths, _diff_target_paths, _hunk_lines, _bind_hunks_to_change, _nc_paths, _extract_diff) from runtime/scripts/verify.py into hashed sibling runtime/scripts/_verify_diff.py behind a dynamic bind(globals()) seam, keeping tests/test_reshape_net_verify_diff.py and VF-Bench green.",
+      "addressed": true
+    },
+    {
+      "id": "RV-D3-AC2",
+      "text": "Shrink runtime/scripts/verify.py top-level WIDTH from 91 to 84, register _verify_diff.py in all toolchain-hash and bundle allowlists (verify.py, run_report.py, dispatch-sign.py, scripts/bundle.py), and lower PINNED_WIDTH in tests/test_reshape_width_verify.py to 84.",
+      "addressed": true
+    }
+  ],
+  "commands": [
+    {
+      "label": "tests (RV-D3 head_sha)",
+      "ts": "2026-11-25T16:56:04Z",
+      "cmd": "python3 -m unittest tests.test_reshape_net_verify_diff",
+      "cmd_sha256": "e47bd98378fe1543abb3df0d89b667465830e86e09b0148d45f1b9c04f3f9671",
+      "exit": 0,
+      "duration_s": 0.15,
+      "commit": "4ad16df406c6df3bb2d13f0037ec274802666b61",
+      "wtree": "8990f9d2d5b781167926a87bf7cea163cff7c270",
+      "artifact": "docs/runs/2026-11-25-reshape-it-selfrun/tests.txt"
+    },
+    {
+      "label": "verifier",
+      "ts": "2026-11-25T17:32:57Z",
+      "cmd": "python3 runtime/scripts/verify.py --manifest docs/runs/2026-11-25-reshape-it-selfrun/manifest.json --contract-source docs/runs/2026-11-25-reshape-it-selfrun/contract.json@ce5dc5ae838ada69a9b77daccf18e04537845df6 --contract-digest sha256:37d6f05a80f4775abbf74535c5ce628c88de4890f0037ed75880dc4ebfaee799 --unit-class mutation --lighting dark-eligible --lane A --execute-nc --nc-command 'python3 -m unittest tests.test_reshape_net_verify_diff'",
+      "cmd_sha256": "8b8a39c01e8a6cf1d60573d59d2aad55e5bd9f961ee7c01bf1413b9346c918c4",
+      "exit": 0,
+      "duration_s": 5.477,
+      "commit": "1e0eb50eb1dcde2fe3a794901bbef6347d9120b6",
+      "wtree": "55a239b3e343371629828b1f9234f8286149832e",
+      "artifact": "docs/runs/2026-11-25-reshape-it-selfrun/verifier.txt"
+    }
+  ],
+  "negative_control": {
+    "did": "disabled _bind_hunks_to_change overlap check in runtime/scripts/_verify_diff.py line 163 (hand mutant) AND verified reverting deepening enlarges verify.py WIDTH from 84 back to 91",
+    "tool": "hand",
+    "result": "the criterion-bound characterization net went RED (mutant KILLED): exit 1, FAILED (failures=1) AssertionError; revert-width check confirmed WIDTH 84 -> 91 (+7 symbols)",
+    "artifact": "docs/runs/2026-11-25-reshape-it-selfrun/negctrl.txt",
+    "command": "python3 -m unittest tests.test_reshape_net_verify_diff"
+  },
+  "binding_audit": {
+    "coverage": "RV-D3-AC1..RV-D3-AC2 (2/2)",
+    "method": "pre-pinned RV-C3 characterization net kills 5/5 mutants on _verify_diff.py; width ratchet test pins WIDTH=84 and reverting 4ad16df4 restores WIDTH=91; VF-Bench 0/53 false-done, 0/19 false-reject"
+  },
+  "intent": {
+    "goal": "Deepen runtime/scripts/verify.py by extracting its unified-diff and hunk-binding engine into hashed sibling runtime/scripts/_verify_diff.py behind a dynamic bind(globals()) seam, shrinking WIDTH from 91 to 84.",
+    "ruled_out": "re-exporting all 7 internal helpers on verify.py (would not shrink interface); modifying pre-pinned RV-C3 characterization net tests during DEEPEN; omitting _verify_diff.py from toolchain-hash allowlists",
+    "why": "verify.py had CHURN(90d)=156 and WIDTH=91; moving diff grammar and hunk-binding behind a hashed sibling reduces top-level surface without breaking importlib or mock.patch.object seams"
+  },
+  "lighting": "dark-eligible",
+  "lane": "A",
+  "artifacts": [
+    {
+      "path": "docs/runs/2026-11-25-reshape-it-selfrun/contract.json",
+      "sha256": "37d6f05a80f4775abbf74535c5ce628c88de4890f0037ed75880dc4ebfaee799"
+    },
+    {
+      "path": "docs/runs/2026-11-25-reshape-it-selfrun/negctrl.txt",
+      "sha256": "ee18ad994aa3a48828a8338ed37e69789b0a64fcae8c97dc183d59fc908bf87b"
+    },
+    {
+      "path": "docs/runs/2026-11-25-reshape-it-selfrun/revert-width-check.txt",
+      "sha256": "968e4febff7a5935934679ad578778472b79c2efc3aa7330bd61fc196e0a692c"
+    },
+    {
+      "path": "docs/runs/2026-11-25-reshape-it-selfrun/review.txt",
+      "sha256": "8b876d7ec9124d5c4946829c5d3939bc7ddcd353b8bd9d1d849190301e595725"
+    },
+    {
+      "path": "docs/runs/2026-11-25-reshape-it-selfrun/tests.txt",
+      "sha256": "87e0fc072e190b6834bcdb944df770cdde91fa9dcf2ead9314a50335f200ed3f"
+    }
+  ],
+  "reviewer_mode": "same-vendor-fresh",
+  "review": {
+    "artifact": "docs/runs/2026-11-25-reshape-it-selfrun/review.txt"
+  },
+  "toolchain": "Python 3.12 on Linux; git; unittest; independent build-blind research subagent (Round 1 GO)",
+  "claim": "RV-D3 deepened verify.py WIDTH 91->84 behind hashed _verify_diff.py; RV-C3 net green (6/6) and kills pinned hand mutant; revert-width check confirms 84->91; blind review GO round 1."
+}

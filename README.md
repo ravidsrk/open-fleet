@@ -40,6 +40,7 @@ Each **mission** is a complete engineering workflow: a coordinator decomposes yo
 
 | Your goal | Start here |
 |---|---|
+| **Install the unified CLI, MCP server, or Mission Control UI** | [CLI, MCP & Mission Control](docs/cli-and-mcp.md) · [Product blueprint](docs/product-blueprint.md) |
 | **Run your first mission in 5 minutes** | [Install](docs/install.md) → [Your first `review-it` dry run](docs/getting-started.md#your-first-mission-a-review-it-dry-run) |
 | **Roll out fleets on a greenfield or legacy codebase** | [Greenfield vs. Brownfield adoption guide](docs/adoption-guide.md) |
 | **Pick the right workflow for a task** | [Mission catalog by category](#the-mission-catalog) · [Prompt recipes](docs/recipes.md) |
@@ -72,6 +73,17 @@ Each **mission** is a complete engineering workflow: a coordinator decomposes yo
 </details>
 
 ## Quick start
+
+**Unified CLI, MCP server & Mission Control UI** (Python 3.11+ stdlib only, zero external dependencies — see [CLI, MCP & Mission Control](docs/cli-and-mcp.md)):
+
+```bash
+git clone https://github.com/ravidsrk/open-fleet.git && cd open-fleet
+pip install --no-build-isolation -e .   # or run directly via `python3 -m open_fleet`
+open-fleet doctor                       # check Python, git, runtime, harnesses & hooks
+open-fleet demo --include-first-run     # see verify.py catch a gamed manifest live (zero spend)
+open-fleet route "review PR #42"        # pick the right mission + copy-ready launch prompt
+open-fleet ui --port 8765               # launch interactive Mission Control cockpit
+```
 
 **One-command install** (validates the catalog, links missions into `~/.claude/skills`, and prints completion-gate setup; verified in CI by a from-scratch install into an empty `HOME` ([`install.yml`](.github/workflows/install.yml)), with a one-off clean-container [transcript](docs/completion/evidence/414-clean-container-install.txt) retained):
 
@@ -216,7 +228,7 @@ Every mission represents a distinct engineering outcome with its own unit of wor
 | Mission | Proof | Outcome (definition of done) | Use when |
 |---|---|---|---|
 | 🔍 **[review-it](docs/missions/review-it.md)** | `external-run` | A trusted, read-only, SHA-bound GO/NO-GO verdict — acceptance always, risk lenses when the diff triggers them. **No fix authority.** | "review this PR", "is this ready to merge" |
-| 🔬 **[root-cause](docs/missions/root-cause.md)** | `doctrine-only` | A reproduced symptom and a demonstrated cause: repro-first → falsify rival hypotheses → one survivor, with evidence; optional fix handoff | "diagnose this", "why is this happening" |
+| 🔬 **[root-cause](docs/missions/root-cause.md)** | `self-run` | A reproduced symptom and a demonstrated cause: repro-first → falsify rival hypotheses → one survivor, with evidence; optional fix handoff | "diagnose this", "why is this happening" |
 | 🧪 **[prove-it](docs/missions/prove-it.md)** | `self-run` | A mutation-audited critical surface: `COVERED` or `COVERED-WITH-PARKED`, tests that die when the code is mutated | "close the test gap", "cover the critical paths" |
 | 🧱 **[floor-it](docs/missions/floor-it.md)** | `doctrine-only` | A written, numbered quality bar: one tool per frozen dimension, every gate proven RED on an injected violation before it blocks CI: `FLOORED` or `FLOORED-WITH-PARKED` | "set the quality bar", "make CI enforce", "define our standards" |
 
@@ -234,7 +246,7 @@ Every mission represents a distinct engineering outcome with its own unit of wor
 | Mission | Proof | Outcome (definition of done) | Use when |
 |---|---|---|---|
 | 📦 **[modernize-it](docs/missions/modernize-it.md)** | `doctrine-only` | Dependency currency via expand/migrate/contract at the code level: `CURRENT` or `CURRENT-WITH-PINNED`, every pin justified | "update the dependencies", "framework migration" |
-| 🧬 **[reshape-it](docs/missions/reshape-it.md)** | `doctrine-only` | Confirmed hot modules deepened behind smaller, testable interfaces with behaviour demonstrably unchanged: `RESHAPED` or `RESHAPED-WITH-PARKED` | "god file", "architecture erosion", "refactor the hot path safely" |
+| 🧬 **[reshape-it](docs/missions/reshape-it.md)** | `self-run` | Confirmed hot modules deepened behind smaller, testable interfaces with behaviour demonstrably unchanged: `RESHAPED` or `RESHAPED-WITH-PARKED` | "god file", "architecture erosion", "refactor the hot path safely" |
 | 🗄️ **[migrate-it](docs/missions/migrate-it.md)** | `doctrine-only` | A stateful shape change landed across deploys — expand → dual-write → backfill → switch reads → zero readers → retire writes → zero writers → contract: `MIGRATED`, `MIGRATED-WITH-PARKED`, or `ABANDONED` | "migrate the database", "rename this column safely", "backfill without downtime" |
 
 ### 6. Operate, Document & Provision
@@ -242,7 +254,7 @@ Every mission represents a distinct engineering outcome with its own unit of wor
 | Mission | Proof | Outcome (definition of done) | Use when |
 |---|---|---|---|
 | 📟 **[oncall-it](docs/missions/oncall-it.md)** | `doctrine-only` | A frozen path set made operable: every on-call question answered by a quoted signal, alerts test-fired, and an induced staging failure named by a source-blind worker: `OPERABLE` or `OPERABLE-WITH-PARKED` | "make this operable", "we were blind during the incident", "add observability" |
-| 📚 **[document-it](docs/missions/document-it.md)** | `doctrine-only` | A public surface covered by quadrant with zero critical gaps, every claim bound to a `file:symbol` or a run and proven by a rename-to-RED control: `DOCUMENTED` or `DOCUMENTED-WITH-PARKED` | "document this project", "the API is undocumented", "docs coverage" |
+| 📚 **[document-it](docs/missions/document-it.md)** | `self-run` | A public surface covered by quadrant with zero critical gaps, every claim bound to a `file:symbol` or a run and proven by a rename-to-RED control: `DOCUMENTED` or `DOCUMENTED-WITH-PARKED` | "document this project", "the API is undocumented", "docs coverage" |
 | ☁️ **[offload-it](docs/missions/offload-it.md)** | `doctrine-only` | *Environment setup:* A per-workspace environment recipe stood up end to end — doctor-clear plus a live create→validate→destroy lifecycle: `OFFLOADED` or `OFFLOADED-WITH-PARKED` | "run this in the cloud", "sandbox recipe", "per-workspace environment" |
 | 📌 **[pin-it](docs/missions/pin-it.md)** | `doctrine-only` | *Maintainer-facing:* Runtime doctrine re-witnessed against the installed binary — every mechanics claim receipted CURRENT, patched, or removed: `PINNED` or `PINNED-WITH-PARKED` | "Orca updated", "re-pin the runtime contract", "policy lags practice" |
 
@@ -258,7 +270,7 @@ Every mission represents a distinct engineering outcome with its own unit of wor
 
 Every mission's `metadata:` block carries a validator-enforced `proof:` tier (`doctrine-only`, `self-run`, or `external-run`). Advancing past `doctrine-only` requires retained artifacts that hash true at a named commit: a run report with a `RUN:` header, a per-unit evidence manifest in the run's `docs/runs/` directory, and a SHA-256 inventory verified at the commit the header names.
 <!-- BEGIN GENERATED: proof-status — scripts/gen-badges.py -->
-**Today `review-it` and `ship-it` read `external-run`; `clean-sweep`, `harden-it` and `prove-it` read `self-run`; every other mission reads `doctrine-only`.**
+**Today `review-it` and `ship-it` read `external-run`; `clean-sweep`, `document-it`, `harden-it`, `prove-it`, `reshape-it` and `root-cause` read `self-run`; every other mission reads `doctrine-only`.**
 <!-- END GENERATED: proof-status -->
 Browse all retained runs in the [run archive](docs/runs/README.md). Note the scope of the static repository gate: it hashes, it does not re-run the verifier against a live target checkout; see [Concepts — Proof status](docs/concepts.md#proof-status) for how static binding and live verification complement each other.
 
@@ -421,6 +433,7 @@ Start with Phase 1 non-landing missions that never merge production code (`revie
 ## Repository layout
 
 ```text
+open_fleet/      Zero-dependency unified CLI, MCP server, progressive sessions, solo review & Mission Control UI
 skills/          Discoverable missions (one SKILL.md per outcome)
 playbooks/       Callable phase protocols composed by missions
 runtime/         Runtime policies, control files, RPI provider adapters (runtime/providers/), and CLI helpers incl. the deny hook (runtime/scripts/)
@@ -450,7 +463,7 @@ Explore the documentation by audience tier in **[docs/README.md](docs/README.md)
 
 | Tier | Key guides |
 |---|---|
-| **1. User & Operator Guides** | [Getting started](docs/getting-started.md) · [Install](docs/install.md) · [Adoption guide](docs/adoption-guide.md) · [Mission guides](docs/missions/README.md) · [Prompt recipes](docs/recipes.md) · [Runtimes & harnesses](docs/runtimes.md) · [Anatomy of a run](docs/guides/anatomy-of-a-run.md) · [Troubleshooting](docs/troubleshooting.md) |
+| **1. User & Operator Guides** | [Getting started](docs/getting-started.md) · [CLI, MCP & Mission Control](docs/cli-and-mcp.md) · [Install](docs/install.md) · [Adoption guide](docs/adoption-guide.md) · [Mission guides](docs/missions/README.md) · [Prompt recipes](docs/recipes.md) · [Runtimes & harnesses](docs/runtimes.md) · [Anatomy of a run](docs/guides/anatomy-of-a-run.md) · [Troubleshooting](docs/troubleshooting.md) |
 | **2. Architecture & Reference** | [Concepts & glossary](docs/concepts.md) · [Ecosystem comparison](docs/comparison.md) · [ARCHITECTURE.md](ARCHITECTURE.md) · [Verify gate & trust boundary](docs/verify-gate.md) · [Runtime scripts CLI reference](docs/runtime-scripts.md) · [A2A export](docs/a2a-export.md) · [Compliance provenance](docs/compliance-provenance.md) · [Platform ride](docs/platform-ride.md) |
 | **3. Contributors, Ops & Archives** | [Local development](docs/development.md) · [Contributing](.github/CONTRIBUTING.md) · [Certification](docs/certification.md) · [Distribution](docs/distribution.md) · [Roadmap](docs/roadmap.md) · [Maintainer ops](docs/ops.md) · [Retained runs](docs/runs/README.md) · [Research archive](docs/research/README.md) |
 

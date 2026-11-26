@@ -1,0 +1,10 @@
+{
+  "date": "2026-11-25",
+  "report": "2026-11-25-root-cause-self-run.md",
+  "mission": "[root-cause](2026-11-25-root-cause-self-run.md)",
+  "target": "this catalog (spawn_identity.py false-cap under Linux /proc hidepid=invisible)",
+  "ran_as": "self-run",
+  "binds": "yes",
+  "outcome": "DIAGNOSED-WITH-HANDOFF (A/B repro + H2-H4 falsified + path-free agent-brief; R3 GO)",
+  "summary": "diagnosis-only root-cause proof and security-hardened transitive handoff brief for Linux hidepid=invisible"
+}

@@ -2591,11 +2591,13 @@ def _scan_local_harnesses(ns, offset):
 def _should_fallback_to_local():
     if os.environ.get("OPEN_FLEET_LOCAL_SEARCH") == "1":
         return True
+    val = ""
     for var in ("OPEN_FLEET_RUNTIME", "ORCA_FLEET_RUNTIME"):
-        val = (os.environ.get(var) or "").strip().lower()
-        if val and val != "orca":
-            return True
-    return False
+        raw = (os.environ.get(var) or "").strip().lower()
+        if raw:
+            val = raw
+            break
+    return bool(val and val != "orca")
 
 
 def run_orca(argv):

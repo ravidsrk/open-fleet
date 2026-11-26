@@ -106,10 +106,14 @@ def rollup(records):
 
 
 def check_failures(records):
-    """Missions whose tier requires evidence but whose evidence is missing/unresolvable (AC-3)."""
+    """Missions with read/parse errors, invalid proof tiers, or missing/unresolvable evidence (AC-3)."""
     failures = []
     for rec in records:
-        if rec["proof"] in TIERS_REQUIRING_EVIDENCE:
+        if rec.get("error") is not None:
+            failures.append(rec)
+        elif rec["proof"] not in PROOF_TIERS:
+            failures.append(rec)
+        elif rec["proof"] in TIERS_REQUIRING_EVIDENCE:
             if not rec["proof_evidence"] or not rec["evidence_resolves"]:
                 failures.append(rec)
     return failures
@@ -122,11 +126,18 @@ def format_report(records):
     for rec in records:
         name = rec["name"] or rec["dir"]
         tier = rec["proof"] or "?"
-        evidence = rec["proof_evidence"] or "—"
-        if rec["proof_evidence"]:
+        if rec.get("error") is not None:
+            mark = "ERROR"
+            evidence = str(rec["error"])
+        elif rec["proof"] not in PROOF_TIERS:
+            mark = "INVALID"
+            evidence = rec["proof_evidence"] or "—"
+        elif rec["proof_evidence"]:
             mark = "ok" if rec["evidence_resolves"] else "MISSING"
+            evidence = rec["proof_evidence"]
         else:
             mark = "—"
+            evidence = "—"
         lines.append(f"{name:<{name_w}}  {tier:<{tier_w}}  [{mark:<7}] {evidence}")
     counts = rollup(records)
     lines.append("")
@@ -145,6 +156,7 @@ def json_records(records):
             "proof": rec["proof"],
             "proof_evidence": rec["proof_evidence"],
             "evidence_resolves": rec["evidence_resolves"],
+            "error": rec["error"],
         }
         for rec in records
     ]
@@ -158,7 +170,7 @@ def main(argv=None):
     ap.add_argument(
         "--check",
         action="store_true",
-        help="exit non-zero iff a mission above doctrine-only lacks resolvable proof_evidence",
+        help="exit non-zero iff any mission has parse errors, an invalid tier, or missing resolvable proof_evidence",
     )
     ap.add_argument("--root", default=None, help="repo root (default: inferred from this script)")
     args = ap.parse_args(argv)
@@ -181,13 +193,22 @@ def main(argv=None):
         if failures:
             for rec in failures:
                 name = rec["name"] or rec["dir"]
-                why = "no proof_evidence" if not rec["proof_evidence"] else "unresolvable proof_evidence"
-                print(
-                    f"FAIL: {name} ({rec['proof']}) — {why}: {rec['proof_evidence'] or '—'}",
-                    file=sys.stderr,
-                )
+                if rec.get("error") is not None:
+                    print(f"FAIL: {name} — parse error: {rec['error']}", file=sys.stderr)
+                elif rec["proof"] not in PROOF_TIERS:
+                    print(
+                        f"FAIL: {name} ({rec['proof']!r}) — invalid or missing proof tier "
+                        f"(want {'|'.join(PROOF_TIERS)})",
+                        file=sys.stderr,
+                    )
+                else:
+                    why = "no proof_evidence" if not rec["proof_evidence"] else "unresolvable proof_evidence"
+                    print(
+                        f"FAIL: {name} ({rec['proof']}) — {why}: {rec['proof_evidence'] or '—'}",
+                        file=sys.stderr,
+                    )
             print(
-                f"proof-status: {len(failures)} mission(s) above doctrine-only missing evidence",
+                f"proof-status: {len(failures)} mission(s) failed proof-status checks",
                 file=sys.stderr,
             )
             return 1

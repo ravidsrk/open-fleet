@@ -1,0 +1,46 @@
+# Acceptance Review — `root-cause-2026-11-25-hidepid` (Round 3 of 3)
+
+- **Unit ID:** `root-cause-2026-11-25-hidepid`
+- **Mission:** `root-cause` (planning / diagnosis-only; terminal outcome `DIAGNOSED-WITH-HANDOFF`)
+- **Review round:** `3 of 3` (final)
+- **Reviewer mode:** `same-vendor-fresh` (independent build-blind `research` subagent `fb507940-1b18-4974-b06e-2b3a6eee5e43`)
+- **Spec sources:** `docs/runs/2026-11-25-root-cause-selfrun/contract.json` (`RC-1`..`RC-4`) + `skills/root-cause/SKILL.md`, `playbooks/diagnose.md`, `playbooks/agent-brief.md`
+- **`reviewed_sha`:** `cfa3bd63f78df5f0e5e7ee66817ba466d860340b`
+
+---
+
+## PART 1 — Blind expectation (written before opening `docs/runs/2026-11-25-root-cause-selfrun/`)
+
+- Mechanism derived from live `runtime/scripts/spawn_identity.py:473-474` (`allow_hidden=not live`) and `:194-196` (`raise Unknown`) + `runtime/scripts/spawn_worker.sh:654,694-696` (fail-closed `ro` cap).
+- Sound handoff invariant requires evaluating both `reg` and `uid_reg` live roots + live hosts before authorizing a hidden-boundary stop, verifying `alive(k) is True`, and verifying every live root and live host terminates at the exact same live hidden parent `P`, paired with 4 fail-closed negative controls.
+- Artifacts must show zero code edits, path-free/line-number-free redacted `handoff-brief.md`, A/B `repro-red.txt`, and 6 literal copy-pasteable commands in `falsification-probes.txt`.
+
+---
+
+## PART 2 — Three-axis judgment (side by side, no cross-rerank)
+
+### AXIS 1 — Standards & `agent-brief.md` — **PASS**
+- Zero code edits confirmed (`git diff` and `git diff --cached` empty at `cfa3bd63f78df5f0e5e7ee66817ba466d860340b`; subject files identical since `4b2e99e5`).
+- `handoff-brief.md:1-35` matches `playbooks/agent-brief.md` shape with zero file paths, zero file extensions, and zero line numbers.
+- Programmatic redaction scan across all 5 artifacts found zero credentials, tokens, or unredacted absolute paths.
+- Findings: None (0 Critical, 0 Required, 0 Nit).
+
+### AXIS 2 — Spec fidelity & verbatim command/quote verification — **PASS**
+- `RC-1` (`repro-red.txt`): Both commands independently re-executed (`[RED]` exit `1` with exact `AssertionError` at `tests/test_spawn_worker.py:2482` → `:2231`; `[CONTROL A]` exit `0`).
+- `RC-2` (`falsification-probes.txt`): All 6 literal commands (Prior-Art incl. `orca`/`orca-ide`, Environment Facts, H2, H3, H4, H1) independently re-executed from repo root — all 6 exited `0` and reproduced their verbatim raw stdout format.
+- `RC-3` (`diagnosis-evidence.md`): Every observed PID/output (`546338`, `546371`, `546371.359425745`, `546302`, `546218.359425724`, `546337`) and every quoted source line (`spawn_identity.py:473-474,194-196,483-489,601-612,165-170`, `spawn_worker.sh:654,696`, `test_spawn_worker.py:2482,2231`) matched live files byte-for-byte.
+- `RC-4`: Satisfied. Non-blocking FYI on `repro-red.txt:2` initial capture SHA (`4b2e99e5`, bridged explicitly and re-verified at `cfa3bd63`).
+
+### AXIS 3 — Security soundness — **PASS**
+- Transitive shared-hidden-parent invariant across both `reg` and `uid_reg` for live roots and live hosts (`diagnosis-evidence.md:60-64`, `handoff-brief.md:8-15`) is mathematically sound by process-tree acyclicity.
+- All 4 fail-closed negative controls (`handoff-brief.md:25-28`: unreadable live root, transitive `R -> hidden_S -> C`, `HOME`-switch + hidden intermediate, hidden intermediate below live host) properly specified.
+- Non-blocking FYI for downstream fix worker: also re-verify the caller's topmost visible ancestor `(start, ppid == P)` after checking live roots/hosts.
+
+---
+
+## Verdict & Summary Brief
+
+- **Verdict:** **`GO`**
+- **Round:** `3 of 3`
+- **`reviewed_sha`:** `cfa3bd63f78df5f0e5e7ee66817ba466d860340b`
+- **Axis tally:** AXIS 1 **PASS** · AXIS 2 **PASS** · AXIS 3 **PASS** (0 Critical, 0 Required, 0 Nit, 2 FYI)

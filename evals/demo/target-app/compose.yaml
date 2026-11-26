@@ -35,7 +35,7 @@ services:
       HOME: /tmp
       PYTHONUNBUFFERED: "1"
       PYTHONDONTWRITEBYTECODE: "1"
-    command: 'sh -c "python -m venv /tmp/venv && /tmp/venv/bin/pip install --quiet --require-hashes --only-binary :all: -r requirements.lock && /tmp/venv/bin/python -m app.seed --count 0 && /tmp/venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 2>&1 | tee -a /var/log/target-app/app.log"'
+    command: 'bash -o pipefail -c "python -m venv /tmp/venv && /tmp/venv/bin/pip install --quiet --require-hashes --only-binary :all: -r requirements.lock && /tmp/venv/bin/python -m app.seed --count 0 && /tmp/venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 2>&1 | tee -a /var/log/target-app/app.log"'
     ports:
       - "127.0.0.1:8000:8000"
 
@@ -56,7 +56,7 @@ services:
       HOME: /tmp
       PYTHONUNBUFFERED: "1"
       PYTHONDONTWRITEBYTECODE: "1"
-    command: 'sh -c "python -m venv /tmp/venv && /tmp/venv/bin/pip install --quiet --require-hashes --only-binary :all: -r requirements.lock && /tmp/venv/bin/python -m app.seed --count 0 && /tmp/venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 2>&1 | tee -a /var/log/target-app/staging.log"'
+    command: 'bash -o pipefail -c "python -m venv /tmp/venv && /tmp/venv/bin/pip install --quiet --require-hashes --only-binary :all: -r requirements.lock && /tmp/venv/bin/python -m app.seed --count 0 && /tmp/venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 2>&1 | tee -a /var/log/target-app/staging.log"'
     ports:
       - "127.0.0.1:8001:8000"
 

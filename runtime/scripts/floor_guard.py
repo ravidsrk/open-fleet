@@ -115,8 +115,10 @@ if (__name__ == "__main__" and not getattr(sys.flags, "safe_path", False) and sy
     del sys.path[0]
 
 import argparse
+import configparser
 import importlib.util
 import re
+import tomllib
 import unicodedata
 import subprocess
 from collections import Counter
@@ -218,7 +220,7 @@ GUARD_SURFACE_FILES = (
 GUARD_SURFACE_DIRS = ("bench/vf-bench/traps/",)
 _RUFF_SHADOW_BASENAMES = frozenset({"ruff.toml", ".ruff.toml"})
 _PYPROJECT_GUARD = re.compile(r"^\s*(?:\[[^\]]*)?tool\.(ruff|coverage)\b")
-_INI_TOOL_GUARD = re.compile(r"^\s*\[[^\]]*(?:tool[.:])?(ruff|coverage)\b", re.IGNORECASE)
+_INI_TOOL_GUARD = re.compile(r"^\s*\[[^\]]*(?:tool[.:])?(ruff|coverage|flake8)\b", re.IGNORECASE)
 _COVERAGERC_SECTION = re.compile(r"^\s*\[")
 GUARD_SURFACE_KEYS = (
     # (path, assignment regex): the ruff rule selection AND everything that carves it back
@@ -234,10 +236,11 @@ GUARD_SURFACE_KEYS = (
         r"(?:extend-)?(?:select|ignore|exclude|include|fixable|unfixable|per-file-ignores))\s*="
     )),
     ("ruff.toml", re.compile(r"^\s*\[[^\]]*per-file-ignores")),
-    # A table entry and a rule code on its own line, in either TOML quote style, and a bare key
-    # assigned a list of rule codes (#707 review: `'runtime/scripts/*' = ['F401']` matched none).
+    # A table entry and any quoted list item (rule code or exclude/include glob) on its own line
+    # in a multi-line list, in either TOML quote style, with optional trailing comma, closing
+    # bracket, or `# comment` (#707 review).
     ("ruff.toml", re.compile(r"^\s*(\"[^\"]+\"|'[^']+')\s*=")),
-    ("ruff.toml", re.compile(r"^\s*(\"[A-Z]+[0-9]*\"|'[A-Z]+[0-9]*')\s*,?\s*$")),
+    ("ruff.toml", re.compile(r"^\s*(?:\"[^\"]+\"|'[^']+')\s*,?\s*\]?\s*,?\s*(?:#.*)?$")),
     ("ruff.toml", re.compile(r"^\s*[A-Za-z0-9_.*/-]+\s*=\s*\[\s*[\"'][A-Z]+[0-9]*[\"']")),
     (".coveragerc", re.compile(r"^\s*(fail_under|source|include|omit|exclude_lines|exclude_also|branch|"
                                r"skip_covered|skip_empty|ignore_errors|partial_branches|plugins)\s*[=:]")),
@@ -715,7 +718,78 @@ def lowering(before_text, after_text):
     return None
 
 
-def scan(added, removed, constraints_name, repo):
+def _pyproject_guarded_sections(text):
+    """Extract guarded `[tool.ruff]` and `[tool.coverage]` sections from pyproject.toml text."""
+    if text is None:
+        return {}
+    data = tomllib.loads(text)
+    tool = data.get("tool")
+    if not isinstance(tool, dict):
+        return {}
+    return {k: tool[k] for k in ("ruff", "coverage") if k in tool}
+
+
+def _ini_guarded_sections(text):
+    """Extract guarded ruff/coverage/flake8 sections from setup.cfg / tox.ini text."""
+    if text is None:
+        return {}
+    cp = configparser.RawConfigParser()
+    cp.read_string(text)
+    out = {}
+    for sec in cp.sections():
+        low = sec.strip().lower()
+        if (low in ("flake8", "coverage", "ruff", "tool:ruff", "tool.ruff", "tool:coverage", "tool.coverage")
+                or low.startswith(("flake8:", "coverage:", "ruff:", "tool:ruff:", "tool.ruff.",
+                                   "tool:coverage:", "tool.coverage."))):
+            out[low] = sorted((k.strip().lower(), v.strip()) for k, v in cp.items(sec))
+    return out
+
+
+def _flag_structural_guard_surface(added, removed, repo, base, findings, flag):
+    """Catch edits inside pre-existing pyproject.toml / setup.cfg / tox.ini guarded sections
+    whose header does not appear in a `--unified=0` diff (fail-closed on parse error)."""
+    first_line = {}
+    for path, line, _text in added + removed:
+        if path and Path(path).name in ("pyproject.toml", "setup.cfg", "tox.ini"):
+            if path not in first_line:
+                first_line[path] = line
+    if not first_line:
+        return
+    flagged_paths = {f["path"] for f in findings if f["rule"] == "guard-surface"}
+    for path, line in sorted(first_line.items()):
+        if path in flagged_paths:
+            continue
+        name = Path(path).name
+        parser = _pyproject_guarded_sections if name == "pyproject.toml" else _ini_guarded_sections
+        base_text = None
+        if repo is not None:
+            if base is not None:
+                base_text = read_at(repo, base, path)
+            elif (Path(repo) / ".git").exists():
+                try:
+                    base_text = read_at(repo, "HEAD", path)
+                except GuardError:
+                    base_text = None
+        head_text = None
+        if repo is not None:
+            head_path = Path(repo) / path
+            if head_path.exists():
+                try:
+                    head_text = head_path.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    flag("guard-surface", path, line, path)
+                    continue
+        try:
+            before = parser(base_text)
+            after = parser(head_text)
+        except (ValueError, configparser.Error):
+            flag("guard-surface", path, line, path)
+            continue
+        if before != after:
+            flag("guard-surface", path, line, path)
+
+
+def scan(added, removed, constraints_name, repo, base=None):
     """Return findings as dicts: rule, path, line, detail (never matched text)."""
     findings = []
 
@@ -791,6 +865,7 @@ def scan(added, removed, constraints_name, repo):
             in_deleted_files.setdefault(path, []).append((line, text))
             continue
         flag("assertion-removed", path, line, "assertion")
+    _flag_structural_guard_surface(added, removed, repo, base, findings, flag)
     added = [row for row in added if not media(row[0])]
     removed = [row for row in removed if not media(row[0])]
     _charge_moved_assertions(in_deleted_files, added, removed, flag)
@@ -949,8 +1024,13 @@ def load_waivers(path):
 def read_at(repo, ref, rel):
     """The text of repository path `rel` at `ref`, or None when `ref` does not carry it.
 
-    A path the ref carries but git cannot read is a could-not-run, never "no waivers"."""
-    if git(repo, "cat-file", "-e", f"{ref}:{rel}") is None:
+    Presence comes from the TREE listing (`ls-tree --name-only --full-tree`), never `cat-file -e`
+    (which conflates an absent path with an unreadable/pruned blob). A path the ref carries that
+    git cannot read is a could-not-run, never "no waivers"."""
+    listing = git(repo, "ls-tree", "-z", "--name-only", "--full-tree", ref, "--", rel)
+    if listing is None:
+        raise GuardError(f"cannot list {rel} at {ref}")
+    if rel not in [name for name in listing.split("\0") if name]:
         return None
     text = git(repo, "cat-file", "blob", f"{ref}:{rel}")
     if text is None:
@@ -1156,7 +1236,7 @@ def main(argv=None):
         base, shown = resolve_base(repo, args.base)  # a commit id; `shown` names it for people
         mb = merge_base(repo, base)
         added, removed = parse_diff(collect_diff(repo, mb))
-        findings = scan(added, removed, args.constraints, repo)
+        findings = scan(added, removed, args.constraints, repo, base=mb)
         # The BASE ref's ledger, never the tree under review (2026-10-23 review, P1-7).
         waivers = load_base_waivers(repo, base, waiver_rel(repo, args.waivers))
     except GuardError as err:

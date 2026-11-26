@@ -12,8 +12,8 @@
 # Exit: 0 ok · 1 the template or the gate script is missing, or python3 is absent.
 set -eu
 
-HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-ROOT=$(CDPATH= cd -- "$HERE/.." && pwd)
+HERE=$(CDPATH= cd -P -- "$(dirname -- "$0")" && pwd -P)
+ROOT=$(CDPATH= cd -P -- "$HERE/.." && pwd -P)
 TEMPLATE="$HERE/settings-snippet.json"
 GATE="$ROOT/runtime/scripts/verify-gate.sh"
 
@@ -21,6 +21,7 @@ GATE="$ROOT/runtime/scripts/verify-gate.sh"
 [ -x "$GATE" ] || [ -f "$GATE" ] || { echo "missing $GATE" >&2; exit 1; }
 
 if [ "${1:-}" = "--check" ]; then
+  [ -x "$GATE" ] || { echo "non-executable $GATE" >&2; exit 1; }
   echo "ok: $GATE exists; snippet would wire it from $ROOT"
   exit 0
 fi
@@ -31,7 +32,7 @@ fi
 # string (the host runs it through a shell, so a space or `$` in the path would split or
 # expand), then json.dumps encodes the string — both layers escaped by their own encoder.
 command -v python3 >/dev/null 2>&1 || { echo "python3 is required to emit the snippet" >&2; exit 1; }
-python3 - "$TEMPLATE" "$ROOT" <<'PY'
+python3 -I - "$TEMPLATE" "$ROOT" <<'PY'
 import json, re, shlex, sys
 
 template, root = sys.argv[1], sys.argv[2]

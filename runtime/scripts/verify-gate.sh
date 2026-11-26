@@ -366,14 +366,19 @@ fi
 # committed runtime/scripts/json.py became the verifier's `json` — a RED verdict turned GREEN,
 # bound by no toolchain hash. verify.py drops that entry itself too; -I also keeps PYTHON* env
 # and the user site out of the verdict.
-"$PY_BIN" -I "$HERE/verify.py" "$@" &
+"$PY_BIN" -I -c 'import os, sys
+try:
+    os.setsid()
+except OSError:
+    pass
+os.execv(sys.argv[1], sys.argv[1:])' "$PY_BIN" -I "$HERE/verify.py" "$@" &
 _vpid=$!
 _waited=0
 while kill -0 "$_vpid" 2>/dev/null; do
   if [ "$_waited" -ge "$GATE_TIMEOUT" ]; then
-    kill "$_vpid" 2>/dev/null || true
+    kill -TERM "-$_vpid" 2>/dev/null || kill "$_vpid" 2>/dev/null || true
     sleep 1
-    kill -9 "$_vpid" 2>/dev/null || true
+    kill -KILL "-$_vpid" 2>/dev/null || kill -9 "$_vpid" 2>/dev/null || true
     wait "$_vpid" 2>/dev/null || true
     echo "verify-gate: the verifier ran past ${GATE_TIMEOUT}s (ORCA_GATE_TIMEOUT_S) and was stopped — BLOCKING (fail-closed: a verdict that never arrived is not a pass; the host would have discarded a timed-out hook and let the turn end)" >&2
     exit 2

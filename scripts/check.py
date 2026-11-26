@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One local command for the checks a PR must pass (#760).
 
-    python3 scripts/check.py              validate + ruff + shard-partition check + full suite
+    python3 scripts/check.py              validate + product-surface + ruff + shard-partition check + full suite
     python3 scripts/check.py --no-suite   the fast loop: everything but the unittest suite
     python3 scripts/check.py --jobs 4     suite shards to run in parallel (default: CPUs, max 8)
     python3 scripts/check.py --strict     a missing ruff fails instead of being reported SKIPPED
@@ -41,7 +41,7 @@ PY = sys.executable or "python3"
 
 # The exact paths CI lints (.github/workflows/validate.yml, the `ruff check` step).
 # tests/test_shard_tests.py fails if the two drift apart.
-RUFF_PATHS = ("scripts", "runtime/scripts", "runtime/providers", "tests", "bench", "evals/demo")
+RUFF_PATHS = ("scripts", "runtime/scripts", "runtime/providers", "tests", "bench", "evals/demo", "open_fleet")
 
 TAIL_LINES = 60
 
@@ -52,7 +52,10 @@ def default_jobs():
 
 def plan(jobs, suite=True, ruff=None):
     """[(name, argv | None)] in run order. argv None means the step is SKIPPED (tool missing)."""
-    steps = [("validate", [PY, "-I", "scripts/validate.py"])]
+    steps = [
+        ("validate", [PY, "-I", "scripts/validate.py"]),
+        ("product-surface", [PY, "-I", "scripts/extract_product_surface.py", "--check"]),
+    ]
     ruff = shutil.which("ruff") if ruff is None else ruff
     steps.append(("ruff", [ruff, "check", "--config", "ruff.toml", *RUFF_PATHS] if ruff else None))
     if suite:

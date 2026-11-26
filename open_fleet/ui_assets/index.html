@@ -1,0 +1,1711 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>open-fleet — Mission Control</title>
+  <style>
+    :root {
+      --bg: #0a0d12;
+      --bg-elev: #11161f;
+      --bg-card: #151c27;
+      --bg-hover: #1b2433;
+      --border: #243043;
+      --border-strong: #32435d;
+      --text: #e6edf7;
+      --text-muted: #8ea0b8;
+      --text-dim: #65778f;
+      --emerald: #2dd4a0;
+      --emerald-bg: rgba(45, 212, 160, 0.12);
+      --amber: #f5b942;
+      --amber-bg: rgba(245, 185, 66, 0.12);
+      --rose: #f87171;
+      --rose-bg: rgba(248, 113, 113, 0.12);
+      --cyan: #38bdf8;
+      --cyan-bg: rgba(56, 189, 248, 0.12);
+      --violet: #a78bfa;
+      --violet-bg: rgba(167, 139, 250, 0.12);
+      --code-bg: #080b10;
+      --shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+      --radius: 10px;
+      --font-sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+      --font-mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
+    }
+
+    [data-theme="light"] {
+      --bg: #f4f6fa;
+      --bg-elev: #ffffff;
+      --bg-card: #ffffff;
+      --bg-hover: #eef2f8;
+      --border: #d8e0ec;
+      --border-strong: #b9c7da;
+      --text: #0f172a;
+      --text-muted: #475569;
+      --text-dim: #64748b;
+      --emerald: #059669;
+      --emerald-bg: rgba(5, 150, 105, 0.1);
+      --amber: #b45309;
+      --amber-bg: rgba(217, 119, 6, 0.1);
+      --rose: #dc2626;
+      --rose-bg: rgba(220, 38, 38, 0.1);
+      --cyan: #0284c7;
+      --cyan-bg: rgba(2, 132, 199, 0.1);
+      --violet: #6d28d9;
+      --violet-bg: rgba(109, 40, 217, 0.1);
+      --code-bg: #f1f5f9;
+      --shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+    }
+
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font-sans);
+      font-size: 14px;
+      line-height: 1.5;
+      min-height: 100vh;
+    }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 40;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 12px 24px;
+      background: var(--bg-elev);
+      border-bottom: 1px solid var(--border);
+      backdrop-filter: blur(8px);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .seal {
+      width: 34px;
+      height: 34px;
+      border-radius: 9px;
+      display: grid;
+      place-items: center;
+      background: linear-gradient(135deg, rgba(45, 212, 160, 0.22), rgba(56, 189, 248, 0.16));
+      border: 1px solid var(--emerald);
+      color: var(--emerald);
+      font-family: var(--font-mono);
+      font-weight: 700;
+      font-size: 14px;
+      flex-shrink: 0;
+    }
+
+    .brand-title {
+      font-weight: 700;
+      font-size: 14.5px;
+      letter-spacing: -0.01em;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      white-space: nowrap;
+    }
+
+    .brand-sub {
+      font-size: 11.5px;
+      color: var(--text-muted);
+      white-space: nowrap;
+    }
+
+    .nav {
+      display: flex;
+      gap: 3px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      padding: 3px;
+      overflow-x: auto;
+    }
+
+    .nav button {
+      border: 0;
+      background: transparent;
+      color: var(--text-muted);
+      padding: 6px 10px;
+      border-radius: 7px;
+      font-size: 12.5px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 120ms, color 120ms;
+    }
+
+    .nav button:hover {
+      color: var(--text);
+      background: var(--bg-hover);
+    }
+
+    .nav button.active {
+      color: var(--bg);
+      background: var(--emerald);
+    }
+
+    .top-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border-strong);
+      background: var(--bg-card);
+      color: var(--text);
+      font-size: 12.5px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: border-color 120ms, background 120ms, transform 80ms;
+    }
+
+    .btn:hover { background: var(--bg-hover); border-color: var(--cyan); }
+    .btn:active { transform: translateY(1px); }
+    .btn:disabled { opacity: 0.55; cursor: wait; }
+
+    .btn-primary {
+      background: var(--emerald);
+      border-color: var(--emerald);
+      color: #06130e;
+    }
+    .btn-primary:hover {
+      background: #25bc8d;
+      border-color: #25bc8d;
+    }
+
+    .btn-sm { padding: 4px 9px; font-size: 12px; }
+
+    .container {
+      max-width: 1360px;
+      margin: 0 auto;
+      padding: 22px 24px 48px;
+    }
+
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+
+    .grid-4 {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+      margin-bottom: 20px;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+      margin-bottom: 20px;
+    }
+
+    .grid-catalog {
+      display: grid;
+      grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.95fr);
+      gap: 18px;
+      align-items: start;
+    }
+
+    @media (max-width: 1020px) {
+      .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .grid-2, .grid-catalog { grid-template-columns: 1fr; }
+      .topbar { flex-wrap: wrap; }
+    }
+
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      box-shadow: var(--shadow);
+    }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .card-title {
+      font-size: 13.5px;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+      margin: 0;
+    }
+
+    .kpi-label {
+      font-size: 11.5px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-muted);
+      font-weight: 600;
+    }
+
+    .kpi-value {
+      font-size: 26px;
+      font-weight: 700;
+      font-family: var(--font-mono);
+      margin: 4px 0 6px;
+      letter-spacing: -0.02em;
+    }
+
+    .kpi-sub {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 11.5px;
+      font-weight: 600;
+      font-family: var(--font-mono);
+      border: 1px solid transparent;
+      white-space: nowrap;
+    }
+
+    .pill-ok, .pill-external-run, .pill-live-witnessed {
+      color: var(--emerald);
+      background: var(--emerald-bg);
+      border-color: rgba(45, 212, 160, 0.3);
+    }
+
+    .pill-self-run, .pill-fixture-tested, .pill-info {
+      color: var(--cyan);
+      background: var(--cyan-bg);
+      border-color: rgba(56, 189, 248, 0.3);
+    }
+
+    .pill-warn, .pill-doctrine-only, .pill-source-only {
+      color: var(--amber);
+      background: var(--amber-bg);
+      border-color: rgba(245, 185, 66, 0.3);
+    }
+
+    .pill-fail, .pill-unsupported, .pill-one-way {
+      color: var(--rose);
+      background: var(--rose-bg);
+      border-color: rgba(248, 113, 113, 0.35);
+    }
+
+    .pill-taste {
+      color: var(--violet);
+      background: var(--violet-bg);
+      border-color: rgba(167, 139, 250, 0.35);
+    }
+
+    .mono { font-family: var(--font-mono); }
+    .muted { color: var(--text-muted); }
+    .dim { color: var(--text-dim); }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12.5px;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+      overflow-wrap: anywhere;
+    }
+
+    .nowrap { white-space: nowrap; }
+    .table-wrap { overflow-x: auto; max-height: 310px; overflow-y: auto; }
+
+    th {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      font-weight: 700;
+      white-space: nowrap;
+      overflow-wrap: normal;
+    }
+
+    tr.clickable:hover td {
+      background: var(--bg-hover);
+      cursor: pointer;
+    }
+
+    tr.selected td {
+      background: var(--emerald-bg);
+    }
+
+    .hero-router {
+      background: linear-gradient(135deg, rgba(45, 212, 160, 0.09), rgba(56, 189, 248, 0.07));
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      padding: 18px 20px;
+      margin-bottom: 18px;
+    }
+
+    .router-row {
+      display: flex;
+      gap: 10px;
+      margin-top: 10px;
+    }
+
+    input[type="text"], select {
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--border-strong);
+      border-radius: 8px;
+      padding: 9px 12px;
+      font-size: 13.5px;
+      font-family: var(--font-sans);
+      outline: none;
+    }
+
+    input[type="text"]:focus, select:focus {
+      border-color: var(--emerald);
+    }
+
+    .router-input { flex: 1; min-width: 0; }
+
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 10px;
+    }
+
+    .chip {
+      border: 1px solid var(--border);
+      background: var(--bg-elev);
+      color: var(--text-muted);
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    .chip:hover { color: var(--text); border-color: var(--cyan); }
+
+    pre.terminal {
+      margin: 0;
+      padding: 12px 14px;
+      border-radius: 8px;
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      line-height: 1.48;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 360px;
+      overflow-y: auto;
+    }
+
+    .ladder-bar {
+      display: flex;
+      height: 10px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      margin: 10px 0 6px;
+    }
+
+    .ladder-ext { background: var(--emerald); }
+    .ladder-self { background: var(--cyan); }
+    .ladder-doc { background: var(--amber); }
+
+    .split-verdict {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin: 12px 0;
+    }
+
+    .verdict-box {
+      border-radius: 8px;
+      padding: 12px 14px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+    }
+
+    .verdict-box.bad { border-color: var(--amber); }
+    .verdict-box.good { border-color: var(--emerald); }
+
+    .kv-list {
+      display: grid;
+      grid-template-columns: 120px minmax(0, 1fr);
+      gap: 6px 12px;
+      font-size: 12.5px;
+    }
+
+    .kv-key { color: var(--text-muted); font-family: var(--font-mono); }
+
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+
+    .toast {
+      position: fixed;
+      right: 20px;
+      bottom: 20px;
+      padding: 10px 14px;
+      border-radius: 8px;
+      background: var(--bg-card);
+      border: 1px solid var(--emerald);
+      color: var(--text);
+      font-size: 12.5px;
+      box-shadow: var(--shadow);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 180ms;
+      z-index: 80;
+    }
+    .toast.show { opacity: 1; }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="seal">OF</div>
+      <div>
+        <div class="brand-title">
+          <span>open-fleet Mission Control</span>
+          <span id="hdr-version" class="pill pill-ok">v…</span>
+          <span id="hdr-health" class="pill pill-info">checking…</span>
+        </div>
+        <div class="brand-sub" id="hdr-sub">Independent SHA-bound verification &amp; multi-agent fleet cockpit</div>
+      </div>
+    </div>
+
+    <nav class="nav" role="tablist" aria-label="Mission Control sections">
+      <button class="active" data-tab="overview">Control Room</button>
+      <button data-tab="missions">Router</button>
+      <button data-tab="sessions">Sessions &amp; Solo</button>
+      <button data-tab="verify">Verify Lab</button>
+      <button data-tab="runtimes">Runtimes</button>
+      <button data-tab="setup">Setup &amp; MCP</button>
+    </nav>
+
+    <div class="top-actions">
+      <button class="btn btn-sm nowrap" id="btn-refresh">Refresh</button>
+      <button class="btn btn-sm nowrap" id="btn-theme">Theme</button>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- TAB 1: CONTROL ROOM -->
+    <section id="tab-overview" class="tab-panel active">
+      <div class="grid-4" id="kpi-strip"></div>
+
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">Environment Doctor</h2>
+            <span id="doc-runtime-pill" class="pill pill-info">runtime</span>
+          </div>
+          <table>
+            <thead>
+              <tr><th>Check</th><th>Status</th><th>Detail</th></tr>
+            </thead>
+            <tbody id="doctor-tbody"></tbody>
+          </table>
+          <div id="doctor-next" style="margin-top: 12px;"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">Proof Ladder &amp; Live Fleet State</h2>
+            <span id="state-db-pill" class="pill pill-info">SQLite</span>
+          </div>
+          <div id="proof-ladder-box"></div>
+          <div id="fleet-state-box" style="margin-top: 14px;"></div>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">Retained Run Archive (Binding Evidence)</h2>
+            <span id="runs-count-pill" class="pill pill-ok">0</span>
+          </div>
+          <div class="table-wrap">
+            <table style="table-layout: fixed;">
+              <thead>
+                <tr>
+                  <th style="width: 96px;">Date</th>
+                  <th style="width: 110px;">Mission</th>
+                  <th style="width: 108px;">Tier</th>
+                  <th style="width: 60px;">Binds</th>
+                  <th>Outcome</th>
+                </tr>
+              </thead>
+              <tbody id="runs-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">Durable Governance Decisions (DECISIONS.md)</h2>
+            <span id="decisions-count-pill" class="pill pill-info">0</span>
+          </div>
+          <div class="table-wrap">
+            <table style="table-layout: fixed;">
+              <thead>
+                <tr>
+                  <th style="width: 112px;">Date</th>
+                  <th style="width: 44%;">Gate / ID</th>
+                  <th style="width: 96px;">Class</th>
+                  <th>Answer</th>
+                </tr>
+              </thead>
+              <tbody id="decisions-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 2: MISSION ROUTER & CATALOG -->
+    <section id="tab-missions" class="tab-panel">
+      <div class="hero-router">
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
+          <div>
+            <h2 class="card-title" style="font-size:16px;">Intent-to-Mission Router</h2>
+            <div class="muted" style="font-size:12.5px;">Describe your engineering goal to pick the right outcome mission, proof tier, and copy-ready launch prompt.</div>
+          </div>
+          <span class="pill pill-ok">22 Outcome Contracts · 1 Router / Worker</span>
+        </div>
+        <div class="router-row">
+          <input id="route-input" class="router-input" type="text" placeholder="e.g. Build GET /healthz with tests and stop at the promotion PR" />
+          <button id="btn-route" class="btn btn-primary">Route Goal</button>
+        </div>
+        <div class="chips" id="preset-chips"></div>
+        <div id="route-result" style="margin-top: 14px;"></div>
+      </div>
+
+      <div class="grid-catalog">
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">Mission Catalog</h2>
+            <div class="toolbar" style="margin:0;">
+              <select id="filter-proof">
+                <option value="">All proof tiers</option>
+                <option value="external-run">external-run</option>
+                <option value="self-run">self-run</option>
+                <option value="doctrine-only">doctrine-only</option>
+              </select>
+              <select id="filter-category">
+                <option value="">All categories</option>
+              </select>
+            </div>
+          </div>
+          <div style="max-height: 540px; overflow-y: auto;">
+            <table>
+              <thead>
+                <tr><th>Mission</th><th>Proof</th><th>Budget</th><th>Category</th></tr>
+              </thead>
+              <tbody id="missions-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card" id="mission-detail">
+          <div class="muted">Select a mission to inspect its six-point identity contract, capabilities, and launch prompt.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 3: VERIFICATION LAB -->
+    <section id="tab-verify" class="tab-panel">
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">1. Negative-Control Proof (Self-Scorer vs verify.py)</h2>
+            <button id="btn-run-nc" class="btn btn-primary btn-sm">Run Live Proof</button>
+          </div>
+          <p class="muted" style="margin-top:0;">
+            Feeds the exact same gamed manifest (omitting criterion <code>AC-2</code>) to a self-scoring checker and to
+            <code>runtime/scripts/verify.py</code>. Watch self-scoring return <strong>GREEN</strong> while the independent
+            verifier re-derives the frozen contract and fails <strong>RED</strong>.
+          </p>
+          <div id="nc-verdict-strip" class="split-verdict">
+            <div class="verdict-box bad">
+              <div class="kpi-label">Self-Scoring Worker Gate</div>
+              <div id="nc-self-badge" class="kpi-value" style="font-size:18px;">Not run yet</div>
+              <div class="kpi-sub">Grades only the criteria the worker chose to list</div>
+            </div>
+            <div class="verdict-box good">
+              <div class="kpi-label">open-fleet Independent Verifier</div>
+              <div id="nc-verify-badge" class="kpi-value" style="font-size:18px;">Not run yet</div>
+              <div class="kpi-sub">Re-derives frozen T0 scope digest &amp; negative control</div>
+            </div>
+          </div>
+          <pre id="nc-output" class="terminal">Click "Run Live Proof" to execute evals/demo/negative-control/run.sh…</pre>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">2. Standalone POSIX First-Run Witness (Zero Spend)</h2>
+            <div style="display:flex; gap:8px; align-items:center;">
+              <select id="fr-profile" style="padding:5px 8px; font-size:12px;">
+                <option value="ro">PROFILE=ro</option>
+                <option value="rw">PROFILE=rw</option>
+              </select>
+              <button id="btn-run-fr" class="btn btn-primary btn-sm">Run Witness</button>
+            </div>
+          </div>
+          <p class="muted" style="margin-top:0;">
+            Drives the full standalone <code>OPEN_FLEET_RUNTIME=posix</code> pipeline (<code>preflight.py</code> &rarr;
+            <code>task_ops.py</code> &rarr; <code>spawn_worker.sh</code> &rarr; <code>worker_ops.py</code> &rarr;
+            <code>verify.py</code>) with an inert worker and returns the SHA-bound receipt.
+          </p>
+          <div id="fr-summary" style="margin-bottom: 10px;"></div>
+          <pre id="fr-output" class="terminal">Click "Run Witness" to execute runtime/scripts/first_run.py…</pre>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top: 16px;">
+        <div class="card-header">
+          <h2 class="card-title">3. Live Mission Preflight Capability Gate</h2>
+          <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+            <select id="pf-mission" style="padding:5px 9px; font-size:12.5px;"></select>
+            <select id="pf-runtime" style="padding:5px 9px; font-size:12.5px;">
+              <option value="posix">posix</option>
+              <option value="auto">auto</option>
+              <option value="orca">orca</option>
+              <option value="overstory">overstory</option>
+              <option value="t3code">t3code</option>
+              <option value="superset">superset</option>
+              <option value="worktrunk">worktrunk</option>
+            </select>
+            <button id="btn-run-pf" class="btn btn-primary btn-sm">Check Preflight</button>
+          </div>
+        </div>
+        <p class="muted" style="margin-top:0;">
+          Test fail-closed capability enforcement live. Try <code>pin-it</code> on <code>posix</code> (refused: requires
+          <code>cap:orca-self-audit</code>) vs <code>ship-it</code> or <code>review-it</code> on <code>posix</code> (passes).
+        </p>
+        <pre id="pf-output" class="terminal">Pick a mission + runtime and click "Check Preflight"…</pre>
+      </div>
+
+      <div class="grid-2" style="margin-top: 16px;">
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">4. Pre-Launch Negative Safety Probes (first_run.py probes)</h2>
+            <button id="btn-run-probes" class="btn btn-primary btn-sm">Run 5 Probes</button>
+          </div>
+          <p class="muted" style="margin-top:0;">
+            Verifies unsupported profiles, privilege escalations, unarmed deny hooks, malformed runtime responses, and missing capabilities all fail closed BEFORE worker launch (zero LLM spend).
+          </p>
+          <div id="probes-summary" style="margin-bottom: 10px;"></div>
+          <pre id="probes-output" class="terminal">Click "Run 5 Probes" to execute runtime/scripts/first_run.py probes…</pre>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">5. Quality-Floor Regression Guard (floor_guard.py)</h2>
+            <div style="display:flex; gap:8px; align-items:center;">
+              <input id="fg-base" type="text" value="origin/main" style="width:140px; padding:5px 8px; font-size:12px;" />
+              <button id="btn-run-fg" class="btn btn-primary btn-sm">Check Floor</button>
+            </div>
+          </div>
+          <p class="muted" style="margin-top:0;">
+            Checks the diff against the chosen base ref for silenced checkers, weakened test assertions, unfinished markers, or frozen guard-surface edits.
+          </p>
+          <div id="fg-summary" style="margin-bottom: 10px;"></div>
+          <pre id="fg-output" class="terminal">Click "Check Floor" to run runtime/scripts/floor_guard.py…</pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB: SESSIONS, SOLO REVIEW & PR CI ACTION -->
+    <section id="tab-sessions" class="tab-panel">
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">Progressive Mission State Machine (&lt;5K Tokens / Phase)</h2>
+            <span id="sess-bench-pill" class="pill pill-ok">loading benchmark…</span>
+          </div>
+          <p class="muted" style="margin-top:0;">
+            Loads only the active phase's compact brief and required playbooks via MCP instead of ~25K–35K tokens upfront, enforcing one-way human gates and receipts in code.
+          </p>
+          <div class="toolbar">
+            <select id="sess-mission" style="padding:6px 9px; font-size:12.5px;"></select>
+            <input id="sess-goal" type="text" placeholder="Bounded goal (e.g. Add GET /healthz with tests)" style="flex:1; min-width:180px; padding:6px 10px; font-size:12.5px;" />
+            <input id="sess-base" type="text" value="fleet/integration" style="width:135px; padding:6px 9px; font-size:12.5px;" />
+            <button id="btn-sess-start" class="btn btn-primary btn-sm">Start Session</button>
+          </div>
+          <div class="table-wrap" style="max-height:190px; margin-bottom:12px;">
+            <table style="table-layout:fixed;">
+              <thead>
+                <tr>
+                  <th style="width:36%;">Session ID</th>
+                  <th style="width:18%;">Mission</th>
+                  <th style="width:18%;">Phase</th>
+                  <th style="width:14%;">Status</th>
+                  <th style="width:14%;">Terminal</th>
+                </tr>
+              </thead>
+              <tbody id="sessions-tbody"></tbody>
+            </table>
+          </div>
+          <div id="session-active-box">
+            <div class="muted">Start or select a progressive session to inspect its &lt;5K-token phase packet and gates.</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">Solo-Developer Verified Review Lane &amp; PR CI Action</h2>
+            <button id="btn-run-solo" class="btn btn-primary btn-sm">Run Solo Review</button>
+          </div>
+          <p class="muted" style="margin-top:0;">
+            Runs <code>diff_scope.py</code> + <code>floor_guard.py</code>, enforces the irreversibility stop-list (<code>AUTH</code>/<code>SECURITY</code>/<code>MIGRATIONS</code> stay strictly <code>lit</code>), and emits a build-blind review packet without spoofing GitHub approvals.
+          </p>
+          <div class="toolbar">
+            <label class="muted">Base:</label>
+            <input id="solo-base" type="text" value="origin/main" style="width:135px; padding:6px 9px; font-size:12.5px;" />
+            <label class="muted">Builder:</label>
+            <select id="solo-builder" style="padding:6px 9px; font-size:12.5px;">
+              <option value="claude">claude</option>
+              <option value="codex">codex</option>
+              <option value="gemini">gemini</option>
+              <option value="opencode">opencode</option>
+            </select>
+            <button id="btn-copy-blind" class="btn btn-sm">Copy Blind Packet</button>
+          </div>
+          <div id="solo-summary" style="margin-bottom:10px;"></div>
+          <pre id="solo-output" class="terminal" style="max-height:210px;">Click "Run Solo Review" to inspect this branch against origin/main…</pre>
+
+          <div style="margin-top:14px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+              <span class="kpi-label">Drop-In Reusable PR GitHub Action (.github/actions/open-fleet-verify)</span>
+              <button id="btn-copy-ci" class="btn btn-sm">Copy Workflow YAML</button>
+            </div>
+            <pre id="ci-workflow-yaml" class="terminal" style="max-height:190px;">Loading workflow snippet…</pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 4: RUNTIME & HARNESS CERTIFICATION MATRIX -->
+    <section id="tab-runtimes" class="tab-panel">
+      <div class="card" style="margin-bottom: 16px;">
+        <div class="card-header">
+          <h2 class="card-title">Orchestrator Providers — Honest Certification Matrix</h2>
+          <span id="cert-meta" class="pill pill-info">loading…</span>
+        </div>
+        <p class="muted" style="margin-top:0;">
+          Every cell is graded strictly by retained evidence: <strong>live-witnessed</strong> requires a binding
+          <code>docs/runs/</code> witness matching the pinned version; everything else is transparently labeled
+          <code>fixture-tested</code>, <code>source-only</code>, or <code>unsupported</code>.
+        </p>
+        <div style="overflow-x:auto;">
+          <table>
+            <thead>
+              <tr>
+                <th>Provider</th>
+                <th>Upstream</th>
+                <th>Certified Ver.</th>
+                <th>Profiles</th>
+                <th>Live</th>
+                <th>Fixture</th>
+                <th>Source-Only</th>
+                <th>Unsupported</th>
+              </tr>
+            </thead>
+            <tbody id="providers-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom: 16px;">
+        <div class="card-header">
+          <h2 class="card-title">Coding-Agent Harnesses (Detected Locally + Certification Tier)</h2>
+          <button id="btn-cert-check" class="btn btn-primary btn-sm">Verify certification.py check</button>
+        </div>
+        <div id="cert-check-banner" style="margin-bottom: 10px;"></div>
+        <div style="overflow-x:auto;">
+          <table>
+            <thead>
+              <tr><th>Harness</th><th>Installed Here</th><th>Certified Version</th><th>Live</th><th>Fixture</th><th>Unsupported</th></tr>
+            </thead>
+            <tbody id="harnesses-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h2 class="card-title">Proof-Graduation Workbench (Doctrine-Only &rarr; Bound Self-Run)</h2>
+          <span id="readiness-pill" class="pill pill-warn">loading…</span>
+        </div>
+        <p class="muted" style="margin-top:0;">
+          Honest priority queue of ungraduated missions. Advancing any row requires a retained run report with a
+          <code>RUN:</code> header, unit manifest, and SHA-256 inventory verified by <code>run_report.py</code>.
+        </p>
+        <div class="table-wrap" style="max-height:280px;">
+          <table style="table-layout:fixed;">
+            <thead>
+              <tr>
+                <th style="width:140px;">Mission</th>
+                <th style="width:155px;">Category</th>
+                <th style="width:85px;">Runtime</th>
+                <th>Preflight Entry Command</th>
+              </tr>
+            </thead>
+            <tbody id="readiness-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 5: SETUP & MCP STUDIO -->
+    <section id="tab-setup" class="tab-panel">
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">60-Second Host Setup &amp; MCP Config Generator</h2>
+          </div>
+          <div class="toolbar">
+            <label class="muted">Host:</label>
+            <select id="setup-host">
+              <option value="claude">Claude Code</option>
+              <option value="codex">OpenAI Codex CLI</option>
+              <option value="gemini">Gemini CLI</option>
+              <option value="opencode">OpenCode</option>
+              <option value="antigravity">Antigravity (agy)</option>
+              <option value="cursor">Cursor</option>
+            </select>
+            <label class="muted">Runtime:</label>
+            <select id="setup-runtime">
+              <option value="auto">auto (recommended)</option>
+              <option value="posix">posix (standalone)</option>
+              <option value="orca">orca</option>
+              <option value="overstory">overstory</option>
+              <option value="t3code">t3code</option>
+              <option value="superset">superset</option>
+              <option value="worktrunk">worktrunk</option>
+            </select>
+          </div>
+
+          <div style="margin-bottom: 12px;">
+            <div class="kpi-label" style="margin-bottom:4px;">1. One-Command CLI Setup (Atomic Hook + MCP Wiring)</div>
+            <div style="display:flex; gap:8px; align-items:center;">
+              <pre id="setup-cli-cmd" class="terminal" style="flex:1;"></pre>
+              <button class="btn btn-sm" id="btn-copy-cli">Copy</button>
+            </div>
+          </div>
+
+          <div style="margin-bottom: 12px;">
+            <div class="kpi-label" style="margin-bottom:4px;">2. MCP Server Configuration (<span id="setup-mcp-path" class="mono"></span>)</div>
+            <div style="display:flex; justify-content:flex-end; margin-bottom:6px;">
+              <button class="btn btn-sm" id="btn-copy-mcp">Copy Config</button>
+            </div>
+            <pre id="setup-mcp-snippet" class="terminal"></pre>
+          </div>
+
+          <div id="setup-actions-box"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">MCP Control Plane Surface (open-fleet mcp)</h2>
+            <span id="mcp-tool-count" class="pill pill-ok">12 Tools</span>
+          </div>
+          <p class="muted" style="margin-top:0;">
+            Connect any MCP-capable coding agent via <code>open-fleet mcp</code> (JSON-RPC 2.0 stdio, zero external deps)
+            so agents call typed verification, preflight, routing, and state-inspection tools instead of loading 35K tokens of raw scripts.
+          </p>
+          <div style="max-height: 440px; overflow-y: auto;">
+            <table>
+              <thead>
+                <tr><th>MCP Tool</th><th>Purpose</th></tr>
+              </thead>
+              <tbody id="mcp-tools-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script>
+    const STATE = {
+      overview: null,
+      missions: [],
+      certification: null,
+      runs: [],
+      sessions: [],
+      sessionBenchmark: null,
+      activeSession: null,
+      readiness: null,
+      soloPacket: "",
+      ciWorkflowYaml: "",
+      selectedMission: null,
+    };
+
+    const PRESET_GOALS = [
+      "Review PR #42 against its spec for security and test gaps",
+      "Build GET /healthz with tests and stop at the promotion PR",
+      "Close every open audit issue in the backlog until zero",
+      "Harden authentication and API endpoints against injection",
+      "Kill intermittent flaky tests in CI",
+      "Migrate a database column safely with zero downtime",
+      "Document our public API with claim-checked reference guides",
+    ];
+
+    function esc(s) {
+      return String(s == null ? "" : s)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;");
+    }
+
+    function showToast(msg) {
+      const el = document.getElementById("toast");
+      el.textContent = msg;
+      el.classList.add("show");
+      setTimeout(() => el.classList.remove("show"), 2200);
+    }
+
+    async function copyText(text, label) {
+      try {
+        await navigator.clipboard.writeText(text);
+        showToast("Copied " + label);
+      } catch (_err) {
+        showToast("Copy unavailable in this browser context");
+      }
+    }
+
+    async function apiGet(url) {
+      const resp = await fetch(url);
+      return resp.json();
+    }
+
+    async function apiPost(url, payload) {
+      const resp = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload || {}),
+      });
+      return resp.json();
+    }
+
+    function pill(text, cls) {
+      return `<span class="pill pill-${esc(cls)}">${esc(text)}</span>`;
+    }
+
+    function renderOverview() {
+      const ov = STATE.overview;
+      if (!ov) return;
+      const cat = ov.catalog;
+      const doc = ov.doctor;
+      const ws = ov.workspace;
+      const rs = ws.runtime_state;
+
+      document.getElementById("hdr-version").textContent = "v" + cat.version;
+      const hEl = document.getElementById("hdr-health");
+      hEl.textContent = "doctor: " + doc.overall.toUpperCase();
+      hEl.className = "pill pill-" + doc.overall;
+      document.getElementById("hdr-sub").textContent =
+        `Catalog ${cat.mission_count} missions · ${cat.provider_count} runtimes · ${doc.platform}`;
+
+      const proven = (cat.proof_counts["external-run"] || 0) + (cat.proof_counts["self-run"] || 0);
+      const kpis = [
+        {
+          label: "Verified Missions",
+          val: `${proven} / ${cat.mission_count}`,
+          sub: `${cat.proof_counts["external-run"]} external-run · ${cat.proof_counts["self-run"]} self-run · ${cat.proof_counts["doctrine-only"]} doctrine-only`,
+        },
+        {
+          label: "Live-Witnessed Cells",
+          val: `${cat.live_witnessed_cells}`,
+          sub: `${cat.provider_count} RPI providers · ${cat.harness_count} CLI harnesses`,
+        },
+        {
+          label: "Live Fleet State",
+          val: `${rs.summary.runs} runs · ${rs.summary.tasks_total} tasks`,
+          sub: `${rs.summary.active_dispatches} active workers · ${rs.summary.open_gates} open gates · ${rs.summary.queued_merges} queued merges`,
+        },
+        {
+          label: "Governance & Safety",
+          val: `${ws.decisions.total} decisions`,
+          sub: `${cat.one_way_door_count} one-way doors · ${cat.quarantine.quarantined.length} quarantined`,
+        },
+      ];
+      document.getElementById("kpi-strip").innerHTML = kpis.map((k) => `
+        <div class="card">
+          <div class="kpi-label">${esc(k.label)}</div>
+          <div class="kpi-value">${esc(k.val)}</div>
+          <div class="kpi-sub">${esc(k.sub)}</div>
+        </div>
+      `).join("");
+
+      document.getElementById("doc-runtime-pill").textContent =
+        "auto -> " + doc.runtime.effective_auto;
+      document.getElementById("doctor-tbody").innerHTML = doc.checks.map((c) => `
+        <tr>
+          <td class="mono nowrap">${esc(c.id)}</td>
+          <td class="nowrap">${pill(c.status.toUpperCase(), c.status)}</td>
+          <td>${esc(c.detail)}</td>
+        </tr>
+      `).join("");
+
+      const nextBox = document.getElementById("doctor-next");
+      if (doc.next_actions && doc.next_actions.length) {
+        nextBox.innerHTML =
+          `<div class="kpi-label" style="margin-bottom:6px;">Recommended Next Actions</div>` +
+          `<pre class="terminal">${esc(doc.next_actions.map((s) => "$ " + s).join("\n"))}</pre>`;
+      } else {
+        nextBox.innerHTML = pill("All local prerequisites ready", "ok");
+      }
+
+      const total = Math.max(1, cat.mission_count);
+      const pExt = ((cat.proof_counts["external-run"] || 0) / total) * 100;
+      const pSelf = ((cat.proof_counts["self-run"] || 0) / total) * 100;
+      const pDoc = ((cat.proof_counts["doctrine-only"] || 0) / total) * 100;
+      document.getElementById("proof-ladder-box").innerHTML = `
+        <div class="kpi-label">Mission Proof Ladder</div>
+        <div class="ladder-bar">
+          <div class="ladder-ext" style="width:${pExt}%" title="external-run"></div>
+          <div class="ladder-self" style="width:${pSelf}%" title="self-run"></div>
+          <div class="ladder-doc" style="width:${pDoc}%" title="doctrine-only"></div>
+        </div>
+        <div style="display:flex; gap:10px; flex-wrap:wrap; font-size:12px;">
+          <span>${pill(cat.proof_counts["external-run"] + " external-run", "external-run")}</span>
+          <span>${pill(cat.proof_counts["self-run"] + " self-run", "self-run")}</span>
+          <span>${pill(cat.proof_counts["doctrine-only"] + " doctrine-only", "doctrine-only")}</span>
+        </div>
+      `;
+
+      document.getElementById("state-db-pill").textContent = rs.db_exists ? "SQLite: active" : "SQLite: idle";
+      document.getElementById("fleet-state-box").innerHTML = `
+        <div class="kv-list">
+          <div class="kv-key">state_db</div><div class="mono" style="word-break:break-all;">${esc(rs.db_path)}</div>
+          <div class="kv-key">events_log</div><div class="mono">${esc(ws.events.count)} recent (${ws.events.exists ? "present" : "none yet"})</div>
+          <div class="kv-key">egress_log</div><div class="mono">${esc(ws.egress.count)} receipts (${ws.egress.exists ? "present" : "none yet"})</div>
+          <div class="kv-key">orca_pin</div><div class="mono">${esc((cat.pins.orca || {}).version || "unknown")} (witnessed ${esc((cat.pins.orca || {}).witnessed || "—")})</div>
+        </div>
+      `;
+
+      document.getElementById("decisions-count-pill").textContent = `${ws.decisions.total} entries`;
+      document.getElementById("decisions-tbody").innerHTML = (ws.decisions.entries || []).slice(0, 20).map((d) => `
+        <tr>
+          <td class="mono dim nowrap">${esc(d.ts.slice(0, 10))}</td>
+          <td class="mono">${esc(d.id)}</td>
+          <td class="nowrap">${pill(d.class, d.class === "one-way" ? "one-way" : d.class === "taste" ? "taste" : "info")}</td>
+          <td>${esc(d.answer.slice(0, 80))}${d.answer.length > 80 ? "…" : ""}</td>
+        </tr>
+      `).join("") || `<tr><td colspan="4" class="muted">No decisions recorded yet.</td></tr>`;
+
+      const tools = ov.mcp_tools || [];
+      document.getElementById("mcp-tool-count").textContent = `${tools.length} Tools`;
+      document.getElementById("mcp-tools-tbody").innerHTML = tools.map((t) => `
+        <tr>
+          <td class="mono" style="color:var(--emerald);">${esc(t.name)}</td>
+          <td>${esc(t.description)}</td>
+        </tr>
+      `).join("");
+    }
+
+    function renderRuns() {
+      const runs = STATE.runs || [];
+      const bound = runs.filter((r) => r.binds_yes).length;
+      document.getElementById("runs-count-pill").textContent = `${bound} binding / ${runs.length} total`;
+      document.getElementById("runs-tbody").innerHTML = runs.slice(0, 25).map((r) => `
+        <tr>
+          <td class="mono dim nowrap">${esc(r.date)}</td>
+          <td class="mono nowrap">${esc(r.mission)}</td>
+          <td class="nowrap">${pill(r.ran_as, r.ran_as)}</td>
+          <td class="nowrap">${pill(r.binds_yes ? "YES" : "NO", r.binds_yes ? "ok" : "warn")}</td>
+          <td>${esc(r.outcome.slice(0, 75))}${r.outcome.length > 75 ? "…" : ""}</td>
+        </tr>
+      `).join("") || `<tr><td colspan="5" class="muted">No retained runs found.</td></tr>`;
+    }
+
+    function renderMissionsTable() {
+      const proof = document.getElementById("filter-proof").value;
+      const cat = document.getElementById("filter-category").value;
+      const filtered = STATE.missions.filter((m) =>
+        (!proof || m.proof === proof) && (!cat || m.category === cat)
+      );
+      const tbody = document.getElementById("missions-tbody");
+      tbody.innerHTML = filtered.map((m) => `
+        <tr class="clickable ${STATE.selectedMission === m.name ? "selected" : ""}" data-mission="${esc(m.name)}">
+          <td class="mono" style="font-weight:700;">${esc(m.name)}</td>
+          <td>${pill(m.proof, m.proof)}</td>
+          <td class="mono muted">${m.activation_budget_tokens ? "~" + m.activation_budget_tokens.toLocaleString() : "—"}</td>
+          <td class="muted">${esc(m.category)}</td>
+        </tr>
+      `).join("");
+      tbody.querySelectorAll("tr[data-mission]").forEach((tr) => {
+        tr.addEventListener("click", () => selectMission(tr.dataset.mission));
+      });
+    }
+
+    async function selectMission(name) {
+      STATE.selectedMission = name;
+      renderMissionsTable();
+      const box = document.getElementById("mission-detail");
+      box.innerHTML = `<div class="muted">Loading ${esc(name)}…</div>`;
+      const m = await apiGet("/api/missions/" + encodeURIComponent(name));
+      if (m.error) {
+        box.innerHTML = `<div class="muted">${esc(m.error)}</div>`;
+        return;
+      }
+      box.innerHTML = `
+        <div class="card-header">
+          <div>
+            <h3 class="card-title mono" style="font-size:16px;">${esc(m.name)}</h3>
+            <div class="muted" style="font-size:12px;">${esc(m.category)} · Autonomy ${esc(m.autonomy)} · Budget ~${(m.activation_budget_tokens || 0).toLocaleString()} tokens</div>
+          </div>
+          ${pill(m.proof, m.proof)}
+        </div>
+        <p style="margin-top:0;">${esc(m.summary)}</p>
+        <div class="kv-list" style="margin-bottom:14px;">
+          <div class="kv-key">unit</div><div>${esc(m.identity.unit)}</div>
+          <div class="kv-key">state_machine</div><div>${esc(m.identity.state_machine)}</div>
+          <div class="kv-key">convergence</div><div>${esc(m.identity.convergence)}</div>
+          <div class="kv-key">ordering</div><div>${esc(m.identity.ordering)}</div>
+          <div class="kv-key">parking</div><div>${esc(m.identity.parking)}</div>
+          <div class="kv-key">oracle</div><div>${esc(m.identity.oracle)}</div>
+          <div class="kv-key">capabilities</div><div class="mono">${esc((m.capabilities.required || []).join(", ") || "none")}</div>
+          <div class="kv-key">composes</div><div class="mono">${esc((m.composes || []).join(", "))}</div>
+        </div>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+          <span class="kpi-label">Copy-Ready Launch Prompt</span>
+          <button class="btn btn-sm" id="btn-copy-mission-prompt">Copy Prompt</button>
+        </div>
+        <pre class="terminal">${esc(m.launch_prompt || "")}</pre>
+      `;
+      document.getElementById("btn-copy-mission-prompt").addEventListener("click", () => {
+        copyText(m.launch_prompt || "", m.name + " prompt");
+      });
+    }
+
+    async function runRoute(goalText) {
+      const q = (goalText != null ? goalText : document.getElementById("route-input").value).trim();
+      const box = document.getElementById("route-result");
+      if (!q) {
+        box.innerHTML = "";
+        return;
+      }
+      document.getElementById("route-input").value = q;
+      const res = await apiPost("/api/route", { goal: q, top_k: 4 });
+      const rec = res.recommended;
+      if (!res.matches || !res.matches.length) {
+        box.innerHTML = `<div class="muted">No matching mission found.</div>`;
+        return;
+      }
+      const header = rec
+        ? `<div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:8px;">
+             <strong>Recommended:</strong>
+             <span class="mono" style="font-size:15px; color:var(--emerald); font-weight:700;">${esc(rec.mission)}</span>
+             ${pill(rec.proof, rec.proof)}
+             ${pill("score " + rec.score.toFixed(2), "ok")}
+             <button class="btn btn-sm" id="btn-inspect-rec">Inspect Contract</button>
+             <button class="btn btn-sm" id="btn-copy-rec">Copy Prompt</button>
+           </div>
+           <pre class="terminal" style="margin-bottom:10px;">${esc(rec.launch_prompt)}</pre>`
+        : `<div class="muted" style="margin-bottom:8px;">Below routing floor (${esc(res.min_evidence)}); closest candidates:</div>`;
+      const alts = res.matches.map((m) =>
+        `<span class="chip" data-pick="${esc(m.mission)}">${esc(m.mission)} (${m.score.toFixed(2)} · ${esc(m.proof)})</span>`
+      ).join("");
+      box.innerHTML = header + `<div class="chips">${alts}</div>`;
+      if (rec) {
+        document.getElementById("btn-inspect-rec").addEventListener("click", () => selectMission(rec.mission));
+        document.getElementById("btn-copy-rec").addEventListener("click", () => copyText(rec.launch_prompt, rec.mission + " prompt"));
+        selectMission(rec.mission);
+      }
+      box.querySelectorAll("[data-pick]").forEach((el) => {
+        el.addEventListener("click", () => selectMission(el.dataset.pick));
+      });
+    }
+
+    function renderCertification() {
+      const cert = STATE.certification;
+      const doc = STATE.overview && STATE.overview.doctor;
+      if (!cert) return;
+      document.getElementById("cert-meta").textContent =
+        `record v${cert.record_version} · ${cert.recorded}`;
+      document.getElementById("providers-tbody").innerHTML = cert.providers.map((p) => {
+        const c = p.cell_counts;
+        return `
+          <tr>
+            <td class="mono" style="font-weight:700;">${esc(p.name)}</td>
+            <td class="mono muted">${esc(p.upstream)}</td>
+            <td class="mono">${esc(p.certified_version)}</td>
+            <td class="mono">${esc((p.supported_profiles || []).join(", "))}</td>
+            <td>${c["live-witnessed"] ? pill(c["live-witnessed"], "live-witnessed") : '<span class="dim">0</span>'}</td>
+            <td>${c["fixture-tested"] ? pill(c["fixture-tested"], "fixture-tested") : '<span class="dim">0</span>'}</td>
+            <td>${c["source-only"] ? pill(c["source-only"], "source-only") : '<span class="dim">0</span>'}</td>
+            <td>${c["unsupported"] ? pill(c["unsupported"], "unsupported") : '<span class="dim">0</span>'}</td>
+          </tr>
+        `;
+      }).join("");
+
+      const installedMap = {};
+      if (doc && doc.harnesses) {
+        doc.harnesses.forEach((h) => { installedMap[h.name] = h.installed; });
+      }
+      document.getElementById("harnesses-tbody").innerHTML = cert.harnesses.map((h) => {
+        const c = h.cell_counts;
+        const inst = installedMap[h.name];
+        return `
+          <tr>
+            <td class="mono" style="font-weight:700;">${esc(h.name)}</td>
+            <td>${inst ? pill("installed", "ok") : '<span class="dim">not on PATH</span>'}</td>
+            <td class="mono">${esc(h.version)}</td>
+            <td>${c["live-witnessed"] ? pill(c["live-witnessed"], "live-witnessed") : '<span class="dim">0</span>'}</td>
+            <td>${c["fixture-tested"] ? pill(c["fixture-tested"], "fixture-tested") : '<span class="dim">0</span>'}</td>
+            <td>${c["unsupported"] ? pill(c["unsupported"], "unsupported") : '<span class="dim">0</span>'}</td>
+          </tr>
+        `;
+      }).join("");
+    }
+
+    async function refreshSetupPreview() {
+      const host = document.getElementById("setup-host").value;
+      const runtime = document.getElementById("setup-runtime").value;
+      const data = await apiGet(`/api/setup/preview?host=${encodeURIComponent(host)}&runtime=${encodeURIComponent(runtime)}`);
+      document.getElementById("setup-cli-cmd").textContent = data.cli_command || "";
+      document.getElementById("setup-mcp-path").textContent = (data.mcp && data.mcp.config_path) || "";
+      document.getElementById("setup-mcp-snippet").textContent = (data.mcp && data.mcp.content) || "";
+      const actions = (data.preview && data.preview.actions) || [];
+      document.getElementById("setup-actions-box").innerHTML = actions.length
+        ? `<div class="kpi-label" style="margin-bottom:4px;">Dry-Run Plan (${actions.length} operations)</div>` +
+          `<pre class="terminal" style="max-height:150px;">${esc(actions.slice(0, 8).join("\n") + (actions.length > 8 ? `\n… +${actions.length - 8} more symlinks` : ""))}</pre>`
+        : "";
+    }
+
+    function renderReadiness() {
+      const rdy = STATE.readiness;
+      if (!rdy) return;
+      document.getElementById("readiness-pill").textContent =
+        `${rdy.proven_count} proven · ${rdy.doctrine_only_count} doctrine-only`;
+      document.getElementById("readiness-tbody").innerHTML = (rdy.graduation_backlog || []).map((c) => `
+        <tr>
+          <td class="mono" style="font-weight:700;">${esc(c.mission)}</td>
+          <td class="muted">${esc(c.category)}</td>
+          <td class="mono">${pill(c.recommended_runtime, c.recommended_runtime === "posix" ? "ok" : "warn")}</td>
+          <td class="mono" style="font-size:11.5px;">${esc(c.preflight_cmd)}</td>
+        </tr>
+      `).join("");
+    }
+
+    function renderSessionsList() {
+      const bench = STATE.sessionBenchmark;
+      if (bench) {
+        const bp = document.getElementById("sess-bench-pill");
+        bp.textContent = `${bench.all_within_ceiling ? "ALL <5K" : "CHECK"} · avg ${bench.avg_reduction_pct}% saved`;
+        bp.className = "pill " + (bench.all_within_ceiling ? "pill-ok" : "pill-warn");
+      }
+      const tbody = document.getElementById("sessions-tbody");
+      tbody.innerHTML = (STATE.sessions || []).map((s) => `
+        <tr class="clickable ${STATE.activeSession && STATE.activeSession.session.session_id === s.session_id ? "selected" : ""}" data-sid="${esc(s.session_id)}">
+          <td class="mono" style="font-size:11.5px;">${esc(s.session_id)}</td>
+          <td class="mono">${esc(s.mission)}</td>
+          <td class="mono">${esc(s.current_phase)} (${s.current_phase_index + 1}/${s.total_phases})</td>
+          <td>${pill(s.status, s.status === "completed" ? "ok" : s.status === "degraded" ? "fail" : "info")}</td>
+          <td class="mono">${esc(s.terminal_state || "—")}</td>
+        </tr>
+      `).join("") || `<tr><td colspan="5" class="muted">No progressive sessions recorded yet. Start one above.</td></tr>`;
+      tbody.querySelectorAll("tr[data-sid]").forEach((tr) => {
+        tr.addEventListener("click", () => selectSession(tr.dataset.sid));
+      });
+    }
+
+    async function selectSession(sid) {
+      const data = await apiGet("/api/sessions/" + encodeURIComponent(sid));
+      if (data.error) {
+        showToast(data.error);
+        return;
+      }
+      STATE.activeSession = data;
+      renderSessionsList();
+      renderActiveSession();
+    }
+
+    function renderActiveSession() {
+      const box = document.getElementById("session-active-box");
+      if (!STATE.activeSession) return;
+      const st = STATE.activeSession.session;
+      const pkt = STATE.activeSession.packet;
+      const tb = pkt.token_budget || {};
+      const ph = pkt.phase || {};
+      const blockers = pkt.blocking_requirements || [];
+      const gateForm = (st.status === "active" && ph.requires_human_gate)
+        ? `<div style="margin-top:10px; padding:10px; border:1px solid var(--amber); border-radius:8px; background:var(--bg);">
+             <div class="kpi-label" style="margin-bottom:6px;">One-Way Human Gate Required: ${esc(ph.gate_name)}</div>
+             <div class="toolbar" style="margin:0;">
+               <input id="gate-actor" type="text" placeholder="Human name (e.g. Ravindra Kumar)" style="flex:1; min-width:140px; padding:5px 8px; font-size:12px;" />
+               <input id="gate-rationale" type="text" placeholder="Decision rationale" style="flex:1.4; min-width:160px; padding:5px 8px; font-size:12px;" />
+               <button id="btn-approve-gate" class="btn btn-sm">Approve Gate</button>
+             </div>
+           </div>`
+        : "";
+      const advanceRow = (st.status === "active")
+        ? `<div class="toolbar" style="margin-top:10px; margin-bottom:0;">
+             ${ph.next_phase === "COMPLETE"
+               ? `<input id="adv-terminal" type="text" value="${esc((st.declared_terminals && st.declared_terminals[0]) || "PROMOTION_READY")}" style="width:180px; padding:5px 8px; font-size:12px;" />`
+               : ""}
+             <button id="btn-advance-ok" class="btn btn-primary btn-sm">${ph.next_phase === "COMPLETE" ? "Close Session" : "Record Passing Receipt & Advance"}</button>
+           </div>`
+        : "";
+      box.innerHTML = `
+        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:8px;">
+          <strong class="mono">${esc(st.session_id)}</strong>
+          ${pill(`phase ${ph.index + 1}/${ph.total}: ${ph.id}`, "info")}
+          ${pill(`~${(tb.phase_tokens_est || 0).toLocaleString()} tok (${tb.reduction_pct || 0}% saved)`, tb.within_ceiling ? "ok" : "warn")}
+        </div>
+        <div class="muted" style="font-size:12.5px; margin-bottom:8px;">${esc(ph.directive || "")}</div>
+        <div style="font-size:12px; margin-bottom:8px;">
+          <strong>Playbooks loaded for this phase:</strong>
+          <span class="mono">${esc((pkt.phase_playbooks || []).map((d) => d.name).join(", ") || "none")}</span>
+        </div>
+        <div style="font-size:12px; margin-bottom:8px;">
+          <strong>Blockers:</strong> ${blockers.length ? esc(blockers.join(" · ")) : pill("Ready to advance", "ok")}
+        </div>
+        ${gateForm}
+        ${advanceRow}
+      `;
+      const approveBtn = document.getElementById("btn-approve-gate");
+      if (approveBtn) {
+        approveBtn.addEventListener("click", async () => {
+          const actor = document.getElementById("gate-actor").value.trim();
+          const rationale = document.getElementById("gate-rationale").value.trim();
+          const res = await apiPost("/api/sessions/approve", {
+            session_id: st.session_id,
+            gate: ph.gate_name,
+            actor,
+            rationale,
+          });
+          if (res.error) {
+            showToast("Gate refused: " + res.error);
+            return;
+          }
+          STATE.activeSession = { session: res.session, packet: res.packet };
+          await refreshSessions();
+          renderActiveSession();
+          showToast("Recorded human approval for " + ph.gate_name);
+        });
+      }
+      const advBtn = document.getElementById("btn-advance-ok");
+      if (advBtn) {
+        advBtn.addEventListener("click", async () => {
+          const termEl = document.getElementById("adv-terminal");
+          const res = await apiPost("/api/sessions/advance", {
+            session_id: st.session_id,
+            receipt: { ok: true, source: "mission-control-ui" },
+            terminal_state: termEl ? termEl.value.trim() : "",
+          });
+          if (res.error) {
+            showToast("Advance blocked: " + res.error);
+            return;
+          }
+          STATE.activeSession = { session: res.session, packet: res.packet };
+          await refreshSessions();
+          renderActiveSession();
+          showToast(res.closed ? "Closed session: " + res.session.terminal_state : "Advanced to " + res.to_phase);
+        });
+      }
+    }
+
+    async function refreshSessions() {
+      const resp = await apiGet("/api/sessions");
+      STATE.sessions = resp.sessions || [];
+      STATE.sessionBenchmark = resp.benchmark || null;
+      renderSessionsList();
+    }
+
+    async function loadAll() {
+      const [overview, missionsResp, cert, runsResp, sessResp, rdyResp, ciResp] = await Promise.all([
+        apiGet("/api/overview"),
+        apiGet("/api/missions"),
+        apiGet("/api/certification"),
+        apiGet("/api/runs"),
+        apiGet("/api/sessions"),
+        apiGet("/api/readiness"),
+        apiGet("/api/ci-workflow"),
+      ]);
+      STATE.overview = overview;
+      STATE.missions = missionsResp.missions || [];
+      STATE.certification = cert;
+      STATE.runs = runsResp.runs || [];
+      STATE.sessions = sessResp.sessions || [];
+      STATE.sessionBenchmark = sessResp.benchmark || null;
+      STATE.readiness = rdyResp;
+      STATE.ciWorkflowYaml = ciResp.workflow_yaml || "";
+      document.getElementById("ci-workflow-yaml").textContent = STATE.ciWorkflowYaml;
+
+      const cats = [...new Set(STATE.missions.map((m) => m.category))].sort();
+      const catSel = document.getElementById("filter-category");
+      const prevCat = catSel.value;
+      catSel.innerHTML = `<option value="">All categories</option>` +
+        cats.map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join("");
+      catSel.value = prevCat;
+
+      const pfSel = document.getElementById("pf-mission");
+      const prevPf = pfSel.value || "review-it";
+      pfSel.innerHTML = STATE.missions.map((m) =>
+        `<option value="${esc(m.name)}">${esc(m.name)} (${esc(m.proof)})</option>`
+      ).join("");
+      pfSel.value = prevPf;
+
+      const sessSel = document.getElementById("sess-mission");
+      const prevSess = sessSel.value || "ship-it";
+      sessSel.innerHTML = STATE.missions.map((m) =>
+        `<option value="${esc(m.name)}">${esc(m.name)}</option>`
+      ).join("");
+      sessSel.value = prevSess;
+
+      renderOverview();
+      renderRuns();
+      renderMissionsTable();
+      renderCertification();
+      renderReadiness();
+      renderSessionsList();
+      if (!STATE.selectedMission && STATE.missions.length) {
+        const flagship = STATE.missions.find((m) => m.name === "ship-it") || STATE.missions[0];
+        selectMission(flagship.name);
+      }
+      await refreshSetupPreview();
+    }
+
+    // Navigation tabs
+    document.querySelectorAll(".nav button").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll(".nav button").forEach((b) => b.classList.remove("active"));
+        document.querySelectorAll(".tab-panel").forEach((p) => p.classList.remove("active"));
+        btn.classList.add("active");
+        document.getElementById("tab-" + btn.dataset.tab).classList.add("active");
+      });
+    });
+
+    // Theme toggle
+    document.getElementById("btn-theme").addEventListener("click", () => {
+      const html = document.documentElement;
+      html.dataset.theme = html.dataset.theme === "dark" ? "light" : "dark";
+    });
+
+    document.getElementById("btn-refresh").addEventListener("click", async () => {
+      await loadAll();
+      showToast("Refreshed live fleet telemetry");
+    });
+
+    // Preset chips
+    document.getElementById("preset-chips").innerHTML = PRESET_GOALS.map((g) =>
+      `<button class="chip" type="button" data-goal="${esc(g)}">${esc(g)}</button>`
+    ).join("");
+    document.querySelectorAll("#preset-chips .chip").forEach((chip) => {
+      chip.addEventListener("click", () => runRoute(chip.dataset.goal));
+    });
+
+    document.getElementById("btn-route").addEventListener("click", () => runRoute());
+    document.getElementById("route-input").addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") runRoute();
+    });
+    document.getElementById("filter-proof").addEventListener("change", renderMissionsTable);
+    document.getElementById("filter-category").addEventListener("change", renderMissionsTable);
+
+    // Verification Lab actions
+    document.getElementById("btn-run-nc").addEventListener("click", async (ev) => {
+      const btn = ev.currentTarget;
+      btn.disabled = true;
+      document.getElementById("nc-output").textContent = "Running evals/demo/negative-control/run.sh…";
+      try {
+        const res = await apiPost("/api/demo/negative-control", {});
+        document.getElementById("nc-self-badge").textContent = res.self_score_green ? "GREEN (FOOLED)" : "CHECK OUTPUT";
+        document.getElementById("nc-self-badge").style.color = "var(--amber)";
+        document.getElementById("nc-verify-badge").textContent = res.verifier_caught_gamed_manifest ? "RED (CAUGHT AC-2)" : "FAILED";
+        document.getElementById("nc-verify-badge").style.color = res.verifier_caught_gamed_manifest ? "var(--emerald)" : "var(--rose)";
+        document.getElementById("nc-output").textContent = (res.stdout || "") + (res.stderr ? "\n" + res.stderr : "");
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    document.getElementById("btn-run-fr").addEventListener("click", async (ev) => {
+      const btn = ev.currentTarget;
+      const profile = document.getElementById("fr-profile").value;
+      btn.disabled = true;
+      document.getElementById("fr-output").textContent = `Running standalone posix first_run.py --profile ${profile}…`;
+      try {
+        const res = await apiPost("/api/demo/first-run", { profile });
+        const summaryEl = document.getElementById("fr-summary");
+        if (res.receipt) {
+          const r = res.receipt;
+          summaryEl.innerHTML =
+            pill("VERDICT: " + (r.verdict || "UNKNOWN"), r.verdict === "GO" ? "ok" : "fail") + " " +
+            pill("ROUTE: " + (r.route || "posix"), "info") + " " +
+            pill((r.elapsed_s != null ? r.elapsed_s + "s" : "—"), "info");
+          document.getElementById("fr-output").textContent = JSON.stringify(r, null, 2);
+        } else {
+          summaryEl.innerHTML = pill("exit " + res.returncode, res.ok ? "ok" : "fail");
+          document.getElementById("fr-output").textContent = (res.stdout || "") + (res.stderr ? "\n" + res.stderr : "");
+        }
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    document.getElementById("btn-run-pf").addEventListener("click", async (ev) => {
+      const btn = ev.currentTarget;
+      const mission = document.getElementById("pf-mission").value;
+      const runtime = document.getElementById("pf-runtime").value;
+      btn.disabled = true;
+      document.getElementById("pf-output").textContent = `Running preflight --mission ${mission} --runtime ${runtime} --mode readonly…`;
+      try {
+        const res = await apiPost("/api/preflight", { mission, runtime });
+        document.getElementById("pf-output").textContent =
+          `exit=${res.returncode}\n\n` + (res.stdout || "") + (res.stderr ? "\n" + res.stderr : "");
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    document.getElementById("btn-run-probes").addEventListener("click", async (ev) => {
+      const btn = ev.currentTarget;
+      btn.disabled = true;
+      document.getElementById("probes-output").textContent = "Running runtime/scripts/first_run.py probes --json…";
+      try {
+        const res = await apiPost("/api/readiness/probes", {});
+        document.getElementById("probes-summary").innerHTML = pill(res.ok ? "ALL 5 PROBES PASS" : "PROBE FAIL", res.ok ? "ok" : "fail");
+        document.getElementById("probes-output").textContent = res.receipt
+          ? JSON.stringify(res.receipt, null, 2)
+          : (res.stdout || "") + (res.stderr ? "\n" + res.stderr : "");
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    document.getElementById("btn-run-fg").addEventListener("click", async (ev) => {
+      const btn = ev.currentTarget;
+      const base = document.getElementById("fg-base").value.trim() || "origin/main";
+      btn.disabled = true;
+      document.getElementById("fg-output").textContent = `Running floor_guard.py --base ${base}…`;
+      try {
+        const res = await apiPost("/api/floor-check", { base });
+        document.getElementById("fg-summary").innerHTML = pill(res.ok ? "FLOOR CLEAN" : "VIOLATION", res.ok ? "ok" : "fail");
+        document.getElementById("fg-output").textContent = (res.stdout || "") + (res.stderr ? "\n" + res.stderr : "");
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    document.getElementById("btn-cert-check").addEventListener("click", async (ev) => {
+      const btn = ev.currentTarget;
+      btn.disabled = true;
+      document.getElementById("cert-check-banner").innerHTML = pill("Running certification.py check…", "info");
+      try {
+        const res = await apiPost("/api/readiness/cert-check", {});
+        document.getElementById("cert-check-banner").innerHTML =
+          pill(res.fresh ? "CERTIFICATION VALID & FRESH" : "CHECK FAILED", res.fresh ? "ok" : "fail") +
+          ` <span class="mono muted" style="font-size:12px;">${esc(res.summary || "")}</span>`;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    // Sessions & Solo Review listeners
+    document.getElementById("btn-sess-start").addEventListener("click", async (ev) => {
+      const btn = ev.currentTarget;
+      const mission = document.getElementById("sess-mission").value;
+      const goal = document.getElementById("sess-goal").value.trim() || `Run ${mission} with verified evidence`;
+      const base = document.getElementById("sess-base").value.trim();
+      btn.disabled = true;
+      try {
+        const res = await apiPost("/api/sessions", { mission, goal, base });
+        if (res.error) {
+          showToast(res.error);
+          return;
+        }
+        STATE.activeSession = res;
+        await refreshSessions();
+        renderActiveSession();
+        showToast("Started session " + res.session.session_id);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    document.getElementById("btn-run-solo").addEventListener("click", async (ev) => {
+      const btn = ev.currentTarget;
+      const base = document.getElementById("solo-base").value.trim() || "origin/main";
+      const builder = document.getElementById("solo-builder").value;
+      btn.disabled = true;
+      document.getElementById("solo-output").textContent = `Running diff_scope + floor_guard + solo-review packet against ${base}…`;
+      try {
+        const res = await apiPost("/api/solo-review", { base, builder });
+        if (res.error) {
+          document.getElementById("solo-summary").innerHTML = pill("ERROR", "fail");
+          document.getElementById("solo-output").textContent = res.error;
+          return;
+        }
+        STATE.soloPacket = res.blind_review_packet || "";
+        const lenses = (res.diff_scope && res.diff_scope.triggered_risk_lenses) || [];
+        document.getElementById("solo-summary").innerHTML =
+          pill("FLOOR: " + (res.floor_guard.ok ? "CLEAN" : "FAIL"), res.floor_guard.ok ? "ok" : "fail") + " " +
+          pill("LIGHTING: " + res.lighting.effective.toUpperCase(), res.lighting.effective === "lit" ? "warn" : "ok") + " " +
+          pill("LENSES: " + (lenses.join(", ") || "none"), lenses.length ? "info" : "ok");
+        document.getElementById("solo-output").textContent = STATE.soloPacket;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    document.getElementById("btn-copy-blind").addEventListener("click", () => {
+      if (!STATE.soloPacket) {
+        showToast("Run Solo Review first to generate the build-blind packet");
+        return;
+      }
+      copyText(STATE.soloPacket, "build-blind review packet");
+    });
+
+    document.getElementById("btn-copy-ci").addEventListener("click", () => {
+      copyText(STATE.ciWorkflowYaml, "PR verification workflow YAML");
+    });
+
+    // Setup Studio listeners
+    document.getElementById("setup-host").addEventListener("change", refreshSetupPreview);
+    document.getElementById("setup-runtime").addEventListener("change", refreshSetupPreview);
+    document.getElementById("btn-copy-cli").addEventListener("click", () => {
+      copyText(document.getElementById("setup-cli-cmd").textContent, "CLI setup command");
+    });
+    document.getElementById("btn-copy-mcp").addEventListener("click", () => {
+      copyText(document.getElementById("setup-mcp-snippet").textContent, "MCP config");
+    });
+
+    loadAll();
+  </script>
+</body>
+</html>

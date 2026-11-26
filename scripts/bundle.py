@@ -137,7 +137,7 @@ MANUAL_SUBSTITUTION_NOTE = ('Runtime invocations below already name\n'
 REQUIRED_RUNTIME = tuple(f"runtime/scripts/{name}" for name in (
     # The shared catalog grammar: proof_status.py and quarantine_check.py (preflight's quarantine
     # gate) load it beside themselves (2026-10-23 review, P1-9 / P1-10).
-    "_catalog_grammar.py",
+    "_catalog_grammar.py", "_verify_diff.py", "_verify_sig.py",
     # Process containment: first_run.py loads it beside itself, and every paid runner's marker sweep
     # and host probe live there (PR #668 review).
     "containment.py",
@@ -662,9 +662,16 @@ class _Tree:
                 _RENAME[0](fds[-1], name, fds[-1], quarantine, _RENAME[1])
             except FileNotFoundError:
                 return False
+            except OSError as err:
+                raise BundleRefused(f"--out {self.out}: cannot delete {rel} ({err.strerror})") from None
             if not self._displaced_ok(fds[-1], quarantine, claimed):
                 self._put_back(fds[-1], quarantine, name, rel, "not the file whose bytes were checked")
-            os.unlink(quarantine, dir_fd=fds[-1])
+            try:
+                os.unlink(quarantine, dir_fd=fds[-1])
+            except FileNotFoundError:
+                return True
+            except OSError as err:
+                raise BundleRefused(f"--out {self.out}: cannot unlink quarantined {rel} ({err.strerror})") from None
             for i in range(len(parts), 0, -1):  # only once empty: never a directory with content
                 try:
                     os.rmdir(parts[i - 1], dir_fd=fds[i - 1])
@@ -1066,26 +1073,40 @@ def _claim(out, planned, produced, stage, tree, record, origin=None):
     return delete, left, short, {rel: claims[rel] for rel in produced if rel in claims}, marker
 
 
-def _install(tree, stage, produced, delete, claims=None):
+def _install(tree, stage, produced, delete, claims=None, written=None, deleted=None):
     """Delete the provable stale files, then write the staged build into --out, all through
     `tree`'s directory descriptors; each delete and each overwrite acts only on the exact file
     checked (`delete`'s and `claims`' (st_dev, st_ino, sha256)), atomically (_Tree)."""
     claims = claims or {}
     for rel, claimed in delete:
         tree.unlink(rel, claimed)
+        if deleted is not None:
+            deleted.add(rel)
     for rel in sorted(produced):
         st = os.stat(stage / rel)
         tree.write(rel, (stage / rel).read_bytes(), stat.S_IMODE(st.st_mode), (st.st_atime_ns, st.st_mtime_ns),
                    claimed=claims.get(rel))
+        if written is not None:
+            written.add(rel)
 
 
-def _record(tree, produced, marker=None):
+def _record(tree, produced, marker=None, expected=None):
     """Write MARKER: every file this build wrote, with the sha256 of its bytes, read back through
-    `tree` (never through a link). Put in place atomically over only the marker the claim read
+    `tree` (never through a link). When `expected` is provided ({rel: sha256}), only files whose
+    on-disk bytes still match `expected[rel]` are recorded (prevents claiming unverified bytes
+    after a partial install). Put in place atomically over only the marker the claim read
     (`marker`), a link or a FIFO (W5-11); the pre-rename marker is removed only when it is the one
     the claim read, verified the same way."""
     marker = marker or {}
-    digests = {rel: hashlib.sha256(data).hexdigest() for rel in produced if (data := tree.read(rel)) is not None}
+    digests = {}
+    for rel in produced:
+        data = tree.read(rel)
+        if data is None:
+            continue
+        digest = hashlib.sha256(data).hexdigest()
+        if expected is not None and digest != expected.get(rel):
+            continue
+        digests[rel] = digest
     doc = {"generator": "scripts/bundle.py", "version": MARKER_VERSION, "files": sorted(digests),
            "sha256": dict(sorted(digests.items()))}
     tree.write(MARKER, (json.dumps(doc, indent=2) + "\n").encode("utf-8"), 0o644,
@@ -1139,6 +1160,8 @@ def build(out_dir, keep_record=True):
         stage = Path(staging)
         origin = {}
         result = _build_into(stage, missions, protocols, origin)
+        if result[1]:
+            return result
         produced = {path.relative_to(stage).as_posix() for path in stage.rglob("*") if path.is_file()}
         if os.path.lexists(out) and not out.is_dir():
             raise BundleRefused(f"--out {out} is not a directory")
@@ -1147,12 +1170,42 @@ def build(out_dir, keep_record=True):
         try:
             record = read_record(out)
             delete, left, short, claims, marker = _claim(out, planned, produced, stage, tree, record, origin)
+            written, deleted = set(), set()
+            install_err = None
+            record_err = None
             try:
-                _install(tree, stage, produced, delete, claims)
+                _install(tree, stage, produced, delete, claims, written=written, deleted=deleted)
+            except BaseException as err:
+                install_err = err
+                raise
             finally:
-                _record(tree, produced, marker)
+                if install_err is None:
+                    marker_targets, expected = produced, None
+                else:
+                    expected = {rel: hashlib.sha256((stage / rel).read_bytes()).hexdigest() for rel in written}
+                    for rel, claimed in delete:
+                        if rel not in deleted and rel not in expected:
+                            expected[rel] = claimed[2]
+                    for rel, claimed in claims.items():
+                        if rel not in written and rel not in expected:
+                            expected[rel] = claimed[2]
+                    marker_targets = set(expected)
+                try:
+                    _record(tree, marker_targets, marker, expected=expected)
+                except BundleRefused as err:
+                    record_err = err
+                    if install_err is not None:
+                        print(f"bundle: could not update {MARKER} after partial install ({err})", file=sys.stderr)
                 if keep_record:
-                    unkept = _keep_record(out, tree, produced, stage, record)
+                    try:
+                        unkept = _keep_record(out, tree, produced if install_err is None else written, stage, record)
+                    except BundleRefused as err:
+                        if install_err is None and record_err is None:
+                            record_err = err
+                        else:
+                            print(f"bundle: could not update build record ({err})", file=sys.stderr)
+                if install_err is None and record_err is not None:
+                    raise record_err
         finally:
             tree.close()
     if left:

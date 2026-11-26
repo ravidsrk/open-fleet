@@ -97,6 +97,7 @@ if (__name__ == "__main__" and not getattr(sys.flags, "safe_path", False) and sy
     del sys.path[0]
 
 import argparse
+import codecs
 import contextlib
 import ctypes
 import http.client
@@ -443,16 +444,44 @@ def _frames(err):
 _PARSING = threading.BoundedSemaphore(PARSERS)
 
 
+def _validate_utf8_json_bytes(body):
+    """Enforce RFC 8259 UTF-8 without BOM in bounded O(1) memory: reject UTF-8 BOM, NUL-padded
+    UTF-16/UTF-32 (which json.detect_encoding would otherwise auto-decode), and any invalid UTF-8
+    or UTF-8-encoded surrogate bytes."""
+    if body.startswith(b"\xef\xbb\xbf"):
+        return False
+    if b"\x00" in body[:4]:
+        return False
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    view = memoryview(body)
+    try:
+        for start in range(0, len(view), 65536):
+            decoder.decode(view[start:start + 65536], False)
+        decoder.decode(b"", True)
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
 def free_terms(doc):
     """Why a /v1/messages/count_tokens body cannot be forwarded, or None."""
     if not isinstance(doc, dict):
         return "the body is not a JSON object"
-    for tool in doc.get("tools") or []:
+    tools = doc.get("tools")
+    if tools is not None and not isinstance(tools, list):
+        return "tools must be a JSON array"
+    for tool in tools or []:
         kind = tool.get("type") if isinstance(tool, dict) else "malformed"
         if kind not in (None, "custom"):
             return "a server-defined or malformed tool is not the client's own: it is billed beyond the request's tokens"
     found = {"images": 0}
-    if why := content_problem(doc, found):
+    scan = [v for k, v in doc.items() if k != "tools"]
+    if tools:
+        scan.extend(
+            {k: v for k, v in tool.items() if k != "input_schema"}
+            for tool in tools if isinstance(tool, dict)
+        )
+    if why := content_problem(scan, found):
         return why
     return None
 
@@ -460,6 +489,13 @@ def free_terms(doc):
 def _parse_facts(body, free=False):
     """What the broker needs of a body, read from json.loads(body): its terms (why, mult, images),
     and its model, max_tokens and speed. Run in the parse child."""
+    if isinstance(body, (bytes, bytearray)):
+        if not _validate_utf8_json_bytes(body):
+            return {"why": "the body is not valid UTF-8 JSON", "mult": 1.0, "images": 0, "model": None,
+                    "max_tokens": None, "fast": False}
+    elif isinstance(body, str) and body.startswith("\ufeff"):
+        return {"why": "the body is not valid UTF-8 JSON", "mult": 1.0, "images": 0, "model": None,
+                "max_tokens": None, "fast": False}
     dup_key = False
     try:
         doc = json.loads(body, object_pairs_hook=_no_duplicate_keys, parse_constant=_reject_nonfinite)
@@ -656,13 +692,20 @@ def terms(doc):
     max_tokens = doc.get("max_tokens")
     if not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or not 0 < max_tokens <= MAX_TOKENS_LIMIT:
         return f"the body carries no positive integer max_tokens within {MAX_TOKENS_LIMIT}", 1.0, 0
-    for tool in doc.get("tools") or []:
+    tools = doc.get("tools")
+    if tools is not None and not isinstance(tools, list):
+        return "tools must be a JSON array", 1.0, 0
+    for tool in tools or []:
         kind = tool.get("type") if isinstance(tool, dict) else "malformed"
         if kind not in (None, "custom"):
             return "a server-defined or malformed tool is not the client's own: it is billed beyond the request's tokens", 1.0, 0
-    if not isinstance(doc.get("context_management") or {}, dict):
+    cm = doc.get("context_management")
+    if cm is not None and not isinstance(cm, dict):
         return "context_management is not an object", 1.0, 0
-    for edit in (doc.get("context_management") or {}).get("edits") or []:
+    edits = (cm or {}).get("edits")
+    if edits is not None and not isinstance(edits, list):
+        return "context_management.edits must be a JSON array", 1.0, 0
+    for edit in edits or []:
         kind = edit.get("type") if isinstance(edit, dict) else "malformed"
         if not (isinstance(kind, str) and kind.startswith("clear_")):
             return "a non-clear context edit runs inference beyond the request's tokens", 1.0, 0
@@ -719,6 +762,7 @@ class Ledger:
             raise ValueError("cap_usd must be a positive finite number")
         self.cap, self.settled, self.inflight, self.n = float(cap_usd), 0.0, {}, 0
         self.free_calls = self.free_bytes = 0
+        self._dirty_free = False
         self.dropped, self.faults, self.refused, self.written, self.catch_up = {}, {}, {}, {}, None
         self.lock = threading.Lock()
         fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
@@ -813,6 +857,7 @@ class Ledger:
         self.fh.write(json.dumps({"at": now(), **entry, **tally}, sort_keys=True, allow_nan=False) + "\n")
         self.fh.flush()
         os.fsync(self.fh.fileno())
+        self._dirty_free = False
 
     def free(self, nbytes):
         """True when one more count_tokens call of `nbytes` fits the free-call bound (W5-17): free
@@ -823,6 +868,7 @@ class Ledger:
                 return False
             self.free_calls += 1
             self.free_bytes += nbytes
+            self._dirty_free = True
             if self.free_calls % FREE_RECORD_EVERY == 0:
                 self.write({"event": "free", "calls": self.free_calls, "bytes": self.free_bytes})
             return True
@@ -850,7 +896,7 @@ class Ledger:
     def flush_tally(self):
         """Cancel any pending catch-up timer and write a final tally line immediately."""
         with self.lock:
-            pending = self.catch_up is not None
+            pending = self.catch_up is not None or self._dirty_free
             if self.catch_up is not None:
                 self.catch_up.cancel()
                 self.catch_up = None
@@ -1091,6 +1137,11 @@ class Broker(BaseHTTPRequestHandler):
                 self.fail(408, "invalid_request_error", f"the body did not arrive within {BODY_DEADLINE_S:g} s")
             return
         bodies, ticket = self.server.bodies, self.ticket
+        if not _validate_utf8_json_bytes(body):
+            bodies.give(ticket, ticket.held - len(body))
+            why = "the body is not valid UTF-8 JSON"
+            self.ledger.refuse("terms", why)
+            return self.fail(400, "invalid_request_error", why)
         # What parsing may allocate is bounded BEFORE anything parses the body, and held in the same
         # budget as its bytes: holding the body once never bounded its parse (Codex rounds 7 and 9).
         # Applies to both /v1/messages and /v1/messages/count_tokens so count_tokens is validated

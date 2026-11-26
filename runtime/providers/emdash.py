@@ -39,8 +39,17 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from ._external import _ensure_ctx_task_claimed, release_claim_on_failure
-from ._external import ExternalDispatchMixin, env_lookup, foreign_dirty_paths, preserve_worker_head, real_worktree, run_cli_text
+from ._external import (
+    ExternalDispatchMixin,
+    _ensure_ctx_task_claimed,
+    env_lookup,
+    foreign_dirty_paths,
+    preserve_worker_head,
+    real_worktree,
+    release_claim_on_failure,
+    run_cli_text,
+    without_contact_marking,
+)
 from .base import (
     ProviderError,
     RuntimeProvider,
@@ -95,7 +104,7 @@ class EmdashProvider(ExternalDispatchMixin, RuntimeProvider):
             self.env, "OPEN_FLEET_EMDASH_WORKTREE_ROOT", default=str(Path.home() / ".open-fleet" / "emdash-worktrees")
         )
         self._runner = runner or self._default_runner
-        self._git = git_runner or (lambda argv: run_cli_text(argv, self.name))
+        self._git = git_runner or (lambda argv: run_cli_text(argv, self.name, env=self.env))
         self.call_log: list[dict[str, Any]] = []
         self._seq = 0
         with self.state._connect() as conn:
@@ -121,6 +130,11 @@ class EmdashProvider(ExternalDispatchMixin, RuntimeProvider):
             payload = self._recv_exact(sock, length)
             if ftype == 0x01:  # blob frame: skip its body
                 body_len = struct.unpack(">I", self._recv_exact(sock, 4))[0]
+                if length + body_len > EMDASH_MAX_FRAME:
+                    raise ProviderError(
+                        "emdash_bad_frame",
+                        f"emdash: blob frame of {length + body_len} bytes exceeds 16 MiB",
+                    )
                 self._recv_exact(sock, body_len)
                 continue
             try:
@@ -301,11 +315,12 @@ class EmdashProvider(ExternalDispatchMixin, RuntimeProvider):
         if profile == "ro" and agent != "claude":
             raise ProviderError("unsupported_profile", f"emdash: no verified read-only extraArgs for provider {agent!r} (only claude)")
         task_prompt = self.resolve_task_prompt(task_id, prompt)
-        _ensure_ctx_task_claimed()
 
         upstream_wt = None
         if worktree in ("", "new-child", "new-top-level"):
-            upstream_wt = self.worktree_create(name=name or f"of-{task_id or uuid.uuid4().hex[:8]}", base=base)
+            _ensure_ctx_task_claimed()
+            with without_contact_marking():
+                upstream_wt = self.worktree_create(name=name or f"of-{task_id or uuid.uuid4().hex[:8]}", base=base)
             wt_path = real_worktree(upstream_wt["worktree"]["path"])
             if not wt_path:
                 raise ProviderError("worktree_unknown", "emdash: createWorktree reported a path that does not exist", upstream_wt)
@@ -313,6 +328,7 @@ class EmdashProvider(ExternalDispatchMixin, RuntimeProvider):
             wt_path = real_worktree(worktree)
             if not wt_path:
                 raise ProviderError("worktree_unknown", f"emdash: worktree {worktree!r} does not exist")
+            _ensure_ctx_task_claimed()
 
         hooks = install_worktree_hooks(wt_path, agent, profile)
         auto_approve = profile != "ro"
@@ -396,6 +412,11 @@ class EmdashProvider(ExternalDispatchMixin, RuntimeProvider):
     def terminal_send(self, *, terminal: str = "", text: str = "", enter: bool = True, **kwargs: Any) -> dict[str, Any]:
         cid = self._conversation(terminal)
         self._check_conversation_access(cid)
+        if self.state._own_worker_identity():
+            raise ProviderError(
+                "worker_forbidden",
+                f"launched worker cannot send input to emdash conversation {cid!r}; only the coordinator may",
+            )
         data = f"{text}\r" if enter else text
         raw = self._call("tuiAgents.sendInput", {"conversationId": cid, "data": data})
         return {"terminal": terminal, "sent": True, "upstream": raw}

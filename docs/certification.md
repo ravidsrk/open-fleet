@@ -34,9 +34,9 @@ every cell (`matrix [--json]`) and renders the block below (`markdown`).
 
 ## Live-witnessed results
 
-Six cells are live, all with Claude Code, all from runs that bind in the
-[run archive](runs/README.md). Two are on the Orca route, two on the posix route, and two are
-the claude harness cells the posix runs exercised. A run that binds is not enough on its own: each live
+Five cells are live, all with Claude Code, all from runs that bind in the
+[run archive](runs/README.md). One is on the Orca route (`ro`/`claude`), two are on the posix route
+(`ro`/`claude` and `rw`/`claude`), and two are the claude harness cells the posix runs exercised. A run that binds is not enough on its own: each live
 group's `witnessed.route` quotes whole lines of that run's inventoried artifacts, read at the
 run's `inventory_at`. Those lines must name the provider, the profile beside the harness, and the
 recorded versions. A group that copies another route's witness is refused (#596 review):

@@ -320,11 +320,15 @@ _DISABLING_SECURITY_OPTS = frozenset({
 })
 
 
-def _backend_findings(backend: str, doc: dict) -> list[str]:
-    """The flags a backend must carry to be a disposable sandbox rather than a host shell."""
+def _norm_values(doc: dict, keys: frozenset[str]) -> list[tuple[str, object]]:
+    """Every (raw_key, value) matching normalised `keys` across every dict in `doc`."""
+    return [(key, value) for d in _dicts(doc) for key, value in d.items() if _norm(key) in keys]
+
+
+def _host_isolation_findings(doc: dict, prefix: str = "") -> list[str]:
+    """Backend-agnostic host-exposure checks across every nested dict in `doc`."""
     issues = []
-    # Scan every nested dict in doc so an `isolation` dict can never shadow a top-level or
-    # nested `privileged` or host/container `network*` setting (#777).
+    label = f"{prefix}: " if prefix else ""
     for d in _dicts(doc):
         for key, value in d.items():
             nk = _norm(key)
@@ -334,39 +338,70 @@ def _backend_findings(backend: str, doc: dict) -> list[str]:
                 net = str(value or "").strip().lower()
                 if net == "host" or net.startswith("container:"):
                     issues.append(f"network={net!r} shares the host or another container network namespace")
+            elif nk in ("capadd", "capabilitiesadd") and _is_nonempty_collection_or_str(value):
+                issues.append(f"{label}{key} must be empty (adding capabilities breaks --cap-drop ALL)")
+            elif nk in ("pidmode", "ipcmode", "utsmode"):
+                mode = str(value or "").strip().lower()
+                if mode == "host" or mode.startswith("container:"):
+                    issues.append(f"{label}{key}={mode!r} shares the host or another container namespace")
+            elif nk == "devices" and _is_nonempty_collection_or_str(value):
+                issues.append(f"{label}devices must be empty (host device passthrough)")
+            elif nk in ("securityopt", "securityopts"):
+                opts = value if isinstance(value, (list, tuple)) else ([value] if value is not None else [])
+                for opt in opts:
+                    folded = re.sub(r"\s+", "", str(opt).strip().lower())
+                    if folded in _DISABLING_SECURITY_OPTS:
+                        issues.append(f"{label}disabling securityOpt {opt!r} is forbidden")
+    return issues
+
+
+def _envelope_isolation_findings(outer: dict) -> list[str]:
+    """Host/credential exposure findings carried inside an outer wrapper dict."""
+    issues = _host_isolation_findings(outer)
+    cred_mounts: list = []
+    for d in _dicts(outer):
+        for key, value in d.items():
+            if _norm(key) == "credentialmounts" and isinstance(value, list):
+                cred_mounts.extend(value)
+                if len(value) > 0:
+                    issues.append(f"credential_mounts={len(value)} (must be empty)")
+    for m in cred_mounts + _all_mounts(outer):
+        for reason in (_mount_exposes_credentials(m), _mount_exposes_host(m)):
+            if reason:
+                issues.append(reason)
+    return list(dict.fromkeys(issues))
+
+
+def _backend_findings(backend: str, doc: dict) -> list[str]:
+    """The flags a backend must carry to be a disposable sandbox rather than a host shell."""
+    issues = _host_isolation_findings(doc, prefix=backend if backend in DOCKER_FAMILY else "")
     if backend in DOCKER_FAMILY:
-        cap_drop = _field(doc, "capDrop", "cap_drop", "capabilitiesDrop")
-        caps = [str(c).upper() for c in cap_drop] if isinstance(cap_drop, list) else (
-            [str(cap_drop).upper()] if cap_drop else [])
-        if "ALL" not in caps:
+        cap_entries = _norm_values(doc, frozenset({"capdrop", "capabilitiesdrop"}))
+        if not cap_entries:
             issues.append(f"{backend}: capDrop must include ALL (--cap-drop ALL)")
-        if _field(doc, "noNewPrivileges", "no_new_privileges") is not True:
+        else:
+            for _k, cap_drop in cap_entries:
+                caps = [str(c).upper() for c in cap_drop] if isinstance(cap_drop, list) else (
+                    [str(cap_drop).upper()] if cap_drop else [])
+                if "ALL" not in caps:
+                    issues.append(f"{backend}: capDrop must include ALL (--cap-drop ALL)")
+        nnp_entries = _norm_values(doc, frozenset({"nonewprivileges"}))
+        if not nnp_entries or any(val is not True for _k, val in nnp_entries):
             issues.append(f"{backend}: noNewPrivileges=true required (--security-opt no-new-privileges)")
-        pids = _field(doc, "pidsLimit", "pids_limit")
-        if isinstance(pids, bool) or not isinstance(pids, int) or pids <= 0:
+        pids_entries = _norm_values(doc, frozenset({"pidslimit"}))
+        if not pids_entries or any(isinstance(v, bool) or not isinstance(v, int) or v <= 0 for _k, v in pids_entries):
             issues.append(f"{backend}: a positive pidsLimit is required (--pids-limit)")
-        for d in _dicts(doc):
-            for key, value in d.items():
-                nk = _norm(key)
-                if nk in ("capadd", "capabilitiesadd") and _is_nonempty_collection_or_str(value):
-                    issues.append(f"{backend}: {key} must be empty (adding capabilities breaks --cap-drop ALL)")
-                elif nk in ("pidmode", "ipcmode", "utsmode"):
-                    mode = str(value or "").strip().lower()
-                    if mode == "host" or mode.startswith("container:"):
-                        issues.append(f"{backend}: {key}={mode!r} shares the host or another container namespace")
-                elif nk == "devices" and _is_nonempty_collection_or_str(value):
-                    issues.append(f"{backend}: devices must be empty (host device passthrough)")
-                elif nk in ("securityopt", "securityopts"):
-                    opts = value if isinstance(value, (list, tuple)) else ([value] if value is not None else [])
-                    for opt in opts:
-                        folded = re.sub(r"\s+", "", str(opt).strip().lower())
-                        if folded in _DISABLING_SECURITY_OPTS:
-                            issues.append(f"{backend}: disabling securityOpt {opt!r} is forbidden")
     elif backend == "bwrap":
-        scope = str(_field(doc, "networkScope", "network_scope") or "").strip().lower()
-        if not scope or scope == "host" or scope.startswith("container:"):
+        net_entries = _norm_values(doc, frozenset({"networkscope"}))
+        if not net_entries:
             issues.append("bwrap: networkScope must be set and must not be host (--unshare-net)")
-        if str(_field(doc, "filesystemScope", "filesystem_scope") or "").strip().lower() != "workspace":
+        else:
+            for _k, val in net_entries:
+                scope = str(val or "").strip().lower()
+                if not scope or scope == "host" or scope.startswith("container:"):
+                    issues.append("bwrap: networkScope must be set and must not be host (--unshare-net)")
+        fs_entries = _norm_values(doc, frozenset({"filesystemscope"}))
+        if not fs_entries or any(str(val or "").strip().lower() != "workspace" for _k, val in fs_entries):
             issues.append("bwrap: filesystemScope=workspace required (read-only root, tmpfs home)")
     elif backend == "gondolin":
         mounts = _all_mounts(doc)
@@ -632,13 +667,14 @@ def _envelope_findings(parsed) -> list[str]:
     """What the envelopes around the report say against it, at EVERY wrapping level and at any
     depth inside each (Codex round 6: `{"metadata": {"ephemeral": false}, "result": <report>}`
     passed, since only the outer object's own keys were read): its `ok`, `error` or any finding,
-    and a placement claim in any spelling that is not true."""
+    any host/credential mount or isolation violation, and a placement claim in any spelling that
+    is not true."""
     out = []
     for outer in _unwrap(parsed)[1]:
-        out += findings(outer) + _contradicted_claims(outer)
+        out += findings(outer) + _contradicted_claims(outer) + _envelope_isolation_findings(outer)
     if _too_deep(parsed):
         out.append(f"the report is wrapped more than {MAX_WRAPPERS} levels deep and was not read")
-    return out
+    return list(dict.fromkeys(out))
 
 
 TOO_DEEP = ("doctor output is nested too deep to read, far more than 16 levels deep: refused, never "
@@ -737,7 +773,14 @@ def _assess(raw, recipe):
 
     envelope = _envelope_findings(parsed)
     if envelope:
-        return False, "the envelope around the doctor report contradicts it: " + ", ".join(envelope[:4]), False
+        env_isolation = [
+            item for outer in _unwrap(parsed)[1] for item in _envelope_isolation_findings(outer)
+        ]
+        return (
+            False,
+            "the envelope around the doctor report contradicts it: " + ", ".join(envelope[:4]),
+            bool(env_isolation),
+        )
     malformed = recipe_declarations(parsed)[1] if parsed is not None else []
     if malformed:
         return False, ("doctor output carries a malformed recipe field (" + "; ".join(malformed[:3])

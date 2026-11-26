@@ -1,0 +1,232 @@
+{
+  "ok": true,
+  "counts": {
+    "cli_commands": 16,
+    "mcp_tools": 19,
+    "mcp_resources": 10,
+    "action_inputs": 19,
+    "action_outputs": 5,
+    "doc_anchors": 18
+  },
+  "surface": {
+    "cli_commands": [
+      "certify",
+      "ci-check",
+      "demo",
+      "doctor",
+      "floor",
+      "mcp",
+      "missions",
+      "preflight",
+      "readiness",
+      "route",
+      "session",
+      "setup",
+      "solo-review",
+      "status",
+      "ui",
+      "verify"
+    ],
+    "mcp_tools": [
+      "fleet_certification",
+      "fleet_decisions",
+      "fleet_diff_scope",
+      "fleet_doctor",
+      "fleet_floor_check",
+      "fleet_get_mission",
+      "fleet_list_missions",
+      "fleet_preflight",
+      "fleet_readiness",
+      "fleet_route_mission",
+      "fleet_run_demo",
+      "fleet_session_advance",
+      "fleet_session_approve_gate",
+      "fleet_session_list",
+      "fleet_session_packet",
+      "fleet_session_start",
+      "fleet_solo_review",
+      "fleet_status",
+      "fleet_verify_manifest"
+    ],
+    "mcp_resources": [
+      "open-fleet://catalog/missions",
+      "open-fleet://catalog/overview",
+      "open-fleet://governance/decisions",
+      "open-fleet://readiness/report",
+      "open-fleet://runtime/capabilities",
+      "open-fleet://runtime/certification",
+      "open-fleet://runtime/pins",
+      "open-fleet://runtime/quarantine",
+      "open-fleet://sessions/list",
+      "open-fleet://state/status"
+    ],
+    "action_exists": true,
+    "action_inputs": [
+      "allow-static-nc",
+      "base-ref",
+      "contract-digest",
+      "contract-source",
+      "execute-nc",
+      "fail-on-risk-lenses",
+      "github-repo",
+      "lane",
+      "lighting",
+      "manifest",
+      "nc-command",
+      "no-gh",
+      "open-fleet-root",
+      "provenance",
+      "repo",
+      "run-diff-scope",
+      "run-floor-guard",
+      "strict-scope",
+      "unit-class"
+    ],
+    "action_outputs": [
+      "diff-scope-status",
+      "floor-guard-status",
+      "overall-ok",
+      "triggered-lenses",
+      "verify-status"
+    ]
+  },
+  "coverage": {
+    "cli_commands": {
+      "certify": "docs/cli-and-mcp.md:71",
+      "ci-check": "docs/cli-and-mcp.md:68",
+      "demo": "docs/cli-and-mcp.md:72",
+      "doctor": "docs/cli-and-mcp.md:61",
+      "floor": "docs/cli-and-mcp.md:73",
+      "mcp": "docs/cli-and-mcp.md:74",
+      "missions": "docs/cli-and-mcp.md:63",
+      "preflight": "docs/cli-and-mcp.md:73",
+      "readiness": "docs/cli-and-mcp.md:69",
+      "route": "docs/cli-and-mcp.md:65",
+      "session": "docs/cli-and-mcp.md:66",
+      "setup": "docs/cli-and-mcp.md:62",
+      "solo-review": "docs/cli-and-mcp.md:67",
+      "status": "docs/cli-and-mcp.md:70",
+      "ui": "docs/cli-and-mcp.md:75",
+      "verify": "docs/cli-and-mcp.md:73"
+    },
+    "mcp_tools": {
+      "fleet_certification": "docs/cli-and-mcp.md:112",
+      "fleet_decisions": "docs/cli-and-mcp.md:112",
+      "fleet_diff_scope": "docs/cli-and-mcp.md:112",
+      "fleet_doctor": "docs/cli-and-mcp.md:112",
+      "fleet_floor_check": "docs/cli-and-mcp.md:112",
+      "fleet_get_mission": "docs/cli-and-mcp.md:112",
+      "fleet_list_missions": "docs/cli-and-mcp.md:112",
+      "fleet_preflight": "docs/cli-and-mcp.md:112",
+      "fleet_readiness": "docs/cli-and-mcp.md:114",
+      "fleet_route_mission": "docs/cli-and-mcp.md:112",
+      "fleet_run_demo": "docs/cli-and-mcp.md:112",
+      "fleet_session_advance": "docs/cli-and-mcp.md:113",
+      "fleet_session_approve_gate": "docs/cli-and-mcp.md:113",
+      "fleet_session_list": "docs/cli-and-mcp.md:113",
+      "fleet_session_packet": "docs/cli-and-mcp.md:113",
+      "fleet_session_start": "docs/cli-and-mcp.md:113",
+      "fleet_solo_review": "docs/cli-and-mcp.md:114",
+      "fleet_status": "docs/cli-and-mcp.md:112",
+      "fleet_verify_manifest": "docs/cli-and-mcp.md:112"
+    },
+    "mcp_resources": {
+      "open-fleet://catalog/missions": "docs/cli-and-mcp.md:115",
+      "open-fleet://catalog/overview": "docs/cli-and-mcp.md:115",
+      "open-fleet://governance/decisions": "docs/cli-and-mcp.md:115",
+      "open-fleet://readiness/report": "docs/cli-and-mcp.md:115",
+      "open-fleet://runtime/capabilities": "docs/cli-and-mcp.md:115",
+      "open-fleet://runtime/certification": "docs/cli-and-mcp.md:115",
+      "open-fleet://runtime/pins": "docs/cli-and-mcp.md:115",
+      "open-fleet://runtime/quarantine": "docs/cli-and-mcp.md:115",
+      "open-fleet://sessions/list": "docs/cli-and-mcp.md:115",
+      "open-fleet://state/status": "docs/cli-and-mcp.md:115"
+    },
+    "action_outputs": {
+      "diff-scope-status": "docs/cli-and-mcp.md:92",
+      "floor-guard-status": "docs/cli-and-mcp.md:92",
+      "overall-ok": "docs/cli-and-mcp.md:92",
+      "triggered-lenses": "docs/cli-and-mcp.md:92",
+      "verify-status": "docs/cli-and-mcp.md:92"
+    }
+  },
+  "anchors": [
+    {
+      "anchor": "open_fleet/cli.py:build_parser",
+      "ok": true
+    },
+    {
+      "anchor": "open_fleet/cli.py:main",
+      "ok": true
+    },
+    {
+      "anchor": "open_fleet/catalog.py:catalog_overview",
+      "ok": true
+    },
+    {
+      "anchor": "open_fleet/catalog.py:route_intent",
+      "ok": true
+    },
+    {
+      "anchor": "open_fleet/state.py:read_workspace_status",
+      "ok": true
+    },
+    {
+      "anchor": "open_fleet/state.py:read_runtime_state",
+      "ok": true
+    },
+    {
+      "anchor": "open_fleet/mcp_server.py:OpenFleetMCPServer",
+      "ok": true
+    },
+    {
+      "anchor": "open_fleet/mcp_server.py:serve_stdio",
+      "ok": true
+    },
+    {
+      "anchor": "open_fleet/sessions.py:start_session",
+      "ok": true
+    },
+    {
+      "anchor": "open_fleet/sessions.py:approve_gate",
+      "ok": true
+    },
+    {
+      "anchor": "open_fleet/sessions.py:advance_session",
+      "ok": true
+    },
+    {
+      "anchor": "open_fleet/sessions.py:benchmark_progressive_savings",
+      "ok": true
+    },
+    {
+      "anchor": "open_fleet/solo_review.py:run_solo_review",
+      "ok": true
+    },
+    {
+      "anchor": "open_fleet/ci_action.py:run_ci_verify",
+      "ok": true
+    },
+    {
+      "anchor": "open_fleet/readiness.py:readiness_report",
+      "ok": true
+    },
+    {
+      "anchor": "open_fleet/setup.py:doctor",
+      "ok": true
+    },
+    {
+      "anchor": "open_fleet/setup.py:setup_host",
+      "ok": true
+    },
+    {
+      "anchor": "open_fleet/ui_server.py:MissionControlApp",
+      "ok": true
+    }
+  ],
+  "reachability": {
+    "README.md": true,
+    "docs/README.md": true
+  },
+  "errors": []
+}

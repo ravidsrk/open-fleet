@@ -48,9 +48,9 @@ from .base import (
     parse_json_strict,
     require_id,
 )
-from .local_state import LocalStateStore
-from ._external import release_claim_on_failure
+from .local_state import LocalStateStore, request_payload_sha256
 from ._external import (
+    _ensure_ctx_task_claimed,
     call_runner,
     foreign_dirty_paths,
     insert_dispatch,
@@ -58,9 +58,11 @@ from ._external import (
     local_worker_list,
     preserve_worker_head,
     record_fence,
+    release_claim_on_failure,
     resolve_worker_list_run,
     run_cli_text,
     show_from_row,
+    without_contact_marking,
 )
 
 # Local DAG status -> Beads built-in status (beads internal/types: open|in_progress|blocked|closed|...).
@@ -112,7 +114,8 @@ class GastownProvider(RuntimeProvider):
             )
 
     def _default_runner(self, argv: list[str], **kwargs: Any) -> str:
-        return run_cli_text(argv, self.name, timeout=int(kwargs.get("timeout", 120)))
+        run_env = kwargs.get("env") if kwargs.get("env") is not None else self.env
+        return run_cli_text(argv, self.name, timeout=int(kwargs.get("timeout", 120)), env=run_env)
 
     def _run(self, argv: list[str], **kwargs: Any) -> str:
         self.call_log.append(list(argv))
@@ -157,39 +160,60 @@ class GastownProvider(RuntimeProvider):
         retry_request: str | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        dep_beads: list[str] = []
-        for dep in deps or []:
-            bead = self.bead_for(str(dep))
-            if not bead:
-                raise ProviderError("task_not_found", f"dependency {dep!r} has no Gastown bead (create it through this provider)")
-            dep_beads.append(bead)
-        local = self.state.task_create(
-            spec=spec,
-            title=title,
-            display_name=display_name,
-            deps=deps,
-            parent=parent,
-            run=run,
-            sender=sender,
-            retry_request=retry_request,
+        eff_run = self.state._resolve_caller_run(run, default_run="default")
+        payload_sha = request_payload_sha256(
+            {
+                "spec": spec,
+                "title": title,
+                "display_name": display_name,
+                "deps": deps,
+                "parent": parent,
+                "run": eff_run,
+                "sender": sender,
+            }
         )
-        task_id = local["task"]["id"]
-        existing = self.bead_for(task_id)
-        if existing:  # idempotent retry
-            local["task"]["beadId"] = existing
-            return local
+        cached = self.state.get_or_record_request(retry_request, "task-create", payload_sha)
+        if cached:
+            return cached
+        task_id: str | None = None
         try:
+            dep_beads: list[str] = []
+            for dep in deps or []:
+                bead = self.bead_for(str(dep))
+                if not bead:
+                    raise ProviderError(
+                        "task_not_found", f"dependency {dep!r} has no Gastown bead (create it through this provider)"
+                    )
+                dep_beads.append(bead)
+            local = self.state.task_create(
+                spec=spec,
+                title=title,
+                display_name=display_name,
+                deps=deps,
+                parent=parent,
+                run=run,
+                sender=sender,
+                retry_request=None,
+            )
+            task_id = local["task"]["id"]
             bead_id, raw = self._bd_create(title or display_name or task_id, spec)
+            # Record bead immediately so a subsequent dep-add failure does not orphan it.
+            self._record_bead(task_id, bead_id)
             for dep_bead in dep_beads:
                 # `bd dep add A B`: A depends on (is blocked by) B.
                 self._run(["bd", "dep", "add", bead_id, dep_bead])
-        except ProviderError as exc:
-            self.state.task_update(task_id=task_id, status="failed", result=f"bd create failed: {exc.message}")
+            local["task"]["beadId"] = bead_id
+            local["task"]["bead"] = raw
+            self.state.save_request(retry_request, "task-create", "ready", local, payload_sha)
+            return local
+        except BaseException as exc:
+            if task_id is not None and isinstance(exc, ProviderError):
+                self.state.task_update(
+                    task_id=task_id, status="failed", result=f"bd create failed: {exc.message}", run=eff_run
+                )
+            if retry_request:
+                self.state.release_request(retry_request)
             raise
-        self._record_bead(task_id, bead_id)
-        local["task"]["beadId"] = bead_id
-        local["task"]["bead"] = raw
-        return local
 
     def task_update(
         self,
@@ -202,19 +226,38 @@ class GastownProvider(RuntimeProvider):
         retry_request: str | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        local = self.state.task_update(
-            task_id=task_id,
-            status=status,
-            result=result,
-            run=run,
-            sender=sender,
-            retry_request=retry_request,
+        eff_run = self.state._resolve_caller_run(run, default_run=None)
+        payload_sha = request_payload_sha256(
+            {
+                "task_id": task_id,
+                "status": status,
+                "result": result,
+                "run": eff_run,
+                "sender": sender,
+            }
         )
-        bead_id = self.bead_for(task_id)
-        if bead_id and status in BEAD_STATUS:
-            local["task"]["beadId"] = bead_id
-            local["task"]["bead"] = self._run_json(["bd", "update", bead_id, "--status", BEAD_STATUS[status], "--json"])
-        return local
+        cached = self.state.get_or_record_request(retry_request, "task-update", payload_sha)
+        if cached:
+            return cached
+        try:
+            local = self.state.task_update(
+                task_id=task_id,
+                status=status,
+                result=result,
+                run=run,
+                sender=sender,
+                retry_request=None,
+            )
+            bead_id = self.bead_for(task_id)
+            if bead_id and status in BEAD_STATUS:
+                local["task"]["beadId"] = bead_id
+                local["task"]["bead"] = self._run_json(["bd", "update", bead_id, "--status", BEAD_STATUS[status], "--json"])
+            self.state.save_request(retry_request, "task-update", "completed", local, payload_sha)
+            return local
+        except BaseException:
+            if retry_request:
+                self.state.release_request(retry_request)
+            raise
 
     def task_show(self, task_id: str) -> dict[str, Any]:
         bead_id = self.bead_for(task_id)
@@ -310,21 +353,23 @@ class GastownProvider(RuntimeProvider):
             raise ProviderError("missing_rig", "gastown worker-start needs a rig (--rig or OPEN_FLEET_GASTOWN_RIG)")
         task_prompt = self.resolve_task_prompt(task_id, prompt)
         ro_cmd = self._ro_alias_command(agent) if profile == "ro" else None
+        _ensure_ctx_task_claimed()
 
         # The bead description IS the assignment a polecat reads; keep it equal to the prompt.
         bead_id = self.bead_for(task_id) if task_id else None
-        if not bead_id:
-            bead_id, _ = self._bd_create(name or task_id or "open-fleet task", task_prompt)
-            if task_id:
-                self._record_bead(task_id, bead_id)
-        elif task_prompt != self.task_spec(task_id):
-            self._run_json(["bd", "update", bead_id, f"--description={task_prompt}", "--json"])
+        with without_contact_marking():
+            if not bead_id:
+                bead_id, _ = self._bd_create(name or task_id or "open-fleet task", task_prompt)
+                if task_id:
+                    self._record_bead(task_id, bead_id)
+            elif task_prompt != self.task_spec(task_id):
+                self._run_json(["bd", "update", bead_id, f"--description={task_prompt}", "--json"])
 
-        if profile == "ro":
-            agent_alias = f"{agent}-ro"
-            self._run(["gt", "config", "agent", "set", agent_alias, str(ro_cmd)])
-        else:
-            agent_alias = agent
+            if profile == "ro":
+                agent_alias = f"{agent}-ro"
+                self._run(["gt", "config", "agent", "set", agent_alias, str(ro_cmd)])
+            else:
+                agent_alias = agent
 
         sling_argv = ["gt", "sling", bead_id, str(target_rig), "--agent", agent_alias, "--no-merge"]
         if profile == "ro":

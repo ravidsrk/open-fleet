@@ -13,11 +13,16 @@ adapter contract" section is the specification.
 
 `--verify PATH` points it at another verify.py; by default it runs the one in this checkout.
 """
+import sys
+if (__name__ == "__main__" and not getattr(sys.flags, "safe_path", False) and sys.path
+        and ("os" not in sys.modules or sys.modules["os"].path.realpath(sys.path[0])
+             == sys.modules["os"].path.dirname(sys.modules["os"].path.realpath(__file__)))):
+    del sys.path[0]
+
 import argparse
 import hashlib
 import json
 import subprocess
-import sys
 from pathlib import Path
 
 CONTRACT = "vf-bench-adapter@1"
@@ -27,7 +32,7 @@ VERIFY = Path(__file__).resolve().parents[3] / "runtime" / "scripts" / "verify.p
 def verify_argv(request, verify):
     """The coordinator's out-of-band inputs back into verify.py's own flags: a key is its flag
     with dashes, `true` is a bare flag, and an absent key was never supplied."""
-    argv = [sys.executable, str(verify), "--manifest", request["manifest_path"]]
+    argv = [sys.executable, "-I", str(verify), "--manifest", request["manifest_path"]]
     for key, value in request["coordinator"].items():
         flag = "--" + key.replace("_", "-")
         if value is True:

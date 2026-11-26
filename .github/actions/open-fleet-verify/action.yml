@@ -1,0 +1,134 @@
+name: open-fleet PR Verification Gate
+description: >-
+  Run open-fleet floor_guard.py, diff_scope.py risk-lens classification, and optional
+  SHA-bound verify.py evidence verification on pull requests.
+
+inputs:
+  base-ref:
+    description: Base git ref to diff and check ancestry against (e.g. origin/main)
+    required: true
+    default: origin/main
+  repo:
+    description: Target repository directory to check
+    required: false
+    default: .
+  open-fleet-root:
+    description: Path to the open-fleet catalog root (defaults to this action's repo root)
+    required: false
+    default: ""
+  run-floor-guard:
+    description: Run runtime/scripts/floor_guard.py against base-ref
+    required: false
+    default: "true"
+  run-diff-scope:
+    description: Run runtime/scripts/diff_scope.py to classify triggered review lenses
+    required: false
+    default: "true"
+  strict-scope:
+    description: Fail when any changed path is unmatched by diff_scope.py
+    required: false
+    default: "false"
+  fail-on-risk-lenses:
+    description: Fail when any high-risk lens (SECURITY/AUTH/MIGRATIONS/PERF/A11Y) triggers
+    required: false
+    default: "false"
+  manifest:
+    description: Optional path to a unit JSON evidence manifest for verify.py
+    required: false
+    default: ""
+  contract-source:
+    description: Authoritative frozen contract source (path@ref) for verify.py
+    required: false
+    default: ""
+  contract-digest:
+    description: Authoritative sha256 digest of the frozen contract for verify.py
+    required: false
+    default: ""
+  execute-nc:
+    description: Execute the negative control in a throwaway worktree at head_sha
+    required: false
+    default: "false"
+  nc-command:
+    description: Coordinator-supplied criterion-bound negative-control command
+    required: false
+    default: ""
+  allow-static-nc:
+    description: Explicitly waive --execute-nc on an independently reviewed unit
+    required: false
+    default: "false"
+  no-gh:
+    description: Run verify.py in offline/no-gh mode
+    required: false
+    default: "false"
+  unit-class:
+    description: Unit class (mutation, report-only, planning)
+    required: false
+    default: ""
+  lighting:
+    description: Unit lighting (lit or dark-eligible)
+    required: false
+    default: ""
+  lane:
+    description: Unit lane (A, B, or 0)
+    required: false
+    default: ""
+  provenance:
+    description: Provenance lane for verify.py (e.g. ci)
+    required: false
+    default: ci
+  github-repo:
+    description: Explicit owner/name for GitHub review lookup on sound lanes
+    required: false
+    default: ""
+
+outputs:
+  overall-ok:
+    description: "'true' when all enabled gates passed, 'false' otherwise"
+    value: ${{ steps.verify.outputs.overall-ok }}
+  floor-guard-status:
+    description: pass, fail, or skipped
+    value: ${{ steps.verify.outputs.floor-guard-status }}
+  diff-scope-status:
+    description: pass, fail, or skipped
+    value: ${{ steps.verify.outputs.diff-scope-status }}
+  verify-status:
+    description: pass, fail, or skipped
+    value: ${{ steps.verify.outputs.verify-status }}
+  triggered-lenses:
+    description: Comma-separated risk review lenses triggered by the diff
+    value: ${{ steps.verify.outputs.triggered-lenses }}
+
+runs:
+  using: composite
+  steps:
+    - id: verify
+      shell: bash
+      env:
+        OF_ACTION_PATH: ${{ github.action_path }}
+        OF_ROOT_INPUT: ${{ inputs.open-fleet-root }}
+        OF_REPO: ${{ inputs.repo }}
+        OF_BASE_REF: ${{ inputs.base-ref }}
+        OF_RUN_FLOOR_GUARD: ${{ inputs.run-floor-guard }}
+        OF_RUN_DIFF_SCOPE: ${{ inputs.run-diff-scope }}
+        OF_STRICT_SCOPE: ${{ inputs.strict-scope }}
+        OF_FAIL_ON_RISK_LENSES: ${{ inputs.fail-on-risk-lenses }}
+        OF_MANIFEST: ${{ inputs.manifest }}
+        OF_CONTRACT_SOURCE: ${{ inputs.contract-source }}
+        OF_CONTRACT_DIGEST: ${{ inputs.contract-digest }}
+        OF_EXECUTE_NC: ${{ inputs.execute-nc }}
+        OF_NC_COMMAND: ${{ inputs.nc-command }}
+        OF_ALLOW_STATIC_NC: ${{ inputs.allow-static-nc }}
+        OF_NO_GH: ${{ inputs.no-gh }}
+        OF_UNIT_CLASS: ${{ inputs.unit-class }}
+        OF_LIGHTING: ${{ inputs.lighting }}
+        OF_LANE: ${{ inputs.lane }}
+        OF_PROVENANCE: ${{ inputs.provenance }}
+        OF_GITHUB_REPO: ${{ inputs.github-repo }}
+      run: |
+        set -euo pipefail
+        if [ -n "$OF_ROOT_INPUT" ]; then
+          ROOT_DIR="$OF_ROOT_INPUT"
+        else
+          ROOT_DIR="$(cd "$OF_ACTION_PATH/../../.." && pwd -P)"
+        fi
+        python3 -I "$ROOT_DIR/open_fleet/ci_action.py" --root "$ROOT_DIR" --repo "$OF_REPO"

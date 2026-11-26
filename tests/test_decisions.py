@@ -247,7 +247,9 @@ class TestSignedGrants(DecisionsBase):
 
     def setUp(self):
         super().setUp()
-        self.key = Path(self.tmp) / "human.key"
+        self._key_td = tempfile.TemporaryDirectory()
+        self.addCleanup(self._key_td.cleanup)
+        self.key = Path(self._key_td.name) / "human.key"
         self.keygen = subprocess.run(
             [sys.executable, str(DECISIONS), "grant-keygen", "--out", str(self.key)],
             capture_output=True, text=True)
@@ -314,7 +316,7 @@ class TestSignedGrants(DecisionsBase):
         # PR #546 review (P1): the first ancestor key won, so a worker could
         # pin its own key at docs/.orca and sign its own grants. Only the
         # repository-root pin may count.
-        rogue_key = Path(self.tmp) / "rogue.key"
+        rogue_key = Path(self._key_td.name) / "rogue.key"
         subprocess.run([sys.executable, str(DECISIONS), "grant-keygen",
                         "--out", str(rogue_key)], capture_output=True, text=True)
         rogue_pub = Path(str(rogue_key) + ".pub").read_text(encoding="utf-8")
@@ -1444,12 +1446,14 @@ class TestGrantPayloadBindsTsAndClassP23(PinnedLedger):
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_sign_grant_binds_and_prints_the_ts_it_signed(self):
-        key = Path(self.tmp) / "human.seed"
-        key.write_text(self.seed_bytes.hex() + "\n", encoding="utf-8")
-        signed = subprocess.run(
-            [sys.executable, str(DECISIONS), "sign-grant", "--key", str(key), "--id", "gate-p23",
-             "--answer", "approved", "--why", "deploy to production", "--task", "t-1"],
-            capture_output=True, text=True)
+        with tempfile.TemporaryDirectory() as key_td:
+            key = Path(key_td) / "human.seed"
+            key.write_text(self.seed_bytes.hex() + "\n", encoding="utf-8")
+            key.chmod(0o600)
+            signed = subprocess.run(
+                [sys.executable, str(DECISIONS), "sign-grant", "--key", str(key), "--id", "gate-p23",
+                 "--answer", "approved", "--why", "deploy to production", "--task", "t-1"],
+                capture_output=True, text=True)
         self.assertEqual(signed.returncode, 0, signed.stderr)
         stamp = re.search(r"ts=(\S+)", signed.stderr).group(1)
         r = self.append("gate-p23", "one-way", "approved", "deploy to production",
@@ -1465,12 +1469,14 @@ class TestGrantPayloadBindsTsAndClassP23(PinnedLedger):
         self.assertIn("--ts", r.stderr)
 
     def test_sign_grant_refuses_a_future_stamp(self):
-        key = Path(self.tmp) / "human.seed"
-        key.write_text(self.seed_bytes.hex() + "\n", encoding="utf-8")
-        r = subprocess.run(
-            [sys.executable, str(DECISIONS), "sign-grant", "--key", str(key), "--id", "g",
-             "--answer", "approved", "--why", "w", "--ts", "2099-01-01T00:00:00Z"],
-            capture_output=True, text=True)
+        with tempfile.TemporaryDirectory() as key_td:
+            key = Path(key_td) / "human.seed"
+            key.write_text(self.seed_bytes.hex() + "\n", encoding="utf-8")
+            key.chmod(0o600)
+            r = subprocess.run(
+                [sys.executable, str(DECISIONS), "sign-grant", "--key", str(key), "--id", "g",
+                 "--answer", "approved", "--why", "w", "--ts", "2099-01-01T00:00:00Z"],
+                capture_output=True, text=True)
         self.assertEqual(r.returncode, 1)
         self.assertEqual(r.stdout, "")
 
@@ -1693,15 +1699,17 @@ class TestSecurityHardening772(TestPinRefIsTheTrustAnchor):
         self.assertEqual(decisions.door_hits("git branch -d feature/old", doors), [])
 
     def test_grant_payload_v3_binds_human_source_against_spoofing(self):
-        seed_path = Path(self.tmp) / "human.seed"
-        seed_path.write_text(self.seed_bytes.hex() + "\n", encoding="utf-8")
-        sign = subprocess.run(
-            [sys.executable, str(DECISIONS), "sign-grant",
-             "--key", str(seed_path), "--id", "deploy-v3", "--answer", "approved",
-             "--why", "deploy to production", "--task", "t-1",
-             "--ts", "2026-09-05T00:00:00Z", "--source", "human:lia"],
-            capture_output=True, text=True, check=True,
-        )
+        with tempfile.TemporaryDirectory() as key_td:
+            seed_path = Path(key_td) / "human.seed"
+            seed_path.write_text(self.seed_bytes.hex() + "\n", encoding="utf-8")
+            seed_path.chmod(0o600)
+            sign = subprocess.run(
+                [sys.executable, str(DECISIONS), "sign-grant",
+                 "--key", str(seed_path), "--id", "deploy-v3", "--answer", "approved",
+                 "--why", "deploy to production", "--task", "t-1",
+                 "--ts", "2026-09-05T00:00:00Z", "--source", "human:lia"],
+                capture_output=True, text=True, check=True,
+            )
         sig = sign.stdout.strip()
         log = Path(self.tmp) / "docs" / "DECISIONS.md"
         log.parent.mkdir(parents=True, exist_ok=True)

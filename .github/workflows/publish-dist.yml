@@ -102,8 +102,8 @@ jobs:
           test "$(git rev-parse HEAD)" = "$cut"                # the checkout IS the tag's commit
           git merge-base --is-ancestor "$cut" origin/main      # a tag off main is not a release
           # dist tracks the newest release only: an older tag would force-push a downgraded
-          # catalog over it (PR #509 review). Version order, not date order.
-          newest="$(git tag --list 'v[0-9]*' --merged origin/main --sort=-v:refname | head -n 1)"
+          # catalog over it (PR #509 review). Version order, not date order; release tags only.
+          newest="$(git tag --list 'v[0-9]*' --merged origin/main --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
           if [ "$TAG" != "$newest" ]; then
             echo "::error::'$TAG' is not the newest release on main ($newest); dist is never downgraded by this job"
             exit 1
@@ -179,13 +179,17 @@ jobs:
           # Re-run the newest-tag rule on refs fetched NOW: a run that passed the guard before
           # a newer tag landed must not publish after the newer tag's run did.
           git fetch -q origin 'refs/tags/*:refs/tags/*' main
-          newest="$(git tag --list 'v[0-9]*' --merged origin/main --sort=-v:refname | head -n 1)"
+          newest="$(git tag --list 'v[0-9]*' --merged origin/main --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
           if [ "$TAG" != "$newest" ]; then
-            echo "::error::'$TAG' is no longer the newest release on main ($newest); not publishing"
+            echo "::error::'$TAG' is not the newest release on main ($newest); not publishing"
             exit 1
           fi
           # And never push over a newer bundle: the provenance file on dist names what is there.
-          if git fetch -q origin dist 2>/dev/null; then
+          # Probe remote dist existence with ls-remote first so a transient fetch error never skips the downgrade check.
+          ls_rc=0
+          git ls-remote --exit-code --heads origin dist >/dev/null || ls_rc=$?
+          if [ "$ls_rc" -eq 0 ]; then
+            git fetch -q origin dist
             published="$(git show FETCH_HEAD:DIST-PROVENANCE.txt 2>/dev/null \
               | sed -n 's|^Built by scripts/bundle.py from \(v[0-9][^ ]*\) at .*|\1|p' | head -n 1)"
             if [ -n "$published" ] \
@@ -193,6 +197,9 @@ jobs:
               echo "::error::dist already holds $published, newer than '$TAG'; not downgrading"
               exit 1
             fi
+          elif [ "$ls_rc" -ne 2 ]; then
+            echo "::error::could not check remote dist branch (git ls-remote exited $ls_rc); refusing to skip downgrade check"
+            exit 1
           fi
           cd "$RUNNER_TEMP/dist"   # staged, and checked, by the step above
           git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \

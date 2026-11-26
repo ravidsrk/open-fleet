@@ -78,14 +78,23 @@ def _nonempty(value, flag):
 
 
 def resolve_from(explicit, env):
-    """--from, else ORCA_TERMINAL_HANDLE. Both are the caller's own, so a disagreement is an
-    accidental mismatch caught here; agreement proves nothing (module docstring, W5-19)."""
-    ambient = env.get("ORCA_TERMINAL_HANDLE", "")
+    """--from, else OPEN_FLEET_TERMINAL_HANDLE (preferred) / ORCA_TERMINAL_HANDLE. Both are the
+    caller's own, so a disagreement is an accidental mismatch caught here; agreement proves nothing
+    (module docstring, W5-19)."""
+    of_ambient = env.get("OPEN_FLEET_TERMINAL_HANDLE", "")
+    orca_ambient = env.get("ORCA_TERMINAL_HANDLE", "")
+    if of_ambient and orca_ambient and of_ambient != orca_ambient:
+        raise Refused(
+            f"OPEN_FLEET_TERMINAL_HANDLE='{_line(of_ambient)}' disagrees with "
+            f"ORCA_TERMINAL_HANDLE='{_line(orca_ambient)}' — refusing ambiguous terminal identity"
+        )
+    ambient = of_ambient or orca_ambient
+    ambient_var = "OPEN_FLEET_TERMINAL_HANDLE" if of_ambient else "ORCA_TERMINAL_HANDLE"
     if explicit is not None:
         _nonempty(explicit, "--from")
         if ambient and explicit != ambient:
             raise Refused(f"--from '{_line(explicit)}' disagrees with "
-                          f"ORCA_TERMINAL_HANDLE='{_line(ambient)}' — passing another "
+                          f"{ambient_var}='{_line(ambient)}' — passing another "
                           f"pane's handle would speak as that worker")
         return explicit
     return ambient or None

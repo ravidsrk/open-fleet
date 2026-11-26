@@ -1,0 +1,12 @@
+{
+  "seconds": 4.6,
+  "measured": "2026-11-25: one local run of tests.test_product_cli_mcp_ui (15 tests, Python 3.12.3), x2 to the CI lane",
+  "classes": {
+    "TestCLIAndMissionControlUI": 2.2,
+    "TestCatalogAndIntentRouter": 0.2,
+    "TestMCPServer": 2.0,
+    "TestSetupAndDoctor": 0.1,
+    "TestStateReader": 0.1
+  },
+  "fixture_seconds": 0.1
+}

@@ -1,0 +1,53 @@
+# Acceptance Review — `reshape-it-2026-11-25-RV-D3`
+
+- **Unit ID:** `reshape-it-2026-11-25-RV-D3`
+- **Commit range:** `6b8c2af3968482b35ec30b892411b8b6a435f3c5..4ad16df406c6df3bb2d13f0037ec274802666b61`
+- **reviewed_sha:** `4ad16df406c6df3bb2d13f0037ec274802666b61`
+- **Spec source:** Frozen unit contract in dispatched review task (`RV-D3-AC1`, `RV-D3-AC2`)
+- **Round:** `1 of 3`
+- **Reviewer mode:** `same-vendor-fresh` (independent build-blind `research` subagent `2992df67-bfba-4871-8c30-5b63d184f1f9`, `playbooks/acceptance-review.md`)
+
+---
+
+## PART 1 — Blind expectation (recorded BEFORE inspecting the commit diff or target files)
+
+1. **Extraction location & scope:**
+   - The 7 unified-diff and hunk-binding helpers (`_diff_records`, `_iter_diff_target_paths`, `_diff_target_paths`, `_hunk_lines`, `_bind_hunks_to_change`, `_nc_paths`, `_extract_diff`) should move from `runtime/scripts/verify.py` into a new sibling module `runtime/scripts/_verify_diff.py`.
+   - To hit the exact WIDTH reduction `91 -> 84` (`-7`, measured by `grep -cE '^(def |class |async def |[A-Z_]+ =)' runtime/scripts/verify.py`), `verify.py` must remove all 7 top-level `def` declarations without introducing any new top-level `def`/`class`/`UPPER_CASE =` binding.
+2. **Expected `importlib` loading & mock-seam shape:**
+   - `verify.py` must load `_verify_diff.py` by anchored sibling path (`Path(__file__).resolve().parent / "_verify_diff.py"`) via `spec_from_file_location` / `module_from_spec` / `exec_module`, without `sys.path` edits or relative package imports.
+   - Any extracted helper calling back into `verify.py` globals must resolve those dependencies dynamically so `mock.patch.object(verify, ...)` continues to intercept calls seamlessly.
+3. **Toolchain & bundle registration points:**
+   - `_verify_diff.py` must be added to all 4 toolchain/bundle allowlists (`verify.py`, `run_report.py`, `dispatch-sign.py`, `scripts/bundle.py`) plus parity tests (`tests/test_run_report.py`).
+   - `tests/test_reshape_width_verify.py` must lower `PINNED_WIDTH` to `84`; `tests/test_reshape_net_verify_diff.py` must remain untouched and green.
+4. **Blind confidence:** `0.85` (High).
+
+---
+
+## PART 2 — Three-axis judgment (isolated, no cross-rerank)
+
+### AXIS 1 — Standards
+**Axis verdict:** PASS (0 Critical, 0 Required, 3 Nit, 1 FYI)
+- W3-01 & `importlib` loading conformant: `_verify_diff.py` imports only `re`/`shlex` (`:8-9`), loaded by anchored path after W3-01 guard (`verify.py:3128-3133`), bound dynamically via `_verify_diff.bind(globals())`. `tests.test_entrypoint_guard` (7/7), `SiblingNamedLikeTheStdlibNeverLoads`, and `ruff check` pass.
+- Deletion test PASS: `_verify_diff.py` (223 lines) hides 4 internal helpers (`_diff_records`, `_iter_diff_target_paths`, `_hunk_lines`, `_nc_paths`) and shrinks `verify.py` by 7 top-level `def`s and 216 lines.
+- Non-blocking Nits: comment adjacent to `_verify_diff.py` in `scripts/bundle.py:138-140`; RV-D3 note inline rather than docstring in `tests/test_reshape_width_verify.py:2,44-47`; internal `_verify_diff.*` calls at 6 sites in `verify.py`.
+
+### AXIS 2 — Spec fidelity (`RV-D3-AC1` & `RV-D3-AC2`)
+**Axis verdict:** PASS (0 Critical, 0 Required, 0 Nit, 1 FYI)
+- `RV-D3-AC1` PASS: all 7 helpers moved verbatim + DI parameters (`resolve`, `git`, `hex40_re`), `bind(globals())` preserves `mock.patch.object(verify, "_git", ...)` and custom `spec_from_file_location` loads, RV-C3 net untouched and 6/6 green.
+- `RV-D3-AC2` PASS: WIDTH verified `91 -> 84`; registered in `verify.py:4357`, `run_report.py:587`, `dispatch-sign.py:180`, `scripts/bundle.py:140`, `tests/test_run_report.py:1917`; `PINNED_WIDTH = 84` at `tests/test_reshape_width_verify.py:49`.
+
+### AXIS 3 — Test-adequacy
+**Axis verdict:** PASS (0 Critical, 0 Required, 1 Nit, 1 FYI)
+- Independent mutation probes against `tests/test_reshape_net_verify_diff.py`: M3a (`_verify_diff.py:69`) KILLED, M3b (`_verify_diff.py:163`) KILLED, truncated-hunk tail (`:42-43`) KILLED, no-header fallback (`:196-197`) KILLED, 40-hex SHA guard (`:144`) KILLED.
+- Width ratchet (`tests/test_reshape_width_verify.py:48-64,81-87`) and toolchain parity (`test_run_report.py:1917-1932`, `test_dispatch_sign.py:473`) pass (138 targeted tests, 0 failures).
+
+---
+
+## Verdict
+
+- **Verdict:** **GO**
+- **reviewed_sha:** `4ad16df406c6df3bb2d13f0037ec274802666b61`
+- **Round:** `1 of 3`
+
+`4ad16df4` cleanly satisfies `RV-D3-AC1` and `RV-D3-AC2` with 0 Critical and 0 Required findings across all three isolated axes.

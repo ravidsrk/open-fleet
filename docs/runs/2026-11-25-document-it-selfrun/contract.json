@@ -1,0 +1,21 @@
+{
+  "mission": "document-it",
+  "run": "2026-11-25 self-run (DOC-1 open_fleet product-surface extraction and doc-anchored rename-to-RED coverage)",
+  "criterion_ids": ["DOC-1-AC1", "DOC-1-AC2"],
+  "criteria": [
+    {
+      "id": "DOC-1-AC1",
+      "text": "Provide a machine-derivable public-surface extractor (scripts/extract_product_surface.py) that parses open_fleet CLI commands, MCP tools, MCP resources, GitHub Action outputs, and doc-embedded file:symbol anchors directly from live code and docs/cli-and-mcp.md (no hand-copied lists), verifies 100% coverage (reference table scoped, fail-closed on missing files/empty surfaces) plus one-hop Markdown link reachability from README.md and docs/README.md."
+    },
+    {
+      "id": "DOC-1-AC2",
+      "text": "Provide executable negative controls in tests/test_product_surface_and_wheel.py proving that renaming a doc-anchored production symbol, adding a bogus doc anchor, dropping documented entities, breaking Markdown links, or deleting required files turns the claim check RED while clean head passes, and wire scripts/extract_product_surface.py --check into tests/test_entrypoint_guard.py, scripts/check.py, .github/workflows/validate.yml, and .github/workflows/product-package.yml."
+    }
+  ],
+  "frozen_at": "2026-11-25T16:30:00Z",
+  "dispatch": {
+    "lighting": "dark-eligible",
+    "lane": "A",
+    "why": "Machine-derived documentation surface extractor and doc-embedded AST anchor gate with executable negative controls; zero runtime behavioral mutation."
+  }
+}

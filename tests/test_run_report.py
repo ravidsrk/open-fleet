@@ -1914,7 +1914,7 @@ class TranscriptBindsTheVerifierToolchain(SignedKeyFixture):
         # are pinned here to one literal, and the literal to what the scripts actually load by
         # path (transitively), so a drop from EITHER side — or a new by-path sibling left out of
         # either — is RED, and the fixture above can no longer inherit a shrunken set.
-        expected = ("verify.py", "_verify_sig.py", "diff_scope.py", "ed25519.py", "dispatch-sign.py",
+        expected = ("verify.py", "_verify_sig.py", "_verify_diff.py", "diff_scope.py", "ed25519.py", "dispatch-sign.py",
                     "inventory.py", "gitexec.py")
         self.assertEqual(tuple(run_report.TOOLCHAIN_FILES), expected)
         vspec = importlib.util.spec_from_file_location("verify_for_parity", ROOT / "runtime" / "scripts" / "verify.py")

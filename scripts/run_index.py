@@ -432,7 +432,27 @@ def check_bindings(root=ROOT, rows=None):
         if err is not None:
             errors.append(f"{where}: binds claims 'yes', but {rel} fails run_report: {err}")
             continue
-        bind_errs = rr.check_report(rel, fields["mission"], fields["tier"], root=root_path)
+        tier = fields.get("tier")
+        if tier not in ("doctrine-only", "self-run", "external-run"):
+            errors.append(f"{where}: binds claims 'yes', but {rel} declares invalid RUN tier {tier!r}")
+            continue
+        label_m = re.search(rf"\[([^\]]+)\]\({re.escape(report)}\)", r["mission"])
+        if not label_m or label_m.group(1) != fields["mission"]:
+            got_label = label_m.group(1) if label_m else r["mission"]
+            errors.append(f"{where}: binds claims 'yes', but row mission {got_label!r} disagrees with "
+                          f"{rel} RUN mission {fields['mission']!r}")
+            continue
+        ran_as = r["ran_as"]
+        if tier == "doctrine-only":
+            if ran_as != "doctrine-only" and not re.search(r"\bdoctrine-only\b", r["binds"]):
+                errors.append(f"{where}: binds claims 'yes', but row ran_as {ran_as!r} disagrees with "
+                              f"{rel} RUN tier {tier!r}")
+                continue
+        elif ran_as != tier:
+            errors.append(f"{where}: binds claims 'yes', but row ran_as {ran_as!r} disagrees with "
+                          f"{rel} RUN tier {tier!r}")
+            continue
+        bind_errs = rr.check_report(rel, fields["mission"], tier, root=root_path)
         if bind_errs:
             errors.append(f"{where}: binds claims 'yes', but {rel} fails run_report: {bind_errs[0]}")
     return errors

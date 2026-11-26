@@ -17,7 +17,8 @@ compatibility: >-
   suite must be runnable and its mutation tooling available for the characterization net. A fix
   worker playbook pack (mattpocock, addyosmani, gstack) — one router per worker.
 metadata:
-  proof: doctrine-only
+  proof: self-run
+  proof_evidence: docs/runs/2026-11-25-reshape-it-self-run.md
   autonomy: L4
   unit: one module-deepening (one interface shrink at one seam)
   state_machine: pin a characterization net → shrink the seam → prove behaviour unchanged → land

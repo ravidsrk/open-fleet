@@ -41,8 +41,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 WIDTH_RE = re.compile(r"(?:def |class |async def |[A-Z_]+ =)")
+# RV-D3 deepening (2026-11-25): moved the unified-diff & hunk-binding engine
+# (_diff_records, _diff_target_paths, _iter_diff_target_paths, _hunk_lines,
+# _bind_hunks_to_change, _nc_paths, _extract_diff) to runtime/scripts/_verify_diff.py,
+# shrinking WIDTH from 91 to 84 (8 below BASELINE_WIDTH).
 BASELINE_WIDTH = 92
-PINNED_WIDTH = 91
+PINNED_WIDTH = 84
 
 
 def interface_width(path):
@@ -74,6 +78,13 @@ class VerifyWidthPin(unittest.TestCase):
                        "STRONG_ASSERTION_RE", "_ERRORS_RE", "_FAILURES_RE"):
             self.assertFalse(hasattr(verify, detail),
                              f"implementation detail {detail} leaked back onto verify")
+        diff_engine = getattr(verify, "_verify_diff", None)
+        self.assertIsNotNone(diff_engine, "verify.py no longer loads runtime/scripts/_verify_diff.py")
+        self.assertIs(verify._extract_diff, diff_engine._extract_diff,
+                      "the _extract_diff re-export is not the diff engine's own object")
+        for detail in ("_diff_records", "_iter_diff_target_paths", "_hunk_lines", "_nc_paths"):
+            self.assertFalse(hasattr(verify, detail),
+                             f"diff implementation detail {detail} leaked back onto verify")
 
 
 if __name__ == "__main__":

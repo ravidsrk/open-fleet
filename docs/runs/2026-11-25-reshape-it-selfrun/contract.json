@@ -1,0 +1,28 @@
+{
+  "mission": "reshape-it",
+  "run": "2026-11-25 self-run (RV-D3 verify.py diff and hunk-binding deepening)",
+  "criterion_ids": ["RV-D3-AC1", "RV-D3-AC2"],
+  "criteria": [
+    {
+      "id": "RV-D3-AC1",
+      "text": "Extract unified-diff parsing and hunk-binding helpers (_diff_records, _iter_diff_target_paths, _diff_target_paths, _hunk_lines, _bind_hunks_to_change, _nc_paths, _extract_diff) from runtime/scripts/verify.py into hashed sibling runtime/scripts/_verify_diff.py behind a dynamic bind(globals()) seam, keeping tests/test_reshape_net_verify_diff.py and VF-Bench green."
+    },
+    {
+      "id": "RV-D3-AC2",
+      "text": "Shrink runtime/scripts/verify.py top-level WIDTH from 91 to 84, register _verify_diff.py in all toolchain-hash and bundle allowlists (verify.py, run_report.py, dispatch-sign.py, scripts/bundle.py), and lower PINNED_WIDTH in tests/test_reshape_width_verify.py to 84."
+    }
+  ],
+  "frozen_at": "2026-11-25T16:15:00Z",
+  "scan_before": {
+    "target": "runtime/scripts/verify.py",
+    "base_sha": "6b8c2af3968482b35ec30b892411b8b6a435f3c5",
+    "churn_90d": 156,
+    "width": 91,
+    "depth": 5228
+  },
+  "dispatch": {
+    "lighting": "dark-eligible",
+    "lane": "A",
+    "why": "Behavior-preserving module deepening behind a pre-pinned mutation-audited characterization net (RV-C3) + width ratchet + VF-Bench adversarial suite; zero public-API break; reversible commit pair."
+  }
+}

@@ -17,7 +17,8 @@ compatibility: >-
   Where the docs live in a framework (Docusaurus, MkDocs, Nextra), its build must run locally. One
   worker playbook pack per worker (matt or addy) — never two routers in one worker.
 metadata:
-  proof: doctrine-only
+  proof: self-run
+  proof_evidence: docs/runs/2026-11-25-document-it-self-run.md
   autonomy: L4
   unit: one (public-surface entity x quadrant) cell
   state_machine: extract the surface → map coverage → freeze the gap list → write the cell → bind every claim

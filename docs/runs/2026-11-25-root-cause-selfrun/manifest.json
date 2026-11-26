@@ -1,0 +1,105 @@
+{
+  "unit": "root-cause-2026-11-25-hidepid",
+  "unit_class": "planning",
+  "terminal": "DIAGNOSED-WITH-HANDOFF",
+  "base_sha": "3601423ed8a4307e23f7ecf8a2741514246f514f",
+  "head_sha": "071256452948b552e287450a419765f7a1c8b812",
+  "contract": {
+    "source": "docs/runs/2026-11-25-root-cause-selfrun/contract.json@ce5dc5ae838ada69a9b77daccf18e04537845df6",
+    "digest": "sha256:299958656074d3c6e296c4b662c29ad7bbb785b1f865923356c2281c6316602c",
+    "criterion_ids": [
+      "RC-1",
+      "RC-2",
+      "RC-3",
+      "RC-4"
+    ]
+  },
+  "criteria": [
+    {
+      "id": "RC-1",
+      "text": "Build and run a deterministic red-capable reproduction of the tests/test_spawn_worker.py parent-profile cap failure BEFORE theorizing, pasting the exact command invocation and verbatim failing output.",
+      "addressed": true
+    },
+    {
+      "id": "RC-2",
+      "text": "Perform a prior-art check, freeze 3-5 ranked falsifiable hypotheses (H1-H4), and test each hypothesis one variable at a time with pasted commands and verbatim outputs, falsifying all rivals.",
+      "addressed": true
+    },
+    {
+      "id": "RC-3",
+      "text": "Demonstrate the single surviving root cause directly against live /proc hidepid=invisible state with A/B single-variable control and verbatim source-seam quotes in diagnosis-evidence.md.",
+      "addressed": true
+    },
+    {
+      "id": "RC-4",
+      "text": "Respect diagnosis-only authority (zero production or test code modified) and emit a durable, path-free, line-number-free DIAGNOSED-WITH-HANDOFF brief conforming to playbooks/agent-brief.md that preserves W4-04 fail-closed invariants and specifies exact regression tests plus fail-closed negative controls.",
+      "addressed": true
+    }
+  ],
+  "commands": [
+    {
+      "label": "verifier",
+      "ts": "2026-11-25T17:33:47Z",
+      "cmd": "python3 runtime/scripts/verify.py --manifest docs/runs/2026-11-25-root-cause-selfrun/manifest.json --contract-source docs/runs/2026-11-25-root-cause-selfrun/contract.json@ce5dc5ae838ada69a9b77daccf18e04537845df6 --contract-digest sha256:299958656074d3c6e296c4b662c29ad7bbb785b1f865923356c2281c6316602c --unit-class planning",
+      "cmd_sha256": "1fedd9cd3a59b4c0caf249eed5e1fd511ef3a27a100196c960978152e83fcb94",
+      "exit": 0,
+      "duration_s": 4.035,
+      "commit": "50fc0d1df97647cb347cd4d1d778249c02d4ff47",
+      "wtree": "47c969bdec23f0d04bb71784f3a011789ac37b3a",
+      "artifact": "docs/runs/2026-11-25-root-cause-selfrun/verifier.txt"
+    }
+  ],
+  "negative_control": {
+    "did": "planning-class analogue (artifact verification): deterministic A/B single-variable reproduction (PR_SET_DUMPABLE=0 hidden supervisor RED exit 1 vs PID-1 parent GREEN exit 0) plus 6 literal self-contained probes falsifying H2-H4 and demonstrating H1",
+    "tool": "hand",
+    "result": "reproduction deterministically RED under hidden supervisor ancestor and GREEN without it; rivals H2-H4 falsified; single survivor H1 demonstrated at spawn_identity.py:474 -> :196",
+    "artifact": "docs/runs/2026-11-25-root-cause-selfrun/repro-red.txt",
+    "command": "python3 -m unittest tests.test_spawn_worker.TestUnknownIsNeverAbsent.test_a_response_that_does_not_parse_whole_registers_what_it_names -v"
+  },
+  "binding_audit": {
+    "coverage": "RC-1..RC-4 (4/4)",
+    "method": "A/B red-capable reproduction executed verbatim; all 6 literal commands in falsification-probes.txt independently re-executed by Round 3 blind reviewer; all source quotes verified byte-for-byte; zero production/test edits"
+  },
+  "lighting": "lit",
+  "artifacts": [
+    {
+      "path": "docs/runs/2026-11-25-root-cause-selfrun/contract.json",
+      "sha256": "299958656074d3c6e296c4b662c29ad7bbb785b1f865923356c2281c6316602c"
+    },
+    {
+      "path": "docs/runs/2026-11-25-root-cause-selfrun/diagnosis-evidence.md",
+      "sha256": "05c6cb4a552c6e12f76ea9975f616a65da833555f3a682404602497c942feba3"
+    },
+    {
+      "path": "docs/runs/2026-11-25-root-cause-selfrun/falsification-probes.txt",
+      "sha256": "6e7b122f5b3907eec473e05c263490415f8da1cde208548f73cb7f05c253f335"
+    },
+    {
+      "path": "docs/runs/2026-11-25-root-cause-selfrun/handoff-brief.md",
+      "sha256": "04355a47731080ab3d8f3de83ec7950ca681f8c5e584d82da69483c9853eea44"
+    },
+    {
+      "path": "docs/runs/2026-11-25-root-cause-selfrun/ledger.md",
+      "sha256": "aabf2e725c086be6ecf136f300479b082ef76119c0ddd6bebba824c987d34bd1"
+    },
+    {
+      "path": "docs/runs/2026-11-25-root-cause-selfrun/repro-red.txt",
+      "sha256": "7c5b1bbb96cd2f6be8e2345b254d1b1eee8dcfdc1df2fa9142f6220d5aa95d93"
+    },
+    {
+      "path": "docs/runs/2026-11-25-root-cause-selfrun/review-r1.txt",
+      "sha256": "fb85037b38c72018e482a9f750f3fd212e09215478e8f3ddc6afc981f995e047"
+    },
+    {
+      "path": "docs/runs/2026-11-25-root-cause-selfrun/review-r2.txt",
+      "sha256": "8af8756dfe22bfd3457755392e5183de1d8054842cfa845f290674080fad9aa6"
+    },
+    {
+      "path": "docs/runs/2026-11-25-root-cause-selfrun/review.txt",
+      "sha256": "2f67d7069eb88c35162e52f196c35ff15b31ebe0b9e7a5440ebd1eee814d9f2b"
+    }
+  ],
+  "reviewer_mode": "same-vendor-fresh",
+  "toolchain": "Python 3.12 on Linux (proc hidepid=invisible); git; unittest; independent build-blind research subagents (R1 NO-GO -> R2 NO-GO -> R3 GO)",
+  "claim": "DIAGNOSED-WITH-HANDOFF: root cause demonstrated at spawn_identity.py:474 -> :196 under Linux hidepid=invisible; rivals H2-H4 falsified; path-free agent-brief emitted with sound transitive shared-hidden-parent invariant and 4 fail-closed negative controls; blind review GO round 3."
+}

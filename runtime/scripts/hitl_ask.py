@@ -87,12 +87,20 @@ def _pick(flag_value, env, name):
 
 
 def resolve_from(explicit, env):
-    ambient = env.get("ORCA_TERMINAL_HANDLE", "")
+    of_ambient = env.get("OPEN_FLEET_TERMINAL_HANDLE", "")
+    orca_ambient = env.get("ORCA_TERMINAL_HANDLE", "")
+    if of_ambient and orca_ambient and of_ambient != orca_ambient:
+        raise Refused(
+            f"OPEN_FLEET_TERMINAL_HANDLE='{of_ambient}' disagrees with "
+            f"ORCA_TERMINAL_HANDLE='{orca_ambient}'"
+        )
+    ambient = of_ambient or orca_ambient
+    ambient_var = "OPEN_FLEET_TERMINAL_HANDLE" if of_ambient else "ORCA_TERMINAL_HANDLE"
     if explicit is not None:
         _nonempty(explicit, "--from")
         if ambient and explicit != ambient:
             raise Refused(f"--from '{explicit}' disagrees with "
-                          f"ORCA_TERMINAL_HANDLE='{ambient}'")
+                          f"{ambient_var}='{ambient}'")
         return explicit
     return ambient or None
 

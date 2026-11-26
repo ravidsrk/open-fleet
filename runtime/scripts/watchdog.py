@@ -79,14 +79,17 @@ if (__name__ == "__main__" and not getattr(sys.flags, "safe_path", False) and sy
     del sys.path[0]
 
 import argparse
+import contextlib
 import fcntl
 import functools
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
 import tempfile
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -119,8 +122,15 @@ def utcnow():
 
 def parse_ts(value, field):
     """ISO-8601 (Z or offset) or epoch seconds -> aware UTC datetime."""
+    if isinstance(value, bool):
+        raise ValueError(f"{field}: not a timestamp: {value!r}")
     if isinstance(value, (int, float)):
-        return datetime.fromtimestamp(value, tz=timezone.utc)
+        if not math.isfinite(value):
+            raise ValueError(f"{field}: not a finite timestamp: {value!r}")
+        try:
+            return datetime.fromtimestamp(value, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError) as exc:
+            raise ValueError(f"{field}: timestamp out of range: {value!r}") from exc
     if isinstance(value, str):
         text = value.strip()
         if text.endswith(("Z", "z")):
@@ -210,13 +220,38 @@ def load_state(path):
     return data
 
 
+_HELD_STATE_LOCKS = threading.local()
+
+
+@contextlib.contextmanager
+def state_lock(path):
+    """Hold an exclusive flock on `.{state.name}.lock` across a read-decide-write tick (re-entrant)."""
+    held = getattr(_HELD_STATE_LOCKS, "paths", None)
+    if held is None:
+        held = set()
+        _HELD_STATE_LOCKS.paths = held
+    path = Path(path)
+    lock_path = path.parent / f".{path.name}.lock"
+    key = str(lock_path.resolve())
+    if key in held:
+        yield
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        held.add(key)
+        try:
+            yield
+        finally:
+            held.discard(key)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 def save_state(path, state):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = path.parent / f".{path.name}.lock"
     payload = json.dumps(state, indent=2, sort_keys=True) + "\n"
-    with open(lock_path, "a+", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+    with state_lock(path):
         tmp_path = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -235,11 +270,8 @@ def save_state(path, state):
             tmp_path = None
         finally:
             if tmp_path is not None:
-                try:
+                with contextlib.suppress(OSError):
                     os.unlink(tmp_path)
-                except OSError:
-                    pass
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _state_db_path(env=None):
@@ -248,6 +280,10 @@ def _state_db_path(env=None):
         value = (env.get(var) or "").strip()
         if value:
             return Path(value).expanduser()
+    for var in ("OPEN_FLEET_STATE_DIR", "ORCA_FLEET_STATE_DIR"):
+        value = (env.get(var) or "").strip()
+        if value:
+            return Path(value).expanduser() / "runtime.db"
     return None
 
 
@@ -708,7 +744,7 @@ def run_tick(args, cfg, data, state, now):
         if action == "nudge":
             ok, detail = send_nudge(cfg, res["run_id"], res["worker_id"], res["dispatch_id"])
             if not ok:
-                print(f"{res['worker_id']} HUNG NUDGE-FAILED :: {detail}", file=sys.stderr)
+                print(f"{res['worker_id']} {res['classification']} NUDGE-FAILED :: {detail}", file=sys.stderr)
                 return 2
             record_nudge(
                 state,
@@ -830,7 +866,7 @@ def build_failure_handover(record, max_lines=40):
         return _sanitize_untrusted(" ".join(str(val or "").splitlines()).strip()).strip()
 
     attempt = record.get("attempt", 1)
-    if not isinstance(attempt, int) or attempt < 1:
+    if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
         raise HeartbeatError("handover: attempt must be a positive integer")
     cmd = _one_line(record.get("failing_command") or "(none)") or "(none)"
     token = _one_line(record.get("error_token") or "(none)") or "(none)"
@@ -961,24 +997,32 @@ def main(argv=None):
     except ConfigError as exc:
         print(f"watchdog: {exc}", file=sys.stderr)
         return 2
-    try:
-        data = load_heartbeats(args.heartbeats)
-        fill_waiting_input(data)
-        state = load_state(args.state)
-        now = parse_ts(args.now, "--now") if args.now else utcnow()
-    except (HeartbeatError, ValueError) as exc:
-        print(f"watchdog: {exc}", file=sys.stderr)
-        return 2
     if not args.dry_run and not cfg.get("nudge_command"):
         print("watchdog: live mode needs nudge_command in the config "
               "(a nudge the script cannot send must not be logged as sent); "
               "use --dry-run or configure the transport", file=sys.stderr)
         return 2
     try:
-        return run_tick(args, cfg, data, state, now)
-    except HeartbeatError as exc:
+        data = load_heartbeats(args.heartbeats)
+        fill_waiting_input(data)
+        now = parse_ts(args.now, "--now") if args.now else utcnow()
+    except (HeartbeatError, ValueError) as exc:
         print(f"watchdog: {exc}", file=sys.stderr)
         return 2
+    if args.dry_run:
+        try:
+            state = load_state(args.state)
+            return run_tick(args, cfg, data, state, now)
+        except (HeartbeatError, ValueError) as exc:
+            print(f"watchdog: {exc}", file=sys.stderr)
+            return 2
+    with state_lock(args.state):
+        try:
+            state = load_state(args.state)
+            return run_tick(args, cfg, data, state, now)
+        except (HeartbeatError, ValueError) as exc:
+            print(f"watchdog: {exc}", file=sys.stderr)
+            return 2
 
 
 if __name__ == "__main__":

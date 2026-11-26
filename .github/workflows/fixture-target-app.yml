@@ -10,11 +10,13 @@ on:
       - "evals/demo/target-app/**"
       - ".github/workflows/fixture-target-app.yml"
       - ".github/ci-tools.lock"  # the ruff job installs from it: a lock bump re-runs the lint
+      - "ruff.toml"
   pull_request:
     paths:
       - "evals/demo/target-app/**"
       - ".github/workflows/fixture-target-app.yml"
       - ".github/ci-tools.lock"  # the ruff job installs from it: a lock bump re-runs the lint
+      - "ruff.toml"
 
 permissions:
   contents: read
@@ -64,7 +66,9 @@ jobs:
           python3 -I -m pip install --quiet --require-hashes --only-binary :all: \
             -r .github/ci-tools.lock
           ruff --version
-      - run: ruff check evals/demo/target-app
+      - run: |
+          ruff check --config ruff.toml evals/demo/target-app
+          ruff check evals/demo/target-app
 
   migrate:
     # F3 freeze proof: boot pins 0002 while 0003 sits pending on disk.

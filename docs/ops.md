@@ -41,51 +41,39 @@ instead by the owner's disposition (#595, below).
 
 ## CI runners
 
-Since #735 (2026-10-29), #749 (2026-10-31) and #752 (2026-11-11), ten workflow jobs run on AWS
-CodeBuild-hosted GitHub Actions runners
-(`runs-on: codebuild-gha-open-fleet-${{ github.run_id }}-${{ github.run_attempt }}`), four jobs
-run on `runs-on: ubuntu-latest`, and nine jobs target `runs-on: instabox-medium`. The CodeBuild
-label names the CodeBuild project, and the run ID and attempt make each job's runner single-use.
-List all three sets with `rg -n 'runs-on:' .github/workflows`.
+Since #771 retired the AWS CodeBuild runner pilot (0 active CodeBuild jobs — the `gha-open-fleet`
+project allowed only 1 concurrent build, causing sibling jobs to fail with HTTP 400, and ran as
+root where untrusted PR `pytest` should not execute), fourteen workflow jobs run on
+`runs-on: ubuntu-latest` and nine jobs target `runs-on: instabox-medium`. List all runner labels
+across the workflows with `rg -n 'runs-on:' .github/workflows`.
 
 | Runs on | Jobs | Why |
 |---|---|---|
-| CodeBuild (`codebuild-gha-open-fleet-…`) | `guard` (guard.yml), `bind` (bind-check.yml), `pytest` (fixture-target-app.yml), `probe` (upstream-drift.yml), `health` (main-health.yml), `alert` (alert-on-failure.yml), `relay` and `verdict` (verdict-check.yml), `resolve` and `gate` (verdict-gate.yml) | the pilot's single-use runner jobs |
-| `ubuntu-latest` | `from-scratch` (install.yml), `pinned-demo` (negative-control.yml), `ruff` and `migrate` (fixture-target-app.yml) | moved off CodeBuild in #752 because `gha-open-fleet` allows 1 concurrent build (sibling CodeBuild jobs queued at once got HTTP 400) |
-| `instabox-medium` | `tests`, `floor`, `checks`, `vfbench` and `vfbench_replay` (validate.yml) | switched from `ubuntu-latest` in #749; the workflow comments note they need a non-root user and system-custody git (CodeBuild runs as root, where the ownership-boundary tests would skip silently) |
-| `instabox-medium` | `gates` (validate.yml) | switched from `ubuntu-latest` in #749; combines coverage recorded on the `tests` shards (path-sensitive) |
-| `instabox-medium` | `smoke` (fixture-target-app.yml) | switched from `ubuntu-latest` in #749; pulls from Docker Hub, and CodeBuild's shared IPs hit the anonymous pull limit |
-| `instabox-medium` | `dist` (publish-dist.yml), `publish` (release.yml) | switched from `ubuntu-latest` in #749; release publishers that push the `dist` branch (with its `DIST-PROVENANCE.txt`) and create the GitHub Release |
+| `ubuntu-latest` | `guard` (guard.yml), `bind` (bind-check.yml), `pytest`, `ruff` and `migrate` (fixture-target-app.yml), `probe` (upstream-drift.yml), `health` (main-health.yml), `alert` (alert-on-failure.yml), `relay` and `verdict` (verdict-check.yml), `resolve` and `gate` (verdict-gate.yml), `from-scratch` (install.yml), `pinned-demo` (negative-control.yml) | 14 jobs on standard GitHub-hosted Linux runners (moved off CodeBuild in #752/#771 to avoid 1-concurrent-build HTTP 400 collisions and root execution for untrusted PR tests) |
+| `instabox-medium` | `tests`, `floor`, `checks`, `vfbench` and `vfbench_replay` (validate.yml) | 5 jobs switched from `ubuntu-latest` in #749; need a non-root user and system-custody git (CodeBuild ran as root, where ownership-boundary tests would skip silently) |
+| `instabox-medium` | `gates` (validate.yml) | 1 job switched from `ubuntu-latest` in #749; combines coverage recorded on the `tests` shards (path-sensitive) |
+| `instabox-medium` | `smoke` (fixture-target-app.yml) | 1 job switched from `ubuntu-latest` in #749; pulls from Docker Hub, where shared runner IPs hit the anonymous pull limit |
+| `instabox-medium` | `dist` (publish-dist.yml), `publish` (release.yml) | 2 jobs switched from `ubuntu-latest` in #749; release publishers that push the `dist` branch (with its `DIST-PROVENANCE.txt`) and create the GitHub Release |
+| AWS CodeBuild (`codebuild-gha-open-fleet-…`) | *(none — 0 active jobs, retired in #771)* | historical pilot (#735); retired because 1-concurrent-build limits caused HTTP 400 queueing failures and root execution was unsafe for untrusted PR tests |
 
-A CodeBuild job sets up Python with `actions/setup-python` and then registers its `libpython`
-with `ldconfig` (the step named "register setup-python's libpython with ldconfig (CodeBuild
-runners)"). Without that step, a subprocess that drops `LD_LIBRARY_PATH` cannot load Python.
+Several workflows still keep the harmless "register setup-python's libpython with ldconfig
+(CodeBuild runners)" step; it is a no-op where `pythonLocation/lib` is absent or already wired.
 
-**AWS prerequisites.** Both are account settings, not files in this tree. Only the owner changes
-them.
-- A CodeBuild project named `gha-open-fleet` in `us-east-1`, configured as a GitHub Actions
-  runner project for this repository. It reports its own check, "AWS CodeBuild us-east-1
-  (gha-open-fleet)", on each run.
-- An AWS CodeConnections GitHub connection that gives that project access to
-  `ravidsrk/open-fleet` and its workflow-job webhook.
-
-**Forks and contributors.** A pull request from a fork into this repository runs here, so its
-CodeBuild jobs use this project like any other PR, once a maintainer approves the run where
-the repository's fork-approval setting asks for it (it did for #741). A fork running CI in its own repository
-without the `gha-open-fleet` CodeBuild project or a runner matching `instabox-medium` will have
-jobs requesting an unprovisioned label sit in "Queued" until GitHub cancels them after 24 hours.
-To run them in a fork's own repository on standard GitHub-hosted runners, change the fork's own
-copy of each `runs-on: codebuild-gha-open-fleet-…` and `runs-on: instabox-medium` line to
+**Forks and contributors.** A pull request from a fork into this repository runs here once a
+maintainer approves the run where the repository's fork-approval setting asks for it (it did for
+#741). A fork running CI in its own repository without a runner matching `instabox-medium` (or, on
+older branches prior to #771, a `codebuild-gha-open-fleet-…` project) will have jobs requesting an
+unprovisioned label sit in "Queued" until GitHub cancels them after 24 hours. To run them in a
+fork's own repository on standard GitHub-hosted runners, change the fork's own copy of each
+`runs-on: instabox-medium` (and any historical `runs-on: codebuild-gha-open-fleet-…`) line to
 `runs-on: ubuntu-latest`. The libpython step is a no-op where it is not needed. Never send
 that edit upstream: a PR that changes `.github/workflows/` from a fork fails `verdict-gate`
 (the grader rule above).
 
-**A job stuck in "Queued".** Here it means CodeBuild never picked the job up. Check the
-project's build history in the AWS console. If no build started and the project and connection
-are healthy, the webhook was dropped: cancel the run and re-run it (`gh run cancel <id>`, then
-`gh run rerun <id>`). Re-running the same queued run does not help until it is cancelled. On
-2026-10-30, jobs queued for 18 minutes to 10 hours, and each ran normally after a cancel and
-re-run.
+**A job stuck in "Queued".** If a self-hosted `instabox-medium` job sits in "Queued" without
+starting, check runner availability; cancelling and re-running (`gh run cancel <id>`, then
+`gh run rerun <id>`) recovers dropped runner webhooks. Re-running the same queued run does not
+help until it is cancelled.
 
 ## Merge gate
 
@@ -143,15 +131,23 @@ three green with every real gate skipped, and branch protection matches them by 
 `verdict-gate` is the one required context whose code comes from `main`, so `main`'s
 `scripts/verdict_check.py` also posts `verdict-gate` failure, whatever GO the PR has, when the PR
 adds, edits, removes or renames a grader path. The one exception is the repository owner's PR
-from a branch of this repository: the PR's `author_association` is `OWNER` (or its author is the
-owner's login) and its head repository is this repository. An owner-opened PR whose head is a
-fork's branch gets no exemption, because the fork keeps push access to that branch. The grader:
+from a branch of this repository **backed by an active post-veto `OWNER` GO at the head SHA**
+(#779-3): the PR's `author_association` is `OWNER` (or its author is the owner's login), its head
+repository is this repository, and the active GO that clears the head was submitted by an `OWNER`
+(after any later veto). A non-owner `COLLABORATOR` or `MEMBER` GO on an owner-opened PR does not
+grant the exemption and fails closed if any grader path was touched (or if the compare read fails).
+An owner-opened PR whose head is a fork's branch gets no exemption either, because the fork keeps
+push access to that branch. The grader:
 - `.github/workflows/`: every job, step, `needs:` and `if:` of the three build contexts, and
   `verdict-check.yml`, which wakes this gate. The directory itself, or `.github`, changed as a
   path of its own (a file or a symlink where the directory was) counts too.
 - `.github/actions/`: a local action a workflow can `uses: ./.github/actions/…` (none today).
+- `bench/vf-bench/`: the entire verification benchmark suite and its adapters/fixtures (#770).
 - `.github/ci-tools.lock`: which build of coverage, ruff and agentskills those jobs install and
   run. A PR could lock a package it published itself.
+- Grader configuration files (#769/#770): `ruff.toml`, `.ruff.toml`, `.coveragerc`,
+  `.gitleaks.toml` and `.gitleaksignore` — in addition to the base-branch `floor_guard.py` check,
+  `verdict_check.py` treats them directly as grader paths (`GRADER_FILES`).
 - The scripts a required job names on a `run:` line, each of which is a gate (PR #718 re-attack:
   a `shard-tests.py` that ran nothing, a `gate.py` that exited 0 and a `run.sh` that printed the
   pinned transcript each kept their check green): `scripts/shard-tests.py`, `validate.py`,
@@ -170,10 +166,11 @@ fork's branch gets no exemption, because the fork keeps push access to that bran
   `python3 -`) carries `-I`, so the checkout is not on its path at all.
 
 What the gate scripts import, and the tests, are not on the list: a PR could not change any code
-otherwise. They are what the GO above has to cover. The bar's own settings (`.coveragerc`,
-`ruff.toml`, `.gitleaksignore`, `.gitleaks.toml`, the routing floor, the
-vf-bench pins) are the floor guard's frozen surface, which `guard` checks with the base branch's
-`floor_guard.py`. The gate reads what the PR's exact head changes with the compare API (base
+otherwise. They are what the GO above has to cover. The remaining floor settings (the routing
+floor, the vf-bench pins) sit on the floor guard's frozen surface, which `guard` checks with the
+base branch's `floor_guard.py`, while `.coveragerc`, `ruff.toml`, `.ruff.toml`, `.gitleaksignore`,
+`.gitleaks.toml` and `bench/vf-bench/` are now guarded by both `guard` and `verdict-gate`
+(#769/#770). The gate reads what the PR's exact head changes with the compare API (base
 branch `...` head SHA), so a head flipped between its reads cannot pass. Those reads use the
 gate job's own `GITHUB_TOKEN` (Contents and Pull requests read); the app's token posts the
 status. Every read is bounded: one that fails or gives no answer in 90 seconds is a failed read.
@@ -181,14 +178,16 @@ Only a failure before the gate knows the PR's head SHA (naming the PR, or the fi
 leaves no status, because there is no commit to post one on. After that, a list the API may have
 cut short (300 files), a head that moves while it is read, or any failed read (the reviews, the
 second read of the PR, the compare) fails closed: the gate posts `verdict-gate` failure saying
-which. The owner's own-branch PR is the one exception, for the grader read alone: it is
-recognised from the PR object the gate has already read and decided on its verdict, so a failing
-or hung compare read can never block the owner's PR (the one that would fix the gate included;
-admins are enforced on `main`). Its reviews must still be read: without them there is no
-verdict, and the gate posts failure. An outside contributor's grader change lands when the
-owner re-opens it from a branch of this repository. The rule binds only once it is on `main`:
-the gate runs `main`'s copy of the script, so the PR that adds it is still graded by the copy it
-replaces.
+which. The owner's own-branch PR is the one exception, for the grader read alone, and only when
+backed by an active post-veto `OWNER` GO at head (or when no GO exists at all, in which case the
+verdict check itself fails): a non-owner `COLLABORATOR`/`MEMBER` GO on an owner PR still requires
+a clean grader compare and fails closed (#779-3). With an active `OWNER` GO at head, the gate
+recognises the exemption from the PR object and reviews it has already read, so a failing or hung
+compare read cannot lock the owner out of fixing the gate (admins are enforced on `main`). Its
+reviews must still be read: without them there is no verdict, and the gate posts failure. An
+outside contributor's grader change lands when the owner re-opens it from a branch of this
+repository. The rule binds only once it is on `main`: the gate runs `main`'s copy of the script,
+so the PR that adds it is still graded by the copy it replaces.
 
 Activated on 2026-10-24 (#594):
 - **The app:** `open-fleet-verdict-gate` (app 5451539) was created from a manifest with Commit

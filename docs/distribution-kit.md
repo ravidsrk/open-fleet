@@ -14,8 +14,8 @@ Every listing opens with what a mission's `proof:` field means, not with a featu
 mission declares `metadata.proof:` as `doctrine-only`, `self-run` or `external-run`. A mission
 moves past `doctrine-only` only through a run report that binds: a `RUN:` header, a manifest in
 the run's own directory, and an inventory that re-hashes at the commit it names. Today the
-22-mission catalog holds 2 external-run (`ship-it`, `review-it`), 3 self-run (`clean-sweep`,
-`prove-it`, `harden-it`) and 17 doctrine-only missions. Before pasting, re-read the counts with
+22-mission catalog holds 2 external-run (`ship-it`, `review-it`), 6 self-run (`clean-sweep`,
+`prove-it`, `harden-it`, `reshape-it`, `document-it`, `root-cause`) and 14 doctrine-only missions. Before pasting, re-read the counts with
 `python3 runtime/scripts/proof_status.py`. `tests/test_docs_navigation.py` fails if a tier count
 or a catalog total on this page falls behind. Quoted stale text sits in fenced blocks, which the
 test skips.
@@ -35,7 +35,7 @@ does-it-load score that doesn't exist yet.
   the validation history, the policy holds the bundle README discloses, and the JSON entry.
 - **Blurb:**
 
-  > **proof: 2 external-run · 3 self-run · 17 doctrine-only. Each self-run and external-run
+  > **proof: 2 external-run · 6 self-run · 14 doctrine-only. Each self-run and external-run
   > mission is bound to a re-hashable run report.** open-fleet is 22 outcome-named autonomous fleets for coding agents
   > on Orca, POSIX and multi-runtime orchestrators. Each mission is one outcome with its own state
   > machine. A unit of work is done only when an independent verifier re-derives its SHA-bound
@@ -47,7 +47,7 @@ does-it-load score that doesn't exist yet.
   by email to `chekkutech@gmail.com` (or WhatsApp) and reviews each one by hand.
 - **Fields:** name, logo, install line, repository and category, from
   [distribution.md](distribution.md#claudemarketplacenet).
-- **One-line summary:** *proof: 2 external-run · 3 self-run · 17 doctrine-only — autonomous fleets
+- **One-line summary:** *proof: 2 external-run · 6 self-run · 14 doctrine-only — autonomous fleets
   whose self-run and external-run missions bind to re-hashable run reports.*
 - **Longer description:** the Anthropic directory blurb above, followed by the proof link
   `https://github.com/ravidsrk/open-fleet/tree/main/docs/runs`.
@@ -61,7 +61,7 @@ does-it-load score that doesn't exist yet.
   telemetry. Don't run the installer just to force a refresh: that would fabricate an install event.
 - **Blurb**, if skills.sh ever offers an editable description:
 
-  > **proof: 2 external-run · 3 self-run · 17 doctrine-only.** 22 outcome-named missions for
+  > **proof: 2 external-run · 6 self-run · 14 doctrine-only.** 22 outcome-named missions for
   > coding agents, each closing on an independently verified, SHA-bound evidence manifest.
 
 ### buildwithclaude.com
@@ -86,7 +86,7 @@ does-it-load score that doesn't exist yet.
   `python3 runtime/scripts/proof_status.py` before pasting), followed by the count-free
   [About text](about.md):
 
-  > **proof: 2 external-run · 3 self-run · 17 doctrine-only.** Outcome-named autonomous fleets for
+  > **proof: 2 external-run · 6 self-run · 14 doctrine-only.** Outcome-named autonomous fleets for
   > coding agents across Orca, POSIX, and multi-runtime orchestrators — SHA-bound evidence
   > definition of done, best-of-breed worker recipes, one router per worker.
 

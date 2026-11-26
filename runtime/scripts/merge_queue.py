@@ -415,9 +415,13 @@ class Store:
         conn = sqlite3.connect(str(self.path), timeout=self.BUSY_SECONDS, isolation_level=None,
                                factory=_ClosingConnection)
         conn.row_factory = sqlite3.Row
-        # The busy timeout first, so every statement below (and after) waits out a lock.
-        conn.execute(f"PRAGMA busy_timeout={int(self.BUSY_SECONDS * 1000)};")
-        self._wal(conn)
+        try:
+            # The busy timeout first, so every statement below (and after) waits out a lock.
+            conn.execute(f"PRAGMA busy_timeout={int(self.BUSY_SECONDS * 1000)};")
+            self._wal(conn)
+        except BaseException:
+            conn.close()
+            raise
         return conn
 
     def _wal(self, conn: sqlite3.Connection) -> None:
@@ -4537,9 +4541,9 @@ class MergeQueue:
         return hashlib.sha256(payload).hexdigest(), problems
 
     @staticmethod
-    @functools.lru_cache(maxsize=1)
-    def _bwrap_mode() -> tuple[str, tuple[str, ...]] | None:
-        bw = shutil.which("bwrap")
+    @functools.lru_cache(maxsize=16)
+    def _bwrap_mode_cached(path_env: str | None) -> tuple[str, tuple[str, ...]] | None:
+        bw = shutil.which("bwrap", path=path_env)
         if not bw:
             return None
         for flags in (
@@ -4556,6 +4560,11 @@ class MergeQueue:
             except (OSError, subprocess.SubprocessError):
                 continue
         return None
+
+    @classmethod
+    def _bwrap_mode(cls, path_env: str | None = None) -> tuple[str, tuple[str, ...]] | None:
+        effective_path = os.environ.get("PATH") if path_env is None else path_env
+        return cls._bwrap_mode_cached(effective_path)
 
     @classmethod
     def _bwrap_bin(cls) -> str | None:
@@ -4605,7 +4614,7 @@ class MergeQueue:
             or self.env.get("OPEN_FLEET_GATE_SANDBOX_CMD")
             or ""
         ).strip()
-        if custom_sbx or self._bwrap_mode() is None:
+        if custom_sbx or self._bwrap_mode(self.env.get("PATH", "")) is None:
             return None
         sys_dirs = self._BWRAP_SYS_DIRS
         bound_ro: set[str] = set()
@@ -4871,7 +4880,7 @@ class MergeQueue:
         ).strip()
         if custom_sbx:
             return [*shlex.split(custom_sbx), "/bin/sh", "-c", gate_cmd]
-        bw_mode = self._bwrap_mode()
+        bw_mode = self._bwrap_mode(self.env.get("PATH", ""))
         if bw_mode is not None:
             bw, ns_flags = bw_mode
             cmd = [bw, *ns_flags, "--die-with-parent", "--proc", "/proc", "--dev", "/dev"]
@@ -5361,9 +5370,6 @@ class MergeQueue:
             conn.execute("UPDATE mq_entries SET state = ?, reason = ?, updated_at = ? WHERE entry_id = ?",
                          (RESOLVE_ACTIONS[action], f"{row['reason']} -> {action}: {reason}", self.clock(), entry_id))
             self._clear_tested(conn, lease["repo"], lease["base"])
-            if action == "requeue":
-                conn.execute("UPDATE mq_entries SET tested_base_tree = NULL, tested_tree = NULL, prefix_commit = NULL "
-                             "WHERE entry_id = ?", (entry_id,))
             self._receipt(conn, lease["repo"], lease["base"], "resolved",
                           {"action": action, "reason": reason, "was": row["reason"]}, entry_id, lease)
         return {"ok": True, "entry": entry_id, "state": RESOLVE_ACTIONS[action]}
@@ -5411,10 +5417,13 @@ class MergeQueue:
               wait: float = 10.0, gate_cmd: str | None = None, ack: bool = False, max_steps: int = 100,
               delete_branch: bool = True, gate_timeout: float = 1800.0) -> dict[str, Any]:
         """acquire -> (plan -> merge -> ack)* -> release: one conductor turn over the whole train."""
+        if isinstance(max_steps, bool) or not isinstance(max_steps, int) or max_steps < 0:
+            raise QueueError("usage", f"max_steps must be a non-negative integer, got {max_steps!r}", exit_code=EXIT_USAGE)
         repo = self.normalize(repo)
         acq = self.acquire(repo=repo, base=base, holder=holder, ttl=ttl, takeover=takeover, wait=wait)
         token, steps = acq["token"], []
         stop: QueueError | None = None
+        fenced = False
         try:
             self.settle_in_flight(token)  # owed teardowns too, even when the train is already empty
             for _ in range(max_steps):
@@ -5437,12 +5446,15 @@ class MergeQueue:
                         continue
                     raise
             else:
-                stop = QueueError("max_steps", f"stopped after {max_steps} steps with the train not empty")
+                if self._line(repo, base):
+                    stop = QueueError("max_steps", f"stopped after {max_steps} steps with the train not empty")
         except QueueError as exc:
             stop = exc
-        if stop is None or stop.exit_code != EXIT_FENCED:
-            with contextlib.suppress(QueueError):
-                self.release(token)
+            fenced = exc.exit_code == EXIT_FENCED
+        finally:
+            if not fenced:
+                with contextlib.suppress(QueueError):
+                    self.release(token)
         result = {"ok": stop is None, "epoch": acq["epoch"], "reconciled": acq["reconciled"], "steps": steps,
                   "promotion": {"from": base, "by": "human", "automated": False}}
         if stop is not None:

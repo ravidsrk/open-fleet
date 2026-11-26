@@ -2,8 +2,8 @@
 
 A small issue-tracker fixture for open-fleet mission runs: FastAPI JSON API +
 server-rendered UI on SQLite, with Prometheus metrics, structured JSON logs,
-and a 7-service compose stack (app, staging, Prometheus, Grafana, Loki,
-Promtail, Alertmanager).
+and an 8-service compose stack (volume-init, app, staging, Prometheus, Grafana,
+Loki, Promtail, Alertmanager).
 
 Start here, then read `SCOPE.md` (journeys + budgets — the mission inputs) and
 `FLAWS.md` (the frozen imperfection set F1–F4; read it before "fixing"
@@ -39,7 +39,7 @@ DATABASE_URL=sqlite:///./demo.db uv run uvicorn app.main:app
 | Command | Description |
 |---|---|
 | `uv run uvicorn app.main:app` | Run the API + UI on :8000 |
-| `uv run pytest` | Full test suite (52 tests: API + UI + shape + telemetry) |
+| `uv run pytest` | Full test suite (55 tests: API + UI + shape + telemetry) |
 | `ruff check .` | Lint (ruff on PATH, e.g. via mise) |
 | `uv run alembic upgrade 0002` | Migrate an empty DB to the frozen schema |
 | `uv run alembic current` | Reads `0002` after boot; `alembic heads` shows pending `0003` |
@@ -77,7 +77,7 @@ app/telemetry.py     structlog JSON logs + /metrics (latency histogram, issue ga
 app/templates/       Jinja pages: list, detail, new/edit forms (no JS build)
 alembic/versions/    0001 (issues), 0002 (comments), 0003 (pending index — F3)
 observability/       prometheus/alertmanager/loki/promtail configs + Grafana dashboard
-compose.yaml         7-service stack; boot migrates then serves (seed --count 0)
+compose.yaml         8-service stack; boot migrates then serves (seed --count 0)
 ```
 
 CI (`.github/workflows/fixture-target-app.yml`, fixture-owned — not coupled to

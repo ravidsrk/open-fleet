@@ -1,0 +1,8 @@
+### reshape-it carve-out half (b): revert enlarges interface-surface measurement
+base_sha: 6b8c2af3968482b35ec30b892411b8b6a435f3c5
+head_sha: 4ad16df406c6df3bb2d13f0037ec274802666b61
+probe: grep -cE '^(def |class |async def |[A-Z_]+ =)' runtime/scripts/verify.py
+head_sha WIDTH=84 DEPTH=5036
+reverted (base_sha) WIDTH=91 DEPTH=5228
+delta_on_revert: +7 top-level symbols (+192 lines)
+result: CONFIRMED — reverting the deepening enlarges verify.py WIDTH from 84 back to 91

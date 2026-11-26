@@ -40,6 +40,15 @@ _PROVIDER_MODULES: dict[str, tuple[str, str]] = {
 }
 
 
+def _auto_detect_provider(env: dict[str, str] | None = None, system: str | None = None) -> str:
+    """Resolve `'auto'` to `'orca'` if the Orca binary is on PATH, else `'posix'`."""
+    orca_bin = resolve_orca_binary(env, system)
+    path_env = (os.environ if env is None else env).get("PATH")
+    if shutil.which(orca_bin, path=path_env):
+        return "orca"
+    return "posix"
+
+
 def active_provider_name(env: dict[str, str] | None = None, system: str | None = None) -> str:
     """Resolve the active runtime provider name from `OPEN_FLEET_RUNTIME` / `ORCA_FLEET_RUNTIME`.
 
@@ -53,11 +62,7 @@ def active_provider_name(env: dict[str, str] | None = None, system: str | None =
     if raw == "local-posix":
         return "posix"
     if raw == "auto":
-        orca_bin = resolve_orca_binary(env, system)
-        path_env = (os.environ if env is None else env).get("PATH")
-        if shutil.which(orca_bin, path=path_env):
-            return "orca"
-        return "posix"
+        return _auto_detect_provider(env, system)
     if raw not in _PROVIDER_MODULES:
         raise ProviderError(
             "unknown_provider",
@@ -74,7 +79,12 @@ def get_provider(
     **kwargs: Any,
 ) -> RuntimeProvider:
     """Instantiate the requested `RuntimeProvider` adapter."""
-    resolved = active_provider_name(env, system) if not name or name == "auto" else name.lower()
+    if not name:
+        resolved = active_provider_name(env, system)
+    elif name.strip().lower() == "auto":
+        resolved = _auto_detect_provider(env, system)
+    else:
+        resolved = name.strip().lower()
     if resolved == "local-posix":
         resolved = "posix"
     if resolved not in _PROVIDER_MODULES:

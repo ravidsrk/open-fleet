@@ -524,9 +524,11 @@ SUBMIT_SECS="${SUBMIT_SECS:-30}"
 # active_provider_name): case- and space-insensitive, local-posix → posix, auto → orca only when
 # the Orca CLI is on PATH. A raw string compare read OPEN_FLEET_RUNTIME=ORCA as a non-Orca
 # runtime and swapped in the wrong launch table and danger rules.
-if ! ACTIVE_RUNTIME=$(python3 -I - "$HERE/../.." <<'PY'
+if ! ACTIVE_RUNTIME=$(python3 -I - "$HERE/.." <<'PY'
 import sys
-sys.path.insert(0, sys.argv[1])
+pkg = type(sys)("runtime")
+pkg.__path__ = [sys.argv[1]]
+sys.modules["runtime"] = pkg
 from runtime.providers import ProviderError, active_provider_name
 try:
     print(active_provider_name())
@@ -630,10 +632,12 @@ profile_rank() { case "$1" in ro) echo 0 ;; rw) echo 1 ;; danger) echo 2 ;; *) e
 # carries the pane handle; a worker whose HOME is not its coordinator's; a launch whose pane
 # process itself carries no handle (a command that clears its environment, `env -i …`).
 SPAWN_HOME="${HOME:-}"
+PW_SPAWN_HOME=$(python3 -I -c 'import os, pwd; print(pwd.getpwuid(os.getuid()).pw_dir)' 2>/dev/null || true)
 if [ -z "$SPAWN_HOME" ]; then  # a scrubbed HOME still reads the uid's registry
-  SPAWN_HOME=$(python3 -I -c 'import os, pwd; print(pwd.getpwuid(os.getuid()).pw_dir)' 2>/dev/null || true)
+  SPAWN_HOME="$PW_SPAWN_HOME"
 fi
 SPAWN_REGISTRY="${SPAWN_HOME:+$SPAWN_HOME/.open-fleet/spawn-profiles}"
+PW_SPAWN_REGISTRY="${PW_SPAWN_HOME:+$PW_SPAWN_HOME/.open-fleet/spawn-profiles}"
 SPAWN_PENDING="${SPAWN_REGISTRY:+$SPAWN_REGISTRY/.pending}"
 registry_key_ok() { case "$1" in ""|[!A-Za-z0-9]*|*[!A-Za-z0-9._:-]*) return 1 ;; esac; return 0; }
 own_handles=()
@@ -663,9 +667,14 @@ identify() {
     esac
   done <<< "$_out"
   for _ph in ${own_handles[@]+"${own_handles[@]}"}; do
-    [ -f "$SPAWN_REGISTRY/$_ph" ] || continue
-    _rp=$(head -n 1 -- "$SPAWN_REGISTRY/$_ph" 2>/dev/null || true)
-    registered_profiles+=("${_rp:-ro}")
+    if [ -f "$SPAWN_REGISTRY/$_ph" ]; then
+      _rp=$(head -n 1 -- "$SPAWN_REGISTRY/$_ph" 2>/dev/null || true)
+      registered_profiles+=("${_rp:-ro}")
+    fi
+    if [ -n "$PW_SPAWN_REGISTRY" ] && [ "$PW_SPAWN_REGISTRY" != "$SPAWN_REGISTRY" ] && [ -f "$PW_SPAWN_REGISTRY/$_ph" ]; then
+      _rp=$(head -n 1 -- "$PW_SPAWN_REGISTRY/$_ph" 2>/dev/null || true)
+      registered_profiles+=("${_rp:-ro}")
+    fi
   done
 }
 identify
@@ -758,7 +767,7 @@ register_spawn() {
   # record: Orca's and posix's panes on this host. A remote placement (--environment, --on) or
   # another runtime's worker (an OpenHands conversation, a hosted agent) has none on this host,
   # and its handle record is its record.
-  if { [ "$ACTIVE_RUNTIME" != "orca" ] && [ "$ACTIVE_RUNTIME" != "posix" ]; } \
+  if { [ "$ACTIVE_RUNTIME" != "orca" ] && [ "$ACTIVE_RUNTIME" != "posix" ] && [ "$ACTIVE_RUNTIME" != "worktrunk" ]; } \
      || [ "$ENV_GIVEN" = "1" ] || [ "$ON_GIVEN" = "1" ]; then
     return 0
   fi
@@ -1265,18 +1274,18 @@ if [ "$PROFILE" = "danger" ]; then
   # (dispatch-lifecycle.md: keepalives go to stderr, pipe stdout only into parsers). Merged, one
   # warning line made every receipt unparseable (2026-10-26 review).
   "$ORCA_BIN" vm recipe doctor "$recipe" ${ROUTE_ARGS[@]+"${ROUTE_ARGS[@]}"} --json > "$doctor_out" 2> "$doctor_out.stderr" || doctor_rc=$?
-  if [ "$doctor_rc" -ne 0 ] && cat "$doctor_out" "$doctor_out.stderr" | grep -qiE "unknown (option|flag|argument)|unrecognized|invalid option"; then
+  if [ "$doctor_rc" -ne 0 ] && grep -qiE "unknown (option|flag|argument)|unrecognized|invalid option" -- "$doctor_out" "$doctor_out.stderr"; then
     doctor_rc=0
     "$ORCA_BIN" vm recipe doctor "$recipe" ${ROUTE_ARGS[@]+"${ROUTE_ARGS[@]}"} > "$doctor_out" 2> "$doctor_out.stderr" || doctor_rc=$?
   fi
   if [ "$doctor_rc" -ne 0 ]; then
     echo "SPAWN=REFUSED task=${task} \`${ORCA_BIN} vm recipe doctor ${recipe}\` exited ${doctor_rc} — the sandbox did not come up clean: $( (cat "$doctor_out" "$doctor_out.stderr" | head -c 300 || true) | inert_text)" >&2
-    rm -f "$doctor_out"
+    rm -f -- "$doctor_out" "$doctor_out.stderr"
     exit 2
   fi
   if ! python3 -I "$HERE/sandbox_doctor.py" "$doctor_out" "$recipe" 2>/dev/null; then
     echo "SPAWN=REFUSED task=${task} recipe doctor for '${recipe}' is not clear — sandbox-policy.md: clear means no fail AND no warn (ok:true alone proves nothing): $( (python3 -I "$HERE/sandbox_doctor.py" "$doctor_out" "$recipe" 2>&1 >/dev/null | head -c 200 || true) | inert_text)" >&2
-    rm -f "$doctor_out"
+    rm -f -- "$doctor_out" "$doctor_out.stderr"
     exit 2
   fi
   # A non-Orca runtime answers the same `vm recipe doctor` through orca_cli.py; providers
@@ -1300,11 +1309,11 @@ if [ "$PROFILE" = "danger" ]; then
   if [ -n "$DOCTOR_DEST" ]; then
     if ! cp "$doctor_out" "$DOCTOR_DEST" 2>/dev/null; then
       echo "SPAWN=REFUSED task=${task} could not write the doctor transcript to ORCA_SANDBOX_DOCTOR='${DOCTOR_DEST}' — the lane ledger record is part of the danger contract (sandbox-policy.md)" >&2
-      rm -f "$doctor_out"
+      rm -f -- "$doctor_out" "$doctor_out.stderr"
       exit 2
     fi
   fi
-  rm -f "$doctor_out"
+  rm -f -- "$doctor_out" "$doctor_out.stderr"
   echo "SPAWN=NOTE task=${task} sandbox recipe='${recipe}' doctored clear by this script (#283)" >&2
   if [ "$placement_bound" = "1" ]; then
     # Bind the launch to EXACTLY the certified recipe: --on wins over the provider's env read.
@@ -1406,11 +1415,13 @@ fi
 base_launch() {
   python3 -I - "$HERE/.." "$agent" "$PROFILE" "$1" "$effort" <<'PY' || true
 import sys
-sys.path.insert(0, sys.argv[1])
-from providers.base import ProviderError, build_harness_command
+pkg = type(sys)("runtime")
+pkg.__path__ = [sys.argv[1]]
+sys.modules["runtime"] = pkg
+from runtime.providers.base import ProviderError, build_harness_command
 try:
     if sys.argv[2] == "openhands":
-        from providers.openhands import launch_line
+        from runtime.providers.openhands import launch_line
         launch = launch_line(sys.argv[3])
     else:
         launch = build_harness_command(sys.argv[2], sys.argv[3], sys.argv[4], None, effort=sys.argv[5])
@@ -1428,7 +1439,16 @@ if [ "$ACTIVE_RUNTIME" != "orca" ]; then
   # top-level; new-* is CREATED through the runtime's own `worktree create` (only for the ro
   # worker-start lane, which then names the created path; rw/danger let worker-start create it).
   _base="${OPEN_FLEET_REPO_ROOT:-${OPEN_FLEET_CLI_CWD:-${ORCA_CLI_CWD:-$(pwd)}}}"
-  _repo_top=$(git -C "$_base" rev-parse --show-toplevel 2>/dev/null || (cd "$_base" && pwd -P))
+  _repo_top=$( (unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+    GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_ATTR_SOURCE GIT_NAMESPACE GIT_CEILING_DIRECTORIES \
+    GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT \
+    GIT_EXEC_PATH GIT_TEMPLATE_DIR GIT_SSH GIT_SSH_COMMAND GIT_ASKPASS GIT_EXTERNAL_DIFF; \
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 \
+    GIT_NO_REPLACE_OBJECTS=1 GIT_GRAFT_FILE=/dev/null GIT_NO_LAZY_FETCH=1 \
+    GIT_ALLOW_PROTOCOL=file GIT_ATTR_NOSYSTEM=1 \
+    git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c protocol.ext.allow=never \
+        -c safe.directory='*' -C "$_base" rev-parse --show-toplevel </dev/null 2>/dev/null) \
+    || (cd "$_base" && pwd -P))
   case "$sel" in
     path:*) _launch_wt="${sel#path:}" ;;
     *::*) _launch_wt="${sel##*::}" ;;
@@ -1439,9 +1459,11 @@ if [ "$ACTIVE_RUNTIME" != "orca" ]; then
   # Only a runtime with a standalone `worktree create` can pre-create one; overstory, gastown,
   # t3code and the daemon adapters create the worktree inside worker-start and inherit the
   # base class's unsupported method, so they keep the original new-* selector (#592 review).
-  _standalone_wc=$(python3 -I - "$HERE/../.." "$ACTIVE_RUNTIME" <<'PY' || echo 0
+  _standalone_wc=$(python3 -I - "$HERE/.." "$ACTIVE_RUNTIME" <<'PY' || echo 0
 import importlib, sys
-sys.path.insert(0, sys.argv[1])
+pkg = type(sys)("runtime")
+pkg.__path__ = [sys.argv[1]]
+sys.modules["runtime"] = pkg
 prov = importlib.import_module("runtime.providers")
 mod_name, cls_name = prov._PROVIDER_MODULES[sys.argv[2]]
 cls = getattr(importlib.import_module(mod_name, package="runtime.providers"), cls_name)
