@@ -32,8 +32,8 @@ the first warning was a field sighting. Four subcommands, each independent:
             added/removed/changed command and every changed file is named.
 
 Usage
-  upstream_probe.py latest [--max-patches N] [--pins PATH] [--tags-json PATH]
-                           [--tags-url URL] [--timeout SECONDS] [--json]
+  upstream_probe.py latest [--max-patches N] [--max-pages N] [--pins PATH]
+                           [--tags-json PATH] [--tags-url URL] [--timeout SECONDS] [--json]
   upstream_probe.py review-date [--pins PATH] [--today YYYY-MM-DD] [--json]
   upstream_probe.py capture --out DIR [--timeout SECONDS]
   upstream_probe.py diff --baseline DIR --fresh DIR [--json]
@@ -233,7 +233,7 @@ def fetch_tags(url, timeout, token=None, max_pages=MAX_PAGES):
         # read off it could miss the newest tag. Fail closed with ProbeError (exit 2) (#788).
         raise ProbeError(
             f"tag listing stopped at the {max_pages}-page cap with pages unread; "
-            "refusing to assess drift from a partial tag list (raise MAX_PAGES)"
+            "refusing to assess drift from a partial tag list (pass --max-pages N or raise MAX_PAGES)"
         )
     return names
 
@@ -272,11 +272,14 @@ def re_pin_due(result, max_patches):
 def cmd_latest(args):
     if args.max_patches < 1:
         raise ProbeError("--max-patches must be at least 1")
+    if args.max_pages < 1:
+        raise ProbeError("--max-pages must be at least 1")
     pin_version = read_pin(args.pins)
     if args.tags_json:
         names = tag_names(load_json_file(args.tags_json), args.tags_json)
     else:
-        names = fetch_tags(args.tags_url, args.timeout, os.environ.get("GITHUB_TOKEN"))
+        names = fetch_tags(args.tags_url, args.timeout, os.environ.get("GITHUB_TOKEN"),
+                           max_pages=args.max_pages)
     result = assess(pin_version, names)
     due = re_pin_due(result, args.max_patches)
     if args.json:
@@ -605,6 +608,8 @@ def build_parser():
     latest.add_argument("--max-patches", type=int, default=DEFAULT_MAX_PATCHES,
                         help="re-pin is due once this many stable tags sit above the pin "
                              f"(default {DEFAULT_MAX_PATCHES})")
+    latest.add_argument("--max-pages", type=int, default=MAX_PAGES,
+                        help=f"maximum rel=next tag pages to walk before failing closed (default {MAX_PAGES})")
     latest.add_argument("--pins", default=str(DEFAULT_PINS),
                         help="pins.json to read orca.version from (default runtime/pins.json)")
     latest.add_argument("--tags-json", help="read the tags payload from this file, no network")

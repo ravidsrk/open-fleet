@@ -2115,6 +2115,75 @@ class SpendLedgerAndGraderMeterRejectNonFinite(SafetyNet):
                                  parse_constant=lambda t: (_ for _ in ()).throw(ValueError(t)))
                 self.assertIsNone(doc["cost_usd"])
 
+    def test_v2_harness_refused_reads_text_extraction_tools_and_invalid_oracle_762(self):
+        # Issue #762 (#606 v2 harness prep):
+        # 1) Refused Read tool_use (matching user tool_result is_error=True) does not count as done.
+        cues = {"evidence-manifest": ["VERIFY"], "merge-serialization": ["MERGE"]}
+        stream = "\n".join([
+            json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "PHASE: VERIFY\nQuoted \"evidence\" line here."},
+                {"type": "tool_use", "id": "tu_fail", "name": "Read",
+                 "input": {"file_path": "/cat/runtime/evidence-manifest.md"}},
+            ]}}),
+            json.dumps({"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "tu_fail", "is_error": True,
+                 "content": "permission denied: outside workspace"},
+            ]}}),
+            json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "PHASE: MERGE"},
+                {"type": "tool_use", "id": "tu_ok", "name": "Read",
+                 "input": {"file_path": "/cat/runtime/merge-serialization.md"}},
+            ]}}),
+            json.dumps({"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "tu_ok", "is_error": False,
+                 "content": "# merge-serialization"},
+            ]}}),
+        ])
+        reads = runner.deferred_reads(stream, cues)
+        self.assertEqual(reads["evidence-manifest"], "omitted")
+        self.assertEqual(reads["merge-serialization"], "on-time")
+        self.assertEqual(runner.refused_deferred_reads(stream, cues), 1)
+        # 2) Agent text extraction unescapes quotes and supports result-only + plain text fallbacks.
+        extracted = runner.stream_agent_text(stream)
+        self.assertIn('Quoted "evidence" line here.', extracted)
+        self.assertNotIn('"tool_use_id"', extracted)
+        res_only = json.dumps({"type": "result", "result": "final summary text"})
+        self.assertEqual(runner.stream_agent_text(res_only), "final summary text")
+        self.assertEqual(runner.stream_agent_text("plain non-json trace"), "plain non-json trace")
+        # 3) Per-case --allowedTools and --add-dir <catalog> ordering (variadic --allowedTools last).
+        self.assertEqual(runner.case_allowed_tools({"allowed_tools": ["Read", "Bash"]}, None), "Read,Bash")
+        self.assertEqual(runner.case_allowed_tools({"allowed_tools": "Read,Grep"}, None), "Read,Grep")
+        self.assertEqual(runner.case_allowed_tools({}, None), runner.BEHAVIORAL_DEFAULT_TOOLS)
+        self.assertIn("Bash", runner.case_allowed_tools(None, {"allowed_actions": ["Read", "Bash"]}))
+        argv = runner.cell_agent_cmd(
+            ["claude", "-p"], catalog=Path("/tmp/cat"), tools="Read,Bash",
+            add_catalog_dir=True, per_case_tools=True,
+        )
+        self.assertEqual(argv, ["claude", "-p", "--add-dir", "/tmp/cat", "--allowedTools", "Read,Bash"])
+        # 4) Pre-decision validity gate reports INVALID_ORACLE when baseline floor or catalog reachability fails.
+        prereg = {
+            "analysis": {
+                "validity_gate": {
+                    "min_baseline_success_rate": 0.5,
+                    "require_deferred_docs_reachable": True,
+                }
+            }
+        }
+        arms = {"baseline": {"success": {"mean": 0.0}}, "reduced": {"success": {"mean": 0.0}}}
+        cells = [{"arm": "reduced", "refused_reads": 3, "deferred_reads": {"evidence-manifest": "omitted"}}]
+        reasons = runner._validity_failures(prereg, arms, cells)
+        self.assertEqual(len(reasons), 2)
+        verdict, why = runner._verdict(
+            {"obligation_check": {"passed": True, "failures": []}},
+            {"complete": True}, 10, 10, [], {"baseline": 0, "reduced": 0},
+            {"success": {"ci95": [0.0, 0.0]}, "correct_terminal": {"ci95": [0.0, 0.0]},
+             "input_tokens": {"ci95": [-100.0, -50.0]}},
+            0.05, validity_failures=reasons,
+        )
+        self.assertEqual(verdict, "INVALID_ORACLE")
+        self.assertIn("validity floor", why)
+        self.assertIn("refused", why)
+
 
 if __name__ == "__main__":
     unittest.main()

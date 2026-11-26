@@ -102,8 +102,9 @@ CLOCK = "ablation-runner@local"
 TIMEOUTS = {"fixture": 60, "stub": 120, "live": 15 * 60}
 NOT_EVIDENCE = ("NOT EVIDENCE: this tier exercises the pipeline only; no model ran, and no "
                 "verdict below supports a recommendation.")
-VERDICTS = ("REJECTED_OBLIGATION", "INCOMPLETE", "REJECTED_SAFETY", "NOT_NON_INFERIOR",
-            "NO_SAVING", "SUCCESSFUL_REDUCTION")
+VERDICTS = ("REJECTED_OBLIGATION", "INCOMPLETE", "INVALID_ORACLE", "REJECTED_SAFETY",
+            "NOT_NON_INFERIOR", "NO_SAVING", "SUCCESSFUL_REDUCTION")
+BEHAVIORAL_DEFAULT_TOOLS = "Read,Edit,Write,Glob,Grep,Bash"
 _MODULES = {}
 
 
@@ -688,28 +689,128 @@ def materialize(mission, task, workspace):
 
 
 def stream_sequence(stream_text):
-    """[("phase", NAME) | ("read", path)] in stream order, from assistant text and Read tool_uses."""
-    seq = []
+    """[("phase", NAME) | ("read", path)] in stream order, from assistant text and Read tool_uses.
+
+    A Read whose matching user tool_result has `is_error: true` (refused / unreadable path, #762)
+    is excluded so refused attempts are never counted as completed deferred reads; synthetic or
+    fixture streams carrying no tool_result blocks keep counting Read tool_uses as before.
+    """
+    raw, failed_ids = [], set()
     for line in stream_text.splitlines():
         try:
             obj = json.loads(line)
         except ValueError:
             continue
-        if not isinstance(obj, dict) or obj.get("type") != "assistant":
+        if not isinstance(obj, dict):
             continue
+        msg_type = obj.get("type")
         content = (obj.get("message") or {}).get("content")
+        if msg_type == "user":
+            for block in content if isinstance(content, list) else []:
+                if (isinstance(block, dict) and block.get("type") == "tool_result"
+                        and block.get("is_error") is True
+                        and isinstance(block.get("tool_use_id"), str)):
+                    failed_ids.add(block["tool_use_id"])
+            continue
+        if msg_type != "assistant":
+            continue
         for block in content if isinstance(content, list) else []:
             if not isinstance(block, dict):
                 continue
             if block.get("type") == "text" and isinstance(block.get("text"), str):
-                seq += [("phase", p) for p in re.findall(r"(?m)^PHASE:\s*([A-Z][A-Z0-9_-]*)\s*$",
-                                                         block["text"])]
+                raw += [("phase", p, None) for p in re.findall(r"(?m)^PHASE:\s*([A-Z][A-Z0-9_-]*)\s*$",
+                                                               block["text"])]
             elif block.get("type") == "tool_use" and block.get("name") == "Read":
                 args = block.get("input") if isinstance(block.get("input"), dict) else {}
                 path = args.get("file_path") or args.get("path")
                 if isinstance(path, str):
-                    seq.append(("read", path.replace("\\", "/")))
-    return seq
+                    tid = block.get("id") if isinstance(block.get("id"), str) else None
+                    raw.append(("read", path.replace("\\", "/"), tid))
+    return [(kind, val) for kind, val, tid in raw if tid is None or tid not in failed_ids]
+
+
+def refused_deferred_reads(stream_text, cues):
+    """Count attempted Read tool_uses targeting a deferred cue doc whose tool_result errored (#762)."""
+    reads, failed_ids = [], set()
+    for line in stream_text.splitlines():
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        msg_type = obj.get("type")
+        content = (obj.get("message") or {}).get("content")
+        if msg_type == "user":
+            for block in content if isinstance(content, list) else []:
+                if (isinstance(block, dict) and block.get("type") == "tool_result"
+                        and block.get("is_error") is True
+                        and isinstance(block.get("tool_use_id"), str)):
+                    failed_ids.add(block["tool_use_id"])
+        elif msg_type == "assistant":
+            for block in content if isinstance(content, list) else []:
+                if (isinstance(block, dict) and block.get("type") == "tool_use"
+                        and block.get("name") == "Read"
+                        and isinstance(block.get("id"), str)):
+                    args = block.get("input") if isinstance(block.get("input"), dict) else {}
+                    path = args.get("file_path") or args.get("path")
+                    if isinstance(path, str):
+                        reads.append((block["id"], path.replace("\\", "/")))
+    targets = tuple(f"/{name}.md" for name in cues)
+    return sum(1 for tid, path in reads if tid in failed_ids and path.endswith(targets))
+
+
+def stream_agent_text(stream_text):
+    """Readable agent text extracted from Claude stream-json for the behavioral grader (#762).
+
+    Handing raw stream-json to the grader JSON-escaped quotes and newlines so verbatim trace
+    excerpts failed to match. Falls back to `result` text or the original text when no JSON
+    assistant text blocks exist.
+    """
+    parts, result_parts = [], []
+    for line in stream_text.splitlines():
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        if obj.get("type") == "assistant":
+            content = (obj.get("message") or {}).get("content")
+            for block in content if isinstance(content, list) else []:
+                if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
+                    parts.append(block["text"])
+        elif obj.get("type") == "result" and isinstance(obj.get("result"), str):
+            result_parts.append(obj["result"])
+    if parts:
+        return "\n".join(parts)
+    if result_parts:
+        return "\n".join(result_parts)
+    return stream_text
+
+
+def case_allowed_tools(ev, case):
+    """Per-case tool allowlist (#762): #602's trajectory allowlist, or the behavioral case's."""
+    if case is not None:
+        return _module("of_ablation_traj_live", "scripts/_trajectory_live.py").allowlist(case)
+    if ev is not None:
+        raw = ev.get("allowed_tools")
+        if isinstance(raw, list) and raw:
+            return ",".join(str(t) for t in raw)
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    return BEHAVIORAL_DEFAULT_TOOLS
+
+
+def cell_agent_cmd(base_cmd, *, catalog, tools, add_catalog_dir=False, per_case_tools=False):
+    """Per-cell agent argv (#762): optional --add-dir <catalog> and trailing --allowedTools."""
+    argv = list(base_cmd)
+    if add_catalog_dir and "--add-dir" not in argv:
+        argv += ["--add-dir", str(catalog)]
+    if per_case_tools and tools and "--allowedTools" not in argv:
+        # Claude Code's --allowedTools is variadic and must sit last on argv (#659 review).
+        argv += ["--allowedTools", tools]
+    return argv
 
 
 def stream_model(stream_text):
@@ -863,6 +964,7 @@ def grade_behavioral(ev, workspace, originals, trace, grader_cmd, usage_path=Non
                       "not be read: the call stays open at its full reservation")
     passed = sum(1 for row in (graded or {}).get("assertions", []) if row.get("passed"))
     success = graded is not None and passed == len(assertions) and not state_failed
+    raw_grader_path = Path(f"{usage_path}.stdout") if usage_path else None
     return {"success": success, "correct_terminal": success, "assertions_passed": passed,
             "assertions": len(assertions), "state_failed": state_failed,
             "scope_violations": len(scope), "approval_violations": 0, "attempted": [],
@@ -870,6 +972,7 @@ def grade_behavioral(ev, workspace, originals, trace, grader_cmd, usage_path=Non
             # A killed grader's partial output is not a bill: it is charged its full reservation.
             "grader_cost_usd": grader_cost, "grader_killed": killed,
             "grader_models": [m for m in usage.get("models") or [] if isinstance(m, str)],
+            "grader_raw_output": str(raw_grader_path) if raw_grader_path and raw_grader_path.is_file() else None,
             "orphans": not emptied, "attempted_violations": None,
             "assertion_rows": list((graded or {}).get("assertions") or []), "errors": errors}
 
@@ -914,9 +1017,11 @@ def run_cell(ctx, pair, arm):
     text = fill(prompt["template"], {"payload": ctx["payloads"][mission][arm],
                                      "run_protocol": ctx["protocol"], "task": task_text})
     env = dict(ctx["sandbox"].env)
+    tools = case_allowed_tools(ev, case)
     # Absolute by construction (out was resolved before any cell): the command's cwd is the workspace.
     env.update({"ABLATION_OUT": str(cell_dir), "ABLATION_CELL": cell_id, "ABLATION_ARM": arm,
-                "ABLATION_SEED": str(pair["seed"]), "ABLATION_CATALOG": str(ctx["catalog"])})
+                "ABLATION_SEED": str(pair["seed"]), "ABLATION_CATALOG": str(ctx["catalog"]),
+                "ABLATION_ALLOWED_TOOLS": tools})
     if case is not None and ctx["tier"] == "fixture":
         env["ABLATION_TRAJECTORY_FIXTURE"] = str(eval_mod().TRAJECTORY_DIR / case["trajectories"][0]["file"])
     cell = {"cell": cell_id, "mission": mission, "task": task, "repeat": repeat,
@@ -928,8 +1033,13 @@ def run_cell(ctx, pair, arm):
     # The agent writes its stream straight into the cell, so a signal mid-call still leaves the
     # models it named on disk (models_on_disk, #688 review).
     stream_path = cell_dir / "stream.jsonl"
+    argv = cell_agent_cmd(
+        ctx["agent_cmd"], catalog=ctx["catalog"], tools=tools,
+        add_catalog_dir=bool(ctx.get("add_catalog_dir")),
+        per_case_tools=bool(ctx.get("per_case_tools")),
+    )
     try:
-        stream, code, killed, emptied = run_group(ctx["agent_cmd"], input_text=text, cwd=workspace,
+        stream, code, killed, emptied = run_group(argv, input_text=text, cwd=workspace,
                                                   env=env, timeout=ctx["timeout"], stdout_path=stream_path)
         # Nothing more is paid for while a process of the agent's call may still be spending (K4).
         completed = not killed and emptied
@@ -964,13 +1074,14 @@ def run_cell(ctx, pair, arm):
         ledger.settle(cell_id, "agent", agent_charge(cell, model, tier), cost, killed)
     reads = deferred_reads(stream, ctx["cues"][mission][arm])
     cell["deferred_reads"] = reads
+    cell["refused_reads"] = refused_deferred_reads(stream, ctx["cues"][mission][arm])
     for status in ("omitted", "late", "early"):
         cell[f"{status}_reads" if status != "omitted" else "read_omissions"] = \
             sum(1 for v in reads.values() if v == status)
     if ev is not None:
         if completed:
             ledger.start(cell_id, "grader", model["grader_reserve_usd"])
-        graded = grade_behavioral(ev, workspace, originals, stream,
+        graded = grade_behavioral(ev, workspace, originals, stream_agent_text(stream),
                                   ctx["grader_cmd"] if completed else None, cell_dir / "grader-usage.json")
         if completed and not graded["orphans"]:
             ledger.settle(cell_id, "grader", grader_charge(graded, model, tier),
@@ -1434,12 +1545,17 @@ def _run_holding(args, api, prereg, tier, missions, tasks, repeats, out, run_id,
     sandbox = Sandbox(out / "sandbox", tier)
     catalog = out / "catalog"
     _catalog(catalog)
+    harness_cfg = prereg.get("harness") or {}
     ctx = {"out": out, "tier": tier, "prereg": prereg, "sandbox": sandbox, "catalog": catalog,
            "ledger": ledger, "active": None,
            "guard": lambda path: api.safe_output(path, prereg),
            "timeout": args.timeout or TIMEOUTS[tier], "payloads": {}, "cues": {},
            "protocol": fill(prereg["prompt"]["run_protocol"], {"catalog": str(catalog)}),
-           "model_requested": args.model}
+           "model_requested": args.model,
+           "per_case_tools": bool(getattr(args, "per_case_tools", False)
+                                  or harness_cfg.get("per_case_allowed_tools")),
+           "add_catalog_dir": bool(getattr(args, "add_catalog_dir", False)
+                                   or harness_cfg.get("add_catalog_dir"))}
     model = ctx["model"] = spend_model(prereg, tier)
     agent_flag, grader_flag = limit_flags(args, prereg)
     # Every call carries its own limit, whatever the tier, so both arms and every tier see the same
@@ -1682,8 +1798,9 @@ def summarize(results, prereg):
         new_violations = [p["reduced"]["cell"] for p in complete
                           if _violations(p["reduced"]) and not _violations(p["baseline"])]
         totals = {arm: sum(_violations(c) for c in cells if c["arm"] == arm) for arm in ARMS}
+        validity = _validity_failures(prereg, arms, cells)
         verdict, why = _verdict(variant, results, len(complete), registered, new_violations,
-                                totals, effects, margin)
+                                totals, effects, margin, validity_failures=validity)
         # A verdict is computed in every tier so the decision rule itself is testable, but only a
         # live tier's verdict is about the catalog; the others say so wherever they are shown.
         out[mission] = {"verdict": verdict, "tier": results.get("tier"),
@@ -1703,7 +1820,32 @@ def _violations(cell):
     return (cell.get("scope_violations") or 0) + (cell.get("approval_violations") or 0)
 
 
-def _verdict(variant, results, complete, registered, new_violations, totals, effects, margin):
+def _validity_failures(prereg, arms, cells):
+    """Oracle/harness validity checks before the decision rule (#762).
+
+    Returns [] when the registration sets no `analysis.validity_gate`, preserving v1/v2 runs.
+    """
+    gate = (prereg.get("analysis") or {}).get("validity_gate")
+    if not isinstance(gate, dict) or not gate:
+        return []
+    reasons = []
+    floor = gate.get("min_baseline_success_rate")
+    if isinstance(floor, (int, float)) and not isinstance(floor, bool):
+        base_mean = arms["baseline"]["success"]["mean"]
+        if base_mean is None or base_mean < floor:
+            reasons.append(f"baseline success rate {base_mean} below validity floor {floor}")
+    if gate.get("require_deferred_docs_reachable"):
+        red = [c for c in cells if c.get("arm") == "reduced"]
+        refused = sum(int(c.get("refused_reads") or 0) for c in red)
+        succeeded = sum(1 for c in red for state in (c.get("deferred_reads") or {}).values()
+                        if state in ("on-time", "early", "late"))
+        if refused > 0 and succeeded == 0:
+            reasons.append(f"all {refused} deferred catalog read attempt(s) were refused (0 succeeded)")
+    return reasons
+
+
+def _verdict(variant, results, complete, registered, new_violations, totals, effects, margin,
+             validity_failures=()):
     check = variant.get("obligation_check") or {"passed": False, "failures": ["no variant record"]}
     if not check["passed"]:
         return "REJECTED_OBLIGATION", ("a cheaper prompt that misses an obligation is never a "
@@ -1711,6 +1853,8 @@ def _verdict(variant, results, complete, registered, new_violations, totals, eff
     if complete < registered or not results.get("complete"):
         return "INCOMPLETE", (f"{complete} of {registered} registered pairs graded in both arms"
                               + (f"; stopped: {results['stopped']}" if results.get("stopped") else ""))
+    if validity_failures:
+        return "INVALID_ORACLE", "; ".join(validity_failures)
     if new_violations or totals["reduced"] > totals["baseline"]:
         return "REJECTED_SAFETY", (f"reduced-arm violations {totals['reduced']} vs baseline "
                                    f"{totals['baseline']}; new in {new_violations}")
@@ -1845,6 +1989,10 @@ def add_run_arguments(sub):
                    help="fixture/stub only: e.g. behavioral-4 or trajectory-CL-01")
     r.add_argument("--repeats", type=int, default=None, help="fixture/stub only: fewer repeats")
     r.add_argument("--timeout", type=int, default=None, help="seconds per agent run")
+    r.add_argument("--per-case-tools", action="store_true", dest="per_case_tools",
+                   help="append per-case --allowedTools to each cell's agent command (#762)")
+    r.add_argument("--add-catalog-dir", action="store_true", dest="add_catalog_dir",
+                   help="pass --add-dir <catalog> so deferred catalog reads succeed (#762)")
     r.add_argument("--out", default=None, help="results directory (default: a new temp dir)")
     r.add_argument("--json", action="store_true", help="print the summary as JSON")
     p = sub.add_parser("report", help="render a results file")

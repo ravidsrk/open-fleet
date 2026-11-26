@@ -2148,5 +2148,242 @@ class TestProperties(Base):
         self.assertEqual(list((tree_dir / "runtime" / "scripts").glob("PLANT-*")), [])
 
 
+class TestIngestMergeQueueAndLaunch(Base):
+    """Contract and acceptance tests for #763: ingest-merge-queue and ingest-launch."""
+
+    TEN = calendar.timegm((2026, 10, 20, 10, 0, 0))
+
+    def _mq_store(self):
+        mq_mod = importlib.util.spec_from_file_location("mq_for_events", ROOT / "runtime" / "scripts" / "merge_queue.py")
+        mq = importlib.util.module_from_spec(mq_mod)
+        mq_mod.loader.exec_module(mq)
+        db = self.tmp / "merge-queue.db"
+        store = mq.Store(db)
+        return store, db
+
+    def test_ingest_merge_queue_matches_hand_emitted_close_park_and_rework_and_is_idempotent(self):
+        # Acceptance test (#763): fixture queue DB holding a merge, a park, a bounce/rework and a close
+        # derives the exact same close, park, rework and freshness rows as a hand-emitted record,
+        # and a second ingest adds nothing.
+        store, db = self._mq_store()
+        a1, b1, b2, c1 = sha("a1"), sha("b1"), sha("b2"), sha("c1")
+        m1, m2 = sha("11"), sha("22")
+        w1 = sha("e7")
+        def t(m):
+            return self.TEN + 60 * m
+        with store.tx() as conn:
+            conn.execute(
+                "INSERT INTO mq_queues(repo, base, default_branch, mode, remote, host, consent, created_at) "
+                "VALUES ('github.com/o/r', 'feat/x', 'main', 'gh', 'origin', 'github.com', 'c', ?)", (t(0),))
+            entries = [
+                ("e1", 1, "run_mq", "t1", 1, "b/t1", a1, w1, "k1", "fp1", "[]", "landed", None, t(10), t(42), a1, m1),
+                ("e2", 2, "run_mq", "t2", 2, "b/t2", b1, None, "k2", "fp2", "[]", "bounced", "head_moved", t(15), t(25), None, None),
+                ("e3", 3, "run_mq", "t2", 2, "b/t2", b2, None, "k3", "fp3", "[]", "landed", None, t(30), t(48), b2, m2),
+                ("e4", 4, "run_mq", "t3", 3, "b/t3", c1, None, "k4", "fp4", "[]", "dropped", "conflict", t(20), t(35), c1, None),
+                ("e5", 5, "other_run", "t9", 9, "b/t9", a1, None, "k5", "fp5", "[]", "landed", None, t(10), t(40), a1, m1),
+            ]
+            for row in entries:
+                conn.execute(
+                    "INSERT INTO mq_entries(entry_id, repo, base, seq, run_id, unit, pr, branch, "
+                    "reviewed_sha, reviewed_tree, delivery_key, payload_fp, deliveries_json, state, "
+                    "reason, created_at, updated_at, accepted_head, merge_sha) "
+                    "VALUES (?, 'github.com/o/r', 'feat/x', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    row,
+                )
+            receipts = [
+                ("e1", "boarded", {"unit": "t1"}, t(10)),
+                ("e1", "reconciled", {"resolution": "merged", "acceptedHead": a1, "mergeSha": m1}, t(41)),
+                ("e1", "acknowledged", {"mergeSha": m1, "baseHead": m1}, t(42)),
+                ("e2", "returned_to_review", {"reason": "head_moved", "reviewedSha": b1, "head": b2}, t(25)),
+                ("e3", "acknowledged", {"mergeSha": m2, "baseHead": m2}, t(48)),
+                ("e4", "failed", {"reason": "conflict", "frozen": True}, t(32)),
+                ("e4", "resolved", {"action": "drop", "reason": "parked", "was": "conflict"}, t(35)),
+                ("e5", "acknowledged", {"mergeSha": m1, "baseHead": m1}, t(40)),
+            ]
+            for eid, kind, body, at in receipts:
+                conn.execute(
+                    "INSERT INTO mq_receipts(repo, base, entry_id, kind, epoch, holder, body_json, created_at) "
+                    "VALUES ('github.com/o/r', 'feat/x', ?, ?, 1, 'cond', ?, ?)",
+                    (eid, kind, json.dumps(body, sort_keys=True), at),
+                )
+
+        c = {"run": "run_mq", "epoch": 1, "clock": "host-a"}
+        base_events = [
+            ev("run.start", "10:00:00", data={"coordinator": "c1"}, **c),
+            ev("wave.open", "10:00:00", data={"wave": 1, "builders": 2, "reviewers": 1,
+                                              "tasks": ["t1", "t2", "t3"]}, **c),
+            ev("dispatch.launched", "10:01:00", task="t1", dispatch="d1", data={"agent": "claude"}, **c),
+            ev("dispatch.launched", "10:01:00", task="t2", dispatch="d2", data={"agent": "claude"}, **c),
+            ev("dispatch.launched", "10:01:00", task="t3", dispatch="d3", data={"agent": "claude"}, **c),
+            ev("task.done", "10:10:00", task="t1", dispatch="d1", data={"head_sha": a1}, **c),
+            ev("verify.verdict", "10:20:00", task="t1", data={"exit": 0, "head_sha": a1}, **c),
+            ev("review.verdict", "10:15:00", task="t1",
+               data={"verdict": "approve", "reviewed_sha": a1, "reviewed_wtree": w1}, **c),
+            ev("task.done", "10:15:00", task="t2", dispatch="d2", data={"head_sha": b1}, **c),
+            ev("review.verdict", "10:18:00", task="t2", data={"verdict": "approve", "reviewed_sha": b1}, **c),
+            ev("task.done", "10:28:00", task="t2", dispatch="d2", data={"head_sha": b2}, **c),
+            ev("verify.verdict", "10:38:00", task="t2", data={"exit": 0, "head_sha": b2}, **c),
+            ev("review.verdict", "10:34:00", task="t2", data={"verdict": "approve", "reviewed_sha": b2}, **c),
+            ev("task.done", "10:20:00", task="t3", dispatch="d3", data={"head_sha": c1}, **c),
+            ev("wave.close", "11:00:00", data={"wave": 1}, **c),
+        ]
+        # Hand-emitted reference log
+        hand_log = self.tmp / "hand.jsonl"
+        events.append_events(hand_log, base_events + [
+            ev("unit.closed", "10:42:00", task="t1", data={"head_sha": a1, "head_wtree": w1}, **c),
+            ev("unit.suspect", "10:25:00", task="t2", **c),
+            ev("review.voided", "10:25:00", task="t2", data={"reviewed_sha": b1, "head_sha": b2}, **c),
+            ev("unit.closed", "10:48:00", task="t2", data={"head_sha": b2}, **c),
+            ev("unit.suspect", "10:32:00", task="t3", **c),
+            ev("unit.parked", "10:35:00", task="t3", data={"park_class": "merge-dropped", "head_sha": c1}, **c),
+        ])
+        h_ev, h_sha, h_head = events.read_log(hand_log)
+        hand_report = events.derive(h_ev, "run_mq", h_sha, h_head)
+
+        # Machine-ingested log from merge-queue DB
+        events.append_events(self.log, base_events)
+        first = self.cli("ingest-merge-queue", "--db", str(db), "--run", "run_mq", "--epoch", "1", "--clock", "host-a")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        before_bytes = self.log.read_bytes()
+        # Second ingest (even at a resumed epoch or identical epoch) must add nothing
+        second = self.cli("ingest-merge-queue", "--db", str(db), "--run", "run_mq", "--epoch", "1", "--clock", "host-a")
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(self.log.read_bytes(), before_bytes, "re-ingest must be a pure duplicate")
+        self.assertTrue(all(line.startswith("duplicate ") for line in second.stdout.splitlines()), second.stdout)
+
+        m_ev, m_sha, m_head = events.read_log(self.log)
+        mq_report = events.derive(m_ev, "run_mq", m_sha, m_head)
+        self.assertTrue(mq_report["complete"])
+        self.assertEqual(mq_report["record"]["conflicts"], 0)
+        self.assertEqual(mq_report["waves"][0]["row"], hand_report["waves"][0]["row"])
+        self.assertEqual(mq_report["waves"][0]["outcomes"], hand_report["waves"][0]["outcomes"])
+        self.assertEqual(self.metric(mq_report, 1, "rework")["value"], "2/3")
+        self.assertEqual(self.metric(mq_report, 1, "freshness")["value"], "1")
+        self.assertEqual(self.metric(mq_report, 1, "throughput")["value"], "2.00/h")
+
+    def test_ingest_merge_queue_errors_and_empty_run(self):
+        missing = self.cli("ingest-merge-queue", "--db", str(self.tmp / "nope.db"),
+                           "--run", "r1", "--epoch", "1", "--clock", "host-a")
+        self.assertEqual(missing.returncode, 2)
+        bad = self.tmp / "bad.db"
+        bad.write_text("not sqlite", encoding="utf-8")
+        corrupt = self.cli("ingest-merge-queue", "--db", str(bad),
+                           "--run", "r1", "--epoch", "1", "--clock", "host-a")
+        self.assertEqual(corrupt.returncode, 3)
+        _store, db = self._mq_store()
+        empty = self.cli("ingest-merge-queue", "--db", str(db),
+                         "--run", "no-such-run", "--epoch", "1", "--clock", "host-a")
+        self.assertEqual(empty.returncode, 1)
+        # Edge branches: parked receipt, resolved(bounce), reconciled(failed), and skipped invalid unit/SHA.
+        store, db2 = self._mq_store()
+        with store.tx() as conn:
+            conn.execute(
+                "INSERT INTO mq_queues(repo, base, default_branch, mode, remote, host, consent, created_at) "
+                "VALUES ('github.com/o/r', 'feat/y', 'main', 'gh', 'origin', 'github.com', 'c', ?)", (self.TEN,))
+            for eid, seq, unit, rsha in (
+                ("e_p", 1, "t_p", sha("aa")),
+                ("e_b", 2, "t_b", sha("bb")),
+                ("e_bad", 3, "bad unit!", sha("cc")),
+                ("e_nohead", 4, "t_nh", "not-a-sha"),
+            ):
+                conn.execute(
+                    "INSERT INTO mq_entries(entry_id, repo, base, seq, run_id, unit, pr, branch, "
+                    "reviewed_sha, delivery_key, payload_fp, deliveries_json, state, created_at, updated_at) "
+                    "VALUES (?, 'github.com/o/r', 'feat/y', ?, 'run_e', ?, 1, 'b', ?, ?, 'fp', '[]', 'failed', ?, ?)",
+                    (eid, seq, unit, rsha, f"k_{eid}", self.TEN, self.TEN),
+                )
+            for eid, kind, body in (
+                ("e_p", "parked", {"park_class": "human-gate", "headSha": sha("aa")}),
+                ("e_b", "reconciled", {"resolution": "failed", "reason": "merge_refused"}),
+                ("e_b", "resolved", {"action": "bounce", "reason": "needs fixes"}),
+                ("e_bad", "acknowledged", {"mergeSha": sha("cc")}),
+                ("e_nohead", "acknowledged", {}),
+            ):
+                conn.execute(
+                    "INSERT INTO mq_receipts(repo, base, entry_id, kind, epoch, holder, body_json, created_at) "
+                    "VALUES ('github.com/o/r', 'feat/y', ?, ?, 1, 'c', ?, ?)",
+                    (eid, kind, json.dumps(body, sort_keys=True), self.TEN + 60),
+                )
+        edge = self.cli("ingest-merge-queue", "--db", str(db2),
+                        "--run", "run_e", "--epoch", "1", "--clock", "host-a")
+        self.assertEqual(edge.returncode, 0, edge.stderr)
+        self.assertIn("skipped", edge.stderr)
+        kinds = sorted(e["kind"] for e in events.read_log(self.log)[0])
+        self.assertEqual(kinds, ["unit.parked", "unit.suspect", "unit.suspect"])
+
+    def test_ingest_launch_records_settled_intents_skips_unlaunched_defers_open_and_dedups(self):
+        if str(ROOT) not in sys.path:
+            sys.path.insert(0, str(ROOT))
+        LocalStateStore = importlib.import_module("runtime.providers.local_state").LocalStateStore
+        db = self.tmp / "launch.db"
+        store = LocalStateStore(db, env={})
+        def t(m):
+            return self.TEN + 60 * m
+        recovery_died = json.dumps({
+            "kind": "launch_recovery", "resolution": "exited", "reconciledAt": t(12),
+            "dispatch": {"id": "d_died", "before": "running", "after": "died"},
+            "effective": {"agent": "claude"},
+        }, sort_keys=True)
+        completed_rcpt = json.dumps({"effective": {"agent": "codex"}}, sort_keys=True)
+        failed_rcpt = json.dumps({"state": "failed", "withdrawn": True}, sort_keys=True)
+        with store._connect() as conn:
+            rows = [
+                ("i_ok", "req1", "a" * 64, "t1", "run_l", "d_ok", "h1", "/lane/1", "receipted", "completed", "tok", completed_rcpt, t(1), t(2)),
+                ("i_died", "req2", "b" * 64, "t1", "run_l", "d_died", "h2", "/lane/2", "published", "completed", "tok", recovery_died, t(3), t(12)),
+                ("i_fail", "req3", "c" * 64, "t2", "run_l", "d_fail", "h3", "/lane/3", "registered", "failed", "tok", failed_rcpt, t(4), t(5)),
+                ("i_open", "req4", "d" * 64, "t2", "run_l", "d_open", "h4", "/lane/4", "registered", None, "tok", None, t(6), t(6)),
+            ]
+            for r in rows:
+                conn.execute(
+                    "INSERT INTO launch_intents(intent_id, request_id, payload_sha256, task_id, run_id, "
+                    "dispatch_id, terminal_handle, lane_dir, phase, outcome, owner_token, receipt_json, "
+                    "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", r,
+                )
+        first = self.cli("ingest-launch", "--db", str(db), "--run", "run_l", "--epoch", "1", "--clock", "host-a")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertIn("failed before any worker ran", first.stderr)
+        self.assertIn("still open or unknown", first.stderr)
+        recorded = events.read_log(self.log)[0]
+        launched = [(e["dispatch"], e["data"]["agent"]) for e in recorded if e["kind"] == "dispatch.launched"]
+        died = [e["dispatch"] for e in recorded if e["kind"] == "dispatch.died"]
+        self.assertEqual(launched, [("d_ok", "codex"), ("d_died", "claude")])
+        self.assertEqual(died, ["d_died"])
+        # Re-ingest must add nothing
+        before = self.log.read_bytes()
+        again = self.cli("ingest-launch", "--db", str(db), "--run", "run_l", "--epoch", "1", "--clock", "host-a")
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual(self.log.read_bytes(), before)
+        self.assertTrue(all(line.startswith("duplicate ") for line in again.stdout.splitlines()))
+        # Missing / invalid DB errors
+        self.assertEqual(self.cli("ingest-launch", "--db", str(self.tmp / "missing.db"),
+                                  "--run", "run_l", "--epoch", "1", "--clock", "host-a").returncode, 2)
+        bad = self.tmp / "bad-launch.db"
+        bad.write_text("bad", encoding="utf-8")
+        self.assertEqual(self.cli("ingest-launch", "--db", str(bad),
+                                  "--run", "run_l", "--epoch", "1", "--clock", "host-a").returncode, 3)
+        # Minimal launch_intents-only DB (no dispatches table) + empty run exit 1
+        solo = self.tmp / "solo-launch.db"
+        with sqlite3.connect(solo) as conn:
+            conn.execute(
+                "CREATE TABLE launch_intents (intent_id TEXT PRIMARY KEY, task_id TEXT, run_id TEXT, "
+                "dispatch_id TEXT, phase TEXT, outcome TEXT, receipt_json TEXT, created_at REAL, updated_at REAL)"
+            )
+            conn.execute(
+                "INSERT INTO launch_intents VALUES ('i_solo', 't_s', 'run_s', 'd_s', 'receipted', "
+                "'completed', '{\"agent\":\"claude\"}', ?, ?)", (t(1), t(2)),
+            )
+            conn.execute(
+                "INSERT INTO launch_intents VALUES ('i_weird', 't_s', 'run_s', 'd_w', 'receipted', "
+                "'mystery', '{}', ?, ?)", (t(3), t(3)),
+            )
+        solo_log = self.tmp / "solo.jsonl"
+        res = self.cli("--log", str(solo_log), "ingest-launch", "--db", str(solo),
+                       "--run", "run_s", "--epoch", "1", "--clock", "host-a")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("skipped", res.stderr)
+        self.assertEqual(self.cli("--log", str(solo_log), "ingest-launch", "--db", str(solo),
+                                  "--run", "no-run", "--epoch", "1", "--clock", "host-a").returncode, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
