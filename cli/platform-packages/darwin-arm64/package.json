@@ -1,6 +1,6 @@
 {
   "name": "@open-fleet/cli-darwin-arm64",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "open-fleet native binary for macOS arm64",
   "license": "MIT",
   "os": ["darwin"],

@@ -202,6 +202,161 @@ class RustCatalogAndMcpOracle(unittest.TestCase):
         resp = json.loads(body.decode("utf-8"))
         self.assertEqual(resp, {"jsonrpc": "2.0", "id": 99, "result": {}})
 
+    def test_native_session_lifecycle_and_5k_benchmark(self):
+        import tempfile
+        bench = json.loads(self._cli("session", "benchmark", "--repo", str(ROOT), "--json").stdout)
+        self.assertGreaterEqual(bench["mission_count"], 22)
+        self.assertTrue(bench["all_within_ceiling"], bench)
+        self.assertGreater(bench["avg_reduction_pct"], 85.0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sdir = Path(tmp) / "sessions"
+            started = json.loads(
+                self._cli(
+                    "session", "start", "ship-it", "Add GET /healthz endpoint",
+                    "--base", "fleet/healthz", "--repo", str(ROOT),
+                    "--sessions-dir", str(sdir), "--json",
+                ).stdout
+            )
+            sid = started["session"]["session_id"]
+            self.assertEqual(started["session"]["current_phase"], "preflight")
+            self.assertTrue(started["packet"]["token_budget"]["within_ceiling"])
+
+            # Fail closed without receipt
+            bad = subprocess.run(
+                [str(BINARY), "session", "advance", sid, "--repo", str(ROOT),
+                 "--sessions-dir", str(sdir), "--json"],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(bad.returncode, 1)
+
+            # Advance preflight -> freeze
+            step1 = json.loads(
+                self._cli("session", "advance", sid, "--ok", "--repo", str(ROOT),
+                          "--sessions-dir", str(sdir), "--json").stdout
+            )
+            self.assertEqual(step1["to_phase"], "freeze")
+
+            # Refuse agent actor on human gate
+            bad_actor = subprocess.run(
+                [str(BINARY), "session", "approve", sid, "--gate", "freeze",
+                 "--actor", "claude", "--rationale", "auto-approving",
+                 "--repo", str(ROOT), "--sessions-dir", str(sdir), "--json"],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(bad_actor.returncode, 1)
+
+            # Approve as real human -> advance freeze -> execute -> verify -> promote -> close
+            self._cli("session", "approve", sid, "--gate", "freeze",
+                      "--actor", "Ravindra Kumar", "--rationale", "Spec AC-1 frozen",
+                      "--repo", str(ROOT), "--sessions-dir", str(sdir), "--json")
+            self._cli("session", "advance", sid, "--repo", str(ROOT),
+                      "--sessions-dir", str(sdir), "--json")
+            self._cli("session", "advance", sid, "--ok", "--repo", str(ROOT),
+                      "--sessions-dir", str(sdir), "--json")
+            self._cli("session", "advance", sid, "--ok", "--repo", str(ROOT),
+                      "--sessions-dir", str(sdir), "--json")
+            closed = json.loads(
+                self._cli("session", "advance", sid, "--terminal", "PROMOTION_READY",
+                          "--repo", str(ROOT), "--sessions-dir", str(sdir), "--json").stdout
+            )
+            self.assertTrue(closed["closed"])
+            self.assertEqual(closed["session"]["terminal_state"], "PROMOTION-READY")
+            self.assertEqual(closed["session"]["terminal_class"], "clean")
+
+    def test_native_solo_review_ci_check_readiness_and_mcp_wave3b(self):
+        import tempfile
+        # Native readiness
+        rdy = json.loads(self._cli("readiness", "--repo", str(ROOT), "--json").stdout)
+        self.assertGreaterEqual(rdy["total_missions"], 22)
+        self.assertGreaterEqual(rdy["proven_count"], 5)
+
+        # Native ci-check workflow snippet
+        snip = self._cli("ci-check", "--workflow-snippet", "--workflow-base", "main").stdout
+        self.assertIn("open-fleet-verify", snip)
+
+        # Native solo-review irreversibility stop-list + ci-check floor detection in temp git repo
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            env = {
+                **os.environ,
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_AUTHOR_NAME": "T",
+                "GIT_AUTHOR_EMAIL": "t@t.invalid",
+                "GIT_COMMITTER_NAME": "T",
+                "GIT_COMMITTER_EMAIL": "t@t.invalid",
+            }
+            subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], env=env, check=True)
+            (repo / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "-A"], env=env, check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-qm", "init"], env=env, check=True)
+            base_sha = subprocess.run(
+                ["git", "-C", str(repo), "rev-parse", "HEAD"],
+                env=env, capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            (repo / "auth_guard.py").write_text("def authorize(tok):\n    return bool(tok)\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "-A"], env=env, check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-qm", "auth"], env=env, check=True)
+
+            sr_env = {**env, "OPEN_FLEET_ROOT": str(ROOT)}
+            sr = subprocess.run(
+                [str(BINARY), "solo-review", "--base", base_sha, "--repo", str(repo),
+                 "--nc-command", "true", "--json"],
+                env=sr_env, capture_output=True, text=True, check=True,
+            )
+            sr_doc = json.loads(sr.stdout)
+            self.assertEqual(sr_doc["lighting"]["effective"], "lit")
+            self.assertFalse(sr_doc["lighting"]["dark_eligible"])
+            self.assertIn("AUTH", sr_doc["diff_scope"]["lit_required_triggers"])
+
+            # Forcing dark-eligible on AUTH must fail closed (exit 1)
+            forced = subprocess.run(
+                [str(BINARY), "solo-review", "--base", base_sha, "--repo", str(repo),
+                 "--lighting", "dark-eligible", "--nc-command", "true", "--json"],
+                env=sr_env, capture_output=True, text=True,
+            )
+            self.assertEqual(forced.returncode, 1)
+
+            # Native ci-check passes on clean diff and fails on --fail-on-risk-lenses
+            ci_ok = subprocess.run(
+                [str(BINARY), "ci-check", "--base", base_sha, "--repo", str(repo), "--json"],
+                env=sr_env, capture_output=True, text=True, check=True,
+            )
+            self.assertTrue(json.loads(ci_ok.stdout)["ok"])
+            ci_risk = subprocess.run(
+                [str(BINARY), "ci-check", "--base", base_sha, "--repo", str(repo),
+                 "--fail-on-risk-lenses", "--json"],
+                env=sr_env, capture_output=True, text=True,
+            )
+            self.assertEqual(ci_risk.returncode, 1)
+
+        # Native MCP Wave 3B tools (preflight, chain_check, readiness)
+        reqs = [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": "fleet_preflight", "arguments": {"mission": "review-it", "runtime": "posix", "mode": "readonly"}}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": "fleet_preflight", "arguments": {"mission": "pin-it", "runtime": "posix", "mode": "readonly"}}},
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+             "params": {"name": "fleet_chain_check", "arguments": {"terminal": "ABANDONED", "allowed": ["ABANDONED", "MIGRATED"]}}},
+            {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+             "params": {"name": "fleet_readiness", "arguments": {}}},
+        ]
+        wire = "\n".join(json.dumps(r) for r in reqs) + "\n"
+        proc = subprocess.run(
+            [str(BINARY), "mcp", "--root", str(ROOT), "--repo", str(ROOT)],
+            input=wire, capture_output=True, text=True, check=True, timeout=30,
+        )
+        by_id = {r["id"]: r for r in (json.loads(l) for l in proc.stdout.splitlines() if l.strip())}
+        self.assertFalse(by_id[1]["result"]["isError"])
+        self.assertTrue(by_id[1]["result"]["structuredContent"]["ok"])
+        self.assertTrue(by_id[2]["result"]["isError"])
+        self.assertEqual(by_id[2]["result"]["structuredContent"]["missing_capability"], "cap:orca-self-audit")
+        self.assertTrue(by_id[3]["result"]["isError"])
+        self.assertEqual(by_id[3]["result"]["structuredContent"]["class"], "degraded")
+        self.assertGreaterEqual(by_id[4]["result"]["structuredContent"]["total_missions"], 22)
+
 
 def main(argv=None):
     global BINARY

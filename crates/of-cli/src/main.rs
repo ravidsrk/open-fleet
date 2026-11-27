@@ -17,6 +17,13 @@ use of_ledgers::egress::{
     GrantsArgs as EgGrantsArgs, VerifyArgs as EgVerifyArgs, WriteArgs as EgWriteArgs,
 };
 use of_mcp::{serve_stdio, OpenFleetMcpServer};
+use of_verify::chain_check::{
+    cmd_audit as chain_audit, cmd_classify as chain_classify, cmd_gate as chain_gate,
+};
+use of_verify::ci_check::{
+    render_step_summary as ci_render_summary, render_workflow_snippet as ci_render_snippet,
+    run_ci_verify, CiCheckArgs,
+};
 use of_verify::diff_scope::{run_cli as diff_scope_run, DiffScopeArgs};
 use of_verify::dispatch_sign::{
     cmd_sign as ds_sign, cmd_sign_transcript as ds_sign_transcript, cmd_verify as ds_verify,
@@ -27,8 +34,16 @@ use of_verify::inventory::{
     cmd_check as inv_check, cmd_receipt as inv_receipt, cmd_sign as inv_sign,
     cmd_write as inv_write, ReceiptArgs as InvReceiptArgs,
 };
+use of_verify::preflight::run_raw_cli as preflight_run_raw;
 use of_verify::proof_status::{run_cli as proof_status_run, ProofStatusArgs};
 use of_verify::quarantine::{run_cli as quarantine_run, QuarantineArgs};
+use of_verify::readiness::{readiness_report, run_negative_probes};
+use of_verify::sessions::{
+    advance_session, approve_gate, benchmark_progressive_savings, build_phase_packet,
+    list_sessions, load_session, start_session, AdvanceSessionArgs, ApproveGateArgs,
+    StartSessionArgs,
+};
+use of_verify::solo_review::{run_solo_review, SoloReviewArgs};
 use std::env;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -278,6 +293,106 @@ enum InventoryCmd {
 }
 
 #[derive(Subcommand)]
+enum ChainCheckCmd {
+    /// Classify a mission terminal state (clean | degraded | handoff | unknown).
+    Classify {
+        #[arg(allow_hyphen_values = true)]
+        terminal: String,
+    },
+    /// Gate a mission chain boundary against declared allowed terminals.
+    Gate {
+        #[arg(long, allow_hyphen_values = true)]
+        allowed: String,
+        #[arg(allow_hyphen_values = true)]
+        terminal: String,
+    },
+    /// Audit every skills/*/SKILL.md terminal label against the classification rule.
+    Audit {
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SessionCmd {
+    /// Start a progressive (<5K-token/phase) mission session.
+    Start {
+        mission: String,
+        goal: Vec<String>,
+        #[arg(long, default_value = "")]
+        base: String,
+        #[arg(long, default_value = "auto")]
+        runtime: String,
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        #[arg(long = "sessions-dir")]
+        sessions_dir: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List progressive sessions persisted for a repo.
+    List {
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        #[arg(long = "sessions-dir")]
+        sessions_dir: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the <5K-token active phase packet.
+    Packet {
+        session_id: String,
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        #[arg(long = "sessions-dir")]
+        sessions_dir: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Record explicit human approval for a one-way gate (freeze, promote).
+    Approve {
+        session_id: String,
+        #[arg(long)]
+        gate: String,
+        #[arg(long, allow_hyphen_values = true)]
+        actor: String,
+        #[arg(long, allow_hyphen_values = true)]
+        rationale: String,
+        #[arg(long = "contract-digest", default_value = "")]
+        contract_digest: String,
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        #[arg(long = "sessions-dir")]
+        sessions_dir: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Advance a progressive session by one phase (fail-closed).
+    Advance {
+        session_id: String,
+        #[arg(long)]
+        ok: bool,
+        #[arg(long = "receipt-json", default_value = "", allow_hyphen_values = true)]
+        receipt_json: String,
+        #[arg(long, default_value = "", allow_hyphen_values = true)]
+        terminal: String,
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        #[arg(long = "sessions-dir")]
+        sessions_dir: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Measure <5K-token progressive savings across all catalog missions.
+    Benchmark {
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum Commands {
     /// Diff-scoped floor guard: block suppressed checkers, skipped tests, deleted assertions, lowered thresholds, and guard-surface edits.
     Floor {
@@ -405,6 +520,100 @@ enum Commands {
         check: bool,
         #[arg(long)]
         root: Option<PathBuf>,
+    },
+    /// Fail-closed Phase-0 preflight invariants (capabilities, quarantine, BASE != default branch).
+    #[command(disable_help_flag = true)]
+    Preflight {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
+    /// Mission-chaining degraded-terminal classifier, gate, and catalog auditor.
+    #[command(name = "chain-check")]
+    ChainCheck {
+        #[command(subcommand)]
+        sub: ChainCheckCmd,
+    },
+    /// Progressive (<5K-token/phase) mission state machines with enforced human gates.
+    Session {
+        #[command(subcommand)]
+        sub: SessionCmd,
+    },
+    /// Honest solo-developer verified review lane (native diff-scope + floor-guard + blind packet).
+    #[command(name = "solo-review")]
+    SoloReview {
+        #[arg(long, default_value = "origin/main", allow_hyphen_values = true)]
+        base: String,
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        #[arg(long, default_value = "")]
+        contract: String,
+        #[arg(long, default_value = "")]
+        builder: String,
+        #[arg(long, default_value = "")]
+        manifest: String,
+        #[arg(long, default_value = "auto")]
+        lighting: String,
+        #[arg(long = "nc-command", default_value = "", allow_hyphen_values = true)]
+        nc_command: String,
+        #[arg(long = "with-gh")]
+        with_gh: bool,
+        #[arg(long = "transcript-out", default_value = "")]
+        transcript_out: String,
+        #[arg(long = "transcript-key", default_value = "")]
+        transcript_key: String,
+        #[arg(long = "packet-out", default_value = "")]
+        packet_out: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Composable PR verification gate (native floor-guard + diff-scope + optional verify.py).
+    #[command(name = "ci-check")]
+    CiCheck {
+        #[arg(long, default_value = "origin/main", allow_hyphen_values = true)]
+        base: String,
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        #[arg(long = "skip-floor")]
+        skip_floor: bool,
+        #[arg(long = "skip-scope")]
+        skip_scope: bool,
+        #[arg(long = "strict-scope")]
+        strict_scope: bool,
+        #[arg(long = "fail-on-risk-lenses")]
+        fail_on_risk_lenses: bool,
+        #[arg(long, default_value = "")]
+        manifest: String,
+        #[arg(long = "contract-source", default_value = "")]
+        contract_source: String,
+        #[arg(long = "contract-digest", default_value = "")]
+        contract_digest: String,
+        #[arg(long = "execute-nc")]
+        execute_nc: bool,
+        #[arg(long = "nc-command", default_value = "", allow_hyphen_values = true)]
+        nc_command: String,
+        #[arg(long = "allow-static-nc")]
+        allow_static_nc: bool,
+        #[arg(long = "no-gh")]
+        no_gh: bool,
+        #[arg(long = "workflow-snippet")]
+        workflow_snippet: bool,
+        #[arg(long = "workflow-base", default_value = "main")]
+        workflow_base: String,
+        #[arg(long = "with-manifest-example")]
+        with_manifest_example: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Honest proof-graduation & multi-harness certification readiness workbench.
+    Readiness {
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        #[arg(long = "check-cert")]
+        check_cert: bool,
+        #[arg(long)]
+        probes: bool,
+        #[arg(long)]
+        json: bool,
     },
     /// Start the native zero-Python MCP JSON-RPC 2.0 stdio server.
     Mcp {
@@ -960,6 +1169,480 @@ fn run() -> i32 {
         },
         Commands::ProofStatus { json, check, root } => {
             proof_status_run(&ProofStatusArgs { json, check, root })
+        }
+        Commands::Preflight { args } => preflight_run_raw(&args),
+        Commands::ChainCheck { sub } => match sub {
+            ChainCheckCmd::Classify { terminal } => chain_classify(&terminal),
+            ChainCheckCmd::Gate { allowed, terminal } => chain_gate(&allowed, &terminal),
+            ChainCheckCmd::Audit { root } => chain_audit(root.as_deref()),
+        },
+        Commands::Session { sub } => {
+            let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            match sub {
+                SessionCmd::Benchmark { repo, json } => {
+                    let target = repo.unwrap_or(cwd);
+                    let root = match require_catalog(&target) {
+                        Ok(r) => r,
+                        Err(code) => return code,
+                    };
+                    let bench = benchmark_progressive_savings(&root);
+                    if json {
+                        if let Ok(s) = serde_json::to_string_pretty(&bench) {
+                            println!("{s}");
+                        }
+                    } else {
+                        println!(
+                            "Progressive Phase Budget Benchmark ({} missions · ceiling={} tok · avg reduction={}%)",
+                            bench.get("mission_count").and_then(|v| v.as_u64()).unwrap_or(0),
+                            bench.get("ceiling_tokens").and_then(|v| v.as_u64()).unwrap_or(5000),
+                            bench.get("avg_reduction_pct").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                        );
+                    }
+                    if bench
+                        .get("all_within_ceiling")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                    {
+                        0
+                    } else {
+                        1
+                    }
+                }
+                SessionCmd::List {
+                    repo,
+                    sessions_dir,
+                    json,
+                } => {
+                    let target = repo.unwrap_or(cwd);
+                    let items = list_sessions(&target, sessions_dir.as_deref());
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({"sessions": items}))
+                                .unwrap_or_else(|_| "{}".to_string())
+                        );
+                    } else if items.is_empty() {
+                        println!("No progressive sessions yet. Start one with: open-fleet session start <mission> \"<goal>\"");
+                    } else {
+                        for it in &items {
+                            println!(
+                                "{}  [{}]  mission={}  phase={}  terminal={}",
+                                it.get("session_id").and_then(|v| v.as_str()).unwrap_or(""),
+                                it.get("status").and_then(|v| v.as_str()).unwrap_or(""),
+                                it.get("mission").and_then(|v| v.as_str()).unwrap_or(""),
+                                it.get("current_phase")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(""),
+                                it.get("terminal_state")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("—"),
+                            );
+                        }
+                    }
+                    0
+                }
+                SessionCmd::Start {
+                    mission,
+                    goal,
+                    base,
+                    runtime,
+                    repo,
+                    sessions_dir,
+                    json,
+                } => {
+                    let target = repo.unwrap_or(cwd);
+                    let root = match require_catalog(&target) {
+                        Ok(r) => r,
+                        Err(code) => return code,
+                    };
+                    let goal_s = goal.join(" ");
+                    match start_session(&StartSessionArgs {
+                        mission: &mission,
+                        goal: &goal_s,
+                        root: &root,
+                        repo: &target,
+                        sessions_dir: sessions_dir.as_deref(),
+                        base_branch: &base,
+                        runtime: &runtime,
+                    }) {
+                        Ok(res) => {
+                            if json {
+                                if let Ok(s) = serde_json::to_string_pretty(&res) {
+                                    println!("{s}");
+                                }
+                            } else {
+                                let pkt = &res["packet"];
+                                println!(
+                                    "Started session: {}  (mission={} · phase={})",
+                                    pkt["session_id"].as_str().unwrap_or(""),
+                                    pkt["mission"].as_str().unwrap_or(""),
+                                    pkt["phase"]["id"].as_str().unwrap_or(""),
+                                );
+                            }
+                            0
+                        }
+                        Err(err) => {
+                            if json {
+                                println!("{}", serde_json::json!({"ok": false, "error": err}));
+                            } else {
+                                eprintln!("open-fleet session: FAIL: {err}");
+                            }
+                            1
+                        }
+                    }
+                }
+                SessionCmd::Packet {
+                    session_id,
+                    repo,
+                    sessions_dir,
+                    json,
+                } => {
+                    let target = repo.unwrap_or(cwd);
+                    let root = match require_catalog(&target) {
+                        Ok(r) => r,
+                        Err(code) => return code,
+                    };
+                    match load_session(&session_id, &target, sessions_dir.as_deref()) {
+                        Ok(st) => {
+                            let pkt = build_phase_packet(&st, &root);
+                            if json {
+                                if let Ok(s) = serde_json::to_string_pretty(&pkt) {
+                                    println!("{s}");
+                                }
+                            } else {
+                                println!(
+                                    "Session {} · mission={} · phase={}",
+                                    pkt["session_id"].as_str().unwrap_or(""),
+                                    pkt["mission"].as_str().unwrap_or(""),
+                                    pkt["phase"]["id"].as_str().unwrap_or(""),
+                                );
+                            }
+                            0
+                        }
+                        Err(err) => {
+                            if json {
+                                println!("{}", serde_json::json!({"ok": false, "error": err}));
+                            } else {
+                                eprintln!("open-fleet session: FAIL: {err}");
+                            }
+                            1
+                        }
+                    }
+                }
+                SessionCmd::Approve {
+                    session_id,
+                    gate,
+                    actor,
+                    rationale,
+                    contract_digest,
+                    repo,
+                    sessions_dir,
+                    json,
+                } => {
+                    let target = repo.unwrap_or(cwd);
+                    let root = match require_catalog(&target) {
+                        Ok(r) => r,
+                        Err(code) => return code,
+                    };
+                    match approve_gate(&ApproveGateArgs {
+                        session_id: &session_id,
+                        gate: &gate,
+                        actor: &actor,
+                        rationale: &rationale,
+                        contract_digest: &contract_digest,
+                        root: &root,
+                        repo: &target,
+                        sessions_dir: sessions_dir.as_deref(),
+                    }) {
+                        Ok(res) => {
+                            if json {
+                                if let Ok(s) = serde_json::to_string_pretty(&res) {
+                                    println!("{s}");
+                                }
+                            } else {
+                                println!(
+                                    "Approved gate '{}' by {}",
+                                    res["approval"]["gate"].as_str().unwrap_or(""),
+                                    res["approval"]["actor"].as_str().unwrap_or(""),
+                                );
+                            }
+                            0
+                        }
+                        Err(err) => {
+                            if json {
+                                println!("{}", serde_json::json!({"ok": false, "error": err}));
+                            } else {
+                                eprintln!("open-fleet session: FAIL: {err}");
+                            }
+                            1
+                        }
+                    }
+                }
+                SessionCmd::Advance {
+                    session_id,
+                    ok,
+                    receipt_json,
+                    terminal,
+                    repo,
+                    sessions_dir,
+                    json,
+                } => {
+                    let target = repo.unwrap_or(cwd);
+                    let root = match require_catalog(&target) {
+                        Ok(r) => r,
+                        Err(code) => return code,
+                    };
+                    let rec = if !receipt_json.trim().is_empty() {
+                        match serde_json::from_str::<serde_json::Value>(&receipt_json) {
+                            Ok(serde_json::Value::Object(m)) => Some(m),
+                            _ => {
+                                eprintln!(
+                                    "open-fleet session: FAIL: receipt must be a JSON object"
+                                );
+                                return 1;
+                            }
+                        }
+                    } else if ok {
+                        let mut m = serde_json::Map::new();
+                        m.insert("ok".to_string(), serde_json::Value::Bool(true));
+                        Some(m)
+                    } else {
+                        None
+                    };
+                    match advance_session(&AdvanceSessionArgs {
+                        session_id: &session_id,
+                        receipt: rec,
+                        terminal_state: &terminal,
+                        root: &root,
+                        repo: &target,
+                        sessions_dir: sessions_dir.as_deref(),
+                    }) {
+                        Ok(res) => {
+                            if json {
+                                if let Ok(s) = serde_json::to_string_pretty(&res) {
+                                    println!("{s}");
+                                }
+                            } else if res.get("closed").and_then(|v| v.as_bool()).unwrap_or(false) {
+                                println!(
+                                    "Closed session {}: terminal={} ({})",
+                                    session_id,
+                                    res["session"]["terminal_state"].as_str().unwrap_or(""),
+                                    res["session"]["terminal_class"].as_str().unwrap_or(""),
+                                );
+                            } else {
+                                println!(
+                                    "Advanced {}: {} -> {}",
+                                    session_id,
+                                    res["from_phase"].as_str().unwrap_or(""),
+                                    res["to_phase"].as_str().unwrap_or(""),
+                                );
+                            }
+                            0
+                        }
+                        Err(err) => {
+                            if json {
+                                println!("{}", serde_json::json!({"ok": false, "error": err}));
+                            } else {
+                                eprintln!("open-fleet session: FAIL: {err}");
+                            }
+                            1
+                        }
+                    }
+                }
+            }
+        }
+        Commands::SoloReview {
+            base,
+            repo,
+            contract,
+            builder,
+            manifest,
+            lighting,
+            nc_command,
+            with_gh,
+            transcript_out,
+            transcript_key,
+            packet_out,
+            json,
+        } => {
+            let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let target = repo.unwrap_or(cwd);
+            let root = match require_catalog(&target) {
+                Ok(r) => r,
+                Err(code) => return code,
+            };
+            match run_solo_review(&SoloReviewArgs {
+                base,
+                root,
+                repo: target,
+                contract_path: contract,
+                builder_harness: builder,
+                manifest,
+                lighting,
+                nc_command,
+                no_gh: !with_gh,
+                transcript_out,
+                transcript_key,
+                packet_out,
+            }) {
+                Ok(res) => {
+                    let ok = res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+                    if json {
+                        if let Ok(s) = serde_json::to_string_pretty(&res) {
+                            println!("{s}");
+                        }
+                    } else {
+                        println!(
+                            "open-fleet solo-review ({}) · base={}",
+                            res["review_mode"].as_str().unwrap_or(""),
+                            res["base"].as_str().unwrap_or(""),
+                        );
+                        println!(
+                            "Floor guard:  {}",
+                            if res["floor_guard"]["ok"].as_bool().unwrap_or(false) {
+                                "CLEAN"
+                            } else {
+                                "FAIL"
+                            }
+                        );
+                        println!(
+                            "Lighting:     {} — {}",
+                            res["lighting"]["effective"].as_str().unwrap_or(""),
+                            res["lighting"]["reason"].as_str().unwrap_or(""),
+                        );
+                    }
+                    if ok {
+                        0
+                    } else {
+                        1
+                    }
+                }
+                Err(err) => {
+                    if json {
+                        println!("{}", serde_json::json!({"ok": false, "error": err}));
+                    } else {
+                        eprintln!("open-fleet solo-review: FAIL: {err}");
+                    }
+                    1
+                }
+            }
+        }
+        Commands::CiCheck {
+            base,
+            repo,
+            skip_floor,
+            skip_scope,
+            strict_scope,
+            fail_on_risk_lenses,
+            manifest,
+            contract_source,
+            contract_digest,
+            execute_nc,
+            nc_command,
+            allow_static_nc,
+            no_gh,
+            workflow_snippet,
+            workflow_base,
+            with_manifest_example,
+            json,
+        } => {
+            if workflow_snippet {
+                print!(
+                    "{}",
+                    ci_render_snippet(&workflow_base, with_manifest_example)
+                );
+                return 0;
+            }
+            let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let target = repo.unwrap_or(cwd);
+            let root = match require_catalog(&target) {
+                Ok(r) => r,
+                Err(code) => return code,
+            };
+            match run_ci_verify(&CiCheckArgs {
+                base,
+                root,
+                repo: target,
+                run_floor_guard: !skip_floor,
+                run_diff_scope: !skip_scope,
+                strict_scope,
+                fail_on_risk_lenses,
+                manifest,
+                contract_source,
+                contract_digest,
+                execute_nc,
+                nc_command,
+                allow_static_nc,
+                no_gh,
+            }) {
+                Ok(res) => {
+                    let ok = res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+                    if json {
+                        if let Ok(s) = serde_json::to_string_pretty(&res) {
+                            println!("{s}");
+                        }
+                    } else {
+                        println!("{}", ci_render_summary(&res));
+                    }
+                    if ok {
+                        0
+                    } else {
+                        1
+                    }
+                }
+                Err(err) => {
+                    if json {
+                        println!("{}", serde_json::json!({"ok": false, "error": err}));
+                    } else {
+                        eprintln!("open-fleet ci-check: FAIL: {err}");
+                    }
+                    1
+                }
+            }
+        }
+        Commands::Readiness {
+            repo,
+            check_cert,
+            probes,
+            json,
+        } => {
+            let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let target = repo.unwrap_or(cwd);
+            let root = match require_catalog(&target) {
+                Ok(r) => r,
+                Err(code) => return code,
+            };
+            let mut rep = readiness_report(&root, ENGINE_VERSION, check_cert);
+            let cert_ok = rep
+                .get("certification_check")
+                .and_then(|v| v.get("ok"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let mut probes_ok = true;
+            if probes {
+                let pr = run_negative_probes(&root);
+                probes_ok = pr.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+                if let Some(obj) = rep.as_object_mut() {
+                    obj.insert("negative_probes".to_string(), pr);
+                }
+            }
+            if json {
+                if let Ok(s) = serde_json::to_string_pretty(&rep) {
+                    println!("{s}");
+                }
+            } else {
+                println!(
+                    "open-fleet readiness · proven={}/{} · binding_runs={}",
+                    rep["proven_count"].as_u64().unwrap_or(0),
+                    rep["total_missions"].as_u64().unwrap_or(0),
+                    rep["binding_runs_count"].as_u64().unwrap_or(0),
+                );
+            }
+            if cert_ok && probes_ok {
+                0
+            } else {
+                1
+            }
         }
         Commands::Mcp { root, repo } => {
             let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
