@@ -801,113 +801,137 @@ pub fn scan(
     findings
 }
 
-pub fn run(cfg: &FloorConfig) -> i32 {
-    let run_res = (|| -> Result<FloorReport, String> {
-        let repo = repo_root(&cfg.repo)?;
-        let resolved = gitexec::base_commit(&repo, cfg.base.as_deref())?;
-        if let Some(local_kind) = &resolved.local {
-            if let Some(lane) = gitexec::sound_lane() {
-                return Err(format!(
+pub fn evaluate(cfg: &FloorConfig) -> FloorReport {
+    let silent = FloorConfig {
+        base: cfg.base.clone(),
+        constraints: cfg.constraints.clone(),
+        waivers: cfg.waivers.clone(),
+        repo: cfg.repo.clone(),
+        quiet: true,
+        json: true,
+    };
+    match evaluate_inner(&silent) {
+        Ok(report) => report,
+        Err(err) => FloorReport {
+            status: format!("error: {err}"),
+            base: cfg.base.clone().unwrap_or_default(),
+            base_commit: String::new(),
+            findings: Vec::new(),
+            waived: 0,
+            exit_code: EXIT_CANNOT_RUN,
+        },
+    }
+}
+
+fn evaluate_inner(cfg: &FloorConfig) -> Result<FloorReport, String> {
+    let repo = repo_root(&cfg.repo)?;
+    let resolved = gitexec::base_commit(&repo, cfg.base.as_deref())?;
+    if let Some(local_kind) = &resolved.local {
+        if let Some(lane) = gitexec::sound_lane() {
+            return Err(format!(
                     "{lane} claims a sound lane, but base {:?} is {local_kind} ({}), not a remote-tracking ref or a full commit id: there the waivers and the human-grant pin are read only at one of those — --base origin/<branch> or a full commit id (W3-07)",
                     resolved.shown,
                     &resolved.commit[..12.min(resolved.commit.len())]
                 ));
-            }
-            if !cfg.json {
-                eprintln!(
+        }
+        if !cfg.json {
+            eprintln!(
                     "floor-guard: NOTE — base {:?} is {local_kind} ({}), not a remote-tracking ref or a full commit id: the change under check can move a local name and nothing binds an abbreviation, so the waivers and the human-grant pin read there are advisory; --base origin/<branch> (or a full commit id) reads them where it cannot write",
                     resolved.shown,
                     &resolved.commit[..12.min(resolved.commit.len())]
                 );
-            }
         }
-        let mb = merge_base(&repo, &resolved.commit)?;
-        let diff_text = collect_diff(&repo, &mb)?;
-        let (added, removed) = parse_diff(&diff_text)?;
-        let findings = scan(&added, &removed, &cfg.constraints, &repo, Some(&mb));
+    }
+    let mb = merge_base(&repo, &resolved.commit)?;
+    let diff_text = collect_diff(&repo, &mb)?;
+    let (added, removed) = parse_diff(&diff_text)?;
+    let findings = scan(&added, &removed, &cfg.constraints, &repo, Some(&mb));
 
-        let wrel = waiver_rel(&repo, &cfg.waivers)?;
-        let waiver_text = read_at(&repo, &resolved.commit, &wrel)?;
-        let waiver_lines: Vec<String> = waiver_text
-            .map(|t| {
-                t.lines()
-                    .filter(|ln| !ln.trim().is_empty())
-                    .map(String::from)
-                    .collect()
-            })
-            .unwrap_or_default();
+    let wrel = waiver_rel(&repo, &cfg.waivers)?;
+    let waiver_text = read_at(&repo, &resolved.commit, &wrel)?;
+    let waiver_lines: Vec<String> = waiver_text
+        .map(|t| {
+            t.lines()
+                .filter(|ln| !ln.trim().is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
 
-        if !cfg.json {
-            for (raw, why) in waivers::malformed_waivers(&waiver_lines) {
+    if !cfg.json {
+        for (raw, why) in waivers::malformed_waivers(&waiver_lines) {
+            let snippet: String = raw.trim().chars().take(200).collect();
+            eprintln!(
+                    "floor-guard: NOT a usable waiver — {why}:\n  {snippet}\n  write the id as `floor-waiver:<rule>:<path>` (or `:<dir>/**`), class `one-way`, answer `allow`"
+                );
+        }
+    }
+
+    let pub_text = read_at(&repo, &resolved.commit, decisions::GRANT_PUBKEY_REL)?;
+    let grant_pub = match pub_text {
+        None => None,
+        Some(txt) => {
+            let where_lbl = format!("{}:{}", resolved.commit, decisions::GRANT_PUBKEY_REL);
+            Some(decisions::parse_grant_pubkey(&txt, &where_lbl)?)
+        }
+    };
+
+    let live: Vec<Finding> = findings
+        .iter()
+        .filter(|f| !waivers::is_waived(f, &waiver_lines, grant_pub.as_ref()))
+        .cloned()
+        .collect();
+    let waived_count = findings.len() - live.len();
+
+    if live.is_empty() {
+        if !cfg.json && !cfg.quiet {
+            let note = if waived_count > 0 {
+                format!(" ({waived_count} waived)")
+            } else {
+                String::new()
+            };
+            println!("floor-guard: clean{note}");
+        }
+        return Ok(FloorReport {
+            status: "clean".to_string(),
+            base: resolved.shown,
+            base_commit: resolved.commit,
+            findings: Vec::new(),
+            waived: waived_count,
+            exit_code: EXIT_CLEAN,
+        });
+    }
+
+    if !cfg.json {
+        eprintln!("floor-guard: {} floor violation(s):", live.len());
+        for f in &live {
+            eprintln!("  [{}] {}:{} ({})", f.rule, f.path, f.line, f.detail);
+            for (raw, why) in waivers::refused_waivers(f, &waiver_lines, grant_pub.as_ref()) {
                 let snippet: String = raw.trim().chars().take(200).collect();
                 eprintln!(
-                    "floor-guard: NOT a usable waiver — {why}:\n  {snippet}\n  write the id as `floor-waiver:<rule>:<path>` (or `:<dir>/**`), class `one-way`, answer `allow`"
+                    "      waiver at {} not honoured — {why}:\n        {snippet}",
+                    resolved.shown
                 );
             }
         }
-
-        let pub_text = read_at(&repo, &resolved.commit, decisions::GRANT_PUBKEY_REL)?;
-        let grant_pub = match pub_text {
-            None => None,
-            Some(txt) => {
-                let where_lbl = format!("{}:{}", resolved.commit, decisions::GRANT_PUBKEY_REL);
-                Some(decisions::parse_grant_pubkey(&txt, &where_lbl)?)
-            }
-        };
-
-        let live: Vec<Finding> = findings
-            .iter()
-            .filter(|f| !waivers::is_waived(f, &waiver_lines, grant_pub.as_ref()))
-            .cloned()
-            .collect();
-        let waived_count = findings.len() - live.len();
-
-        if live.is_empty() {
-            if !cfg.json && !cfg.quiet {
-                let note = if waived_count > 0 {
-                    format!(" ({waived_count} waived)")
-                } else {
-                    String::new()
-                };
-                println!("floor-guard: clean{note}");
-            }
-            return Ok(FloorReport {
-                status: "clean".to_string(),
-                base: resolved.shown,
-                base_commit: resolved.commit,
-                findings: Vec::new(),
-                waived: waived_count,
-                exit_code: EXIT_CLEAN,
-            });
-        }
-
-        if !cfg.json {
-            eprintln!("floor-guard: {} floor violation(s):", live.len());
-            for f in &live {
-                eprintln!("  [{}] {}:{} ({})", f.rule, f.path, f.line, f.detail);
-                for (raw, why) in waivers::refused_waivers(f, &waiver_lines, grant_pub.as_ref()) {
-                    let snippet: String = raw.trim().chars().take(200).collect();
-                    eprintln!(
-                        "      waiver at {} not honoured — {why}:\n        {snippet}",
-                        resolved.shown
-                    );
-                }
-            }
-            eprintln!(
+        eprintln!(
                 "\nEach lowers the bar. Fix the code, or land a waiver on {} FIRST: a DECISIONS record whose id is `floor-waiver:<rule>:<path>` (or `:<dir>/**`), class `one-way`, answer `allow`, appended with `decisions.py append --source human:<name>` (plus `--grant-sig` when .orca/human-grant-pubkey is pinned). Waivers are read at the base ref; one this change writes for itself is not.",
                 resolved.shown
             );
-        }
+    }
 
-        Ok(FloorReport {
-            status: "findings".to_string(),
-            base: resolved.shown,
-            base_commit: resolved.commit,
-            findings: live,
-            waived: waived_count,
-            exit_code: EXIT_FINDINGS,
-        })
-    })();
+    Ok(FloorReport {
+        status: "findings".to_string(),
+        base: resolved.shown,
+        base_commit: resolved.commit,
+        findings: live,
+        waived: waived_count,
+        exit_code: EXIT_FINDINGS,
+    })
+}
+
+pub fn run(cfg: &FloorConfig) -> i32 {
+    let run_res = evaluate_inner(cfg);
 
     match run_res {
         Ok(report) => {
