@@ -111,7 +111,23 @@ open-fleet overview [--repo DIR] [--json]
 open-fleet mcp [--root DIR] [--repo DIR]
 ```
 
-- `open-fleet mcp` serves MCP JSON-RPC 2.0 over stdio (both newline-delimited JSON-RPC and `Content-Length` LSP framing, protocol versions `2025-03-26` and `2024-11-05`) with zero Python startup overhead for native tools (`fleet_doctor`, `fleet_route_mission`, `fleet_list_missions`, `fleet_get_mission`, `fleet_floor_check`, `fleet_certification`, `fleet_decisions`, `fleet_egress_verify`), resources, and prompts.
+- `open-fleet mcp` serves MCP JSON-RPC 2.0 over stdio (both newline-delimited JSON-RPC and `Content-Length` LSP framing, protocol versions `2025-03-26` and `2024-11-05`) with zero Python startup overhead for native tools (`fleet_doctor`, `fleet_route_mission`, `fleet_list_missions`, `fleet_get_mission`, `fleet_floor_check`, `fleet_certification`, `fleet_decisions`, `fleet_egress_verify`, `fleet_diff_scope`, `fleet_quarantine_check`, `fleet_proof_status`), resources, and prompts.
+
+### `open-fleet diff-scope | quarantine | dispatch-sign | inventory | proof-status` (Wave 2B-1 native verification suite)
+
+```text
+open-fleet diff-scope [--base REF] [--repo DIR] [--strict] [--overlap SPEC] [--predict-merge BASE BRANCH] [--json]
+open-fleet quarantine [--root DIR] (--catalog | --mission NAME)
+open-fleet dispatch-sign (gen-key | sign | verify | sign-transcript) ...
+open-fleet inventory (write | check | sign | receipt) <report> ...
+open-fleet proof-status [--json] [--check] [--root DIR]
+```
+
+- `diff-scope`: exact parity with `runtime/scripts/diff_scope.py` (all 12 `SCOPE_*` path + 256 KiB content rules, isolated git custody diffs, zero-segment globstar `--overlap`, shared-object-custody `git merge-tree --write-tree` `--predict-merge` with PEP 383 non-UTF-8 JSON encoding, shell-safe comment escaping). Exits `0` classified/clean merge, `1` real merge conflict, `2` `SCOPE_ERROR`.
+- `quarantine`: exact parity with `runtime/scripts/quarantine_check.py` (human-only `by` validation, transitive `protocol_closure`, catalog & single-mission bundle layouts, `pins.json` verification). Exits `0` clean, `2` quarantined violation, `3` cannot evaluate.
+- `dispatch-sign`: exact parity with `runtime/scripts/dispatch-sign.py` (Ed25519 keygen/sign/verify/sign-transcript, `0600` + off-unignored-worktree seed custody, monotonic `ro <= rw <= danger` profile narrowing, `#784` profile binding, sibling `toolchain.files` SHA-256 verification).
+- `inventory`: exact parity with `runtime/scripts/inventory.py` (`#784` Markdown fence tracking and symlink-free path containment, fenced & table blocks, `--at REV` blob hashing, Ed25519 detached signatures, v1 retention receipts). Exits `0` verified, `1` mismatch/refusal, `2` could not run.
+- `proof-status`: exact parity with `runtime/scripts/proof_status.py` (catalog proof-tier summary, repo-containment check on `proof_evidence`, `--json`, `--check`).
 
 ### Strangler-Fig Pass-Through Verbs (Remaining Waves)
 

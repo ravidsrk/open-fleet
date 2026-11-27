@@ -478,7 +478,7 @@ dependencies = [
 
 [[package]]
 name = "of-catalog"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "regex",
  "serde",
@@ -487,7 +487,7 @@ dependencies = [
 
 [[package]]
 name = "of-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "clap",
  "of-catalog",
@@ -496,12 +496,13 @@ dependencies = [
  "of-install",
  "of-ledgers",
  "of-mcp",
+ "of-verify",
  "serde_json",
 ]
 
 [[package]]
 name = "of-common"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "ed25519-dalek",
@@ -517,7 +518,7 @@ dependencies = [
 
 [[package]]
 name = "of-floor"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "of-common",
  "regex",
@@ -529,7 +530,7 @@ dependencies = [
 
 [[package]]
 name = "of-install"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "hex",
  "of-common",
@@ -540,7 +541,7 @@ dependencies = [
 
 [[package]]
 name = "of-ledgers"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "ed25519-dalek",
@@ -557,15 +558,34 @@ dependencies = [
 
 [[package]]
 name = "of-mcp"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "of-catalog",
  "of-common",
  "of-floor",
  "of-install",
  "of-ledgers",
+ "of-verify",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "of-verify"
+version = "0.3.0"
+dependencies = [
+ "chrono",
+ "ed25519-dalek",
+ "getrandom 0.2.17",
+ "hex",
+ "libc",
+ "of-catalog",
+ "of-common",
+ "of-install",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

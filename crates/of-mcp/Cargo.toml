@@ -11,5 +11,6 @@ of-common = { path = "../of-common" }
 of-floor = { path = "../of-floor" }
 of-install = { path = "../of-install" }
 of-ledgers = { path = "../of-ledgers" }
+of-verify = { path = "../of-verify" }
 serde.workspace = true
 serde_json.workspace = true

@@ -27,6 +27,7 @@ class RustEnginePackaging(unittest.TestCase):
                 "crates/of-install",
                 "crates/of-ledgers",
                 "crates/of-catalog",
+                "crates/of-verify",
                 "crates/of-mcp",
                 "crates/of-cli",
             ],

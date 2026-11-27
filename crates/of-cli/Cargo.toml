@@ -17,4 +17,5 @@ of-floor.workspace = true
 of-install.workspace = true
 of-ledgers.workspace = true
 of-mcp.workspace = true
+of-verify.workspace = true
 serde_json.workspace = true

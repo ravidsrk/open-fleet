@@ -609,9 +609,9 @@ fn short_ref(r: &str) -> String {
 
 pub fn base_commit(repo: &Path, base: Option<&str>) -> Result<BaseResolution, String> {
     if let Some(b) = base {
-        if b.starts_with('-') {
+        if b.is_empty() || b.starts_with('-') {
             return Err(format!(
-                "base ref {b:?} is not resolvable by its exact name (shallow clone or missing fetch?): {b:?} is an option, not a ref"
+                "base ref {b:?} is not resolvable by its exact name (shallow clone or missing fetch?): {b:?} is empty or option-shaped"
             ));
         }
         let lower = b.to_ascii_lowercase();
@@ -1376,12 +1376,17 @@ pub struct Custody {
     _tmp: TempDir,
     pub git_dir: PathBuf,
     pub work_tree: Option<PathBuf>,
+    pub shared_objects_dir: Option<PathBuf>,
     pub pairs: Vec<(OsString, OsString)>,
     pub cwd: PathBuf,
 }
 
 impl Custody {
     pub fn open(repo: &Path) -> Result<Self, String> {
+        Self::open_with(repo, true, false)
+    }
+
+    pub fn open_with(repo: &Path, copy_index: bool, shared_objects: bool) -> Result<Self, String> {
         refuse_blocking_files(repo)?;
         let rev_parse = |args: &[&str]| -> Result<Option<OsString>, String> {
             let mut full = vec!["rev-parse"];
@@ -1504,7 +1509,7 @@ impl Custody {
             .tempdir()
             .map_err(|e| format!("git custody: tempdir failed: {e}"))?;
         let root = tmp.path().to_path_buf();
-        for sub in ["refs/heads", "refs/tags", "info", "objects/info"] {
+        for sub in ["refs/heads", "refs/tags", "info"] {
             fs::create_dir_all(root.join(sub))
                 .map_err(|e| format!("git custody: mkdir {sub} failed: {e}"))?;
         }
@@ -1535,11 +1540,29 @@ impl Custody {
         fs::write(root.join("HEAD"), head_content)
             .map_err(|e| format!("git custody: write HEAD failed: {e}"))?;
 
-        let alt_path = common.join("objects");
-        let mut alt_line = c_quote_bytes(&os_to_bytes(alt_path.as_os_str()));
-        alt_line.push(b'\n');
-        fs::write(root.join("objects/info/alternates"), alt_line)
-            .map_err(|e| format!("git custody: write alternates failed: {e}"))?;
+        let common_objects = common.join("objects");
+        let shared_objects_dir = if shared_objects {
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(&common_objects, root.join("objects"))
+                    .map_err(|e| format!("git custody: symlink objects failed: {e}"))?;
+                None
+            }
+            #[cfg(not(unix))]
+            {
+                fs::create_dir_all(root.join("objects"))
+                    .map_err(|e| format!("git custody: mkdir objects failed: {e}"))?;
+                Some(common_objects)
+            }
+        } else {
+            fs::create_dir_all(root.join("objects/info"))
+                .map_err(|e| format!("git custody: mkdir objects/info failed: {e}"))?;
+            let mut alt_line = c_quote_bytes(&os_to_bytes(common_objects.as_os_str()));
+            alt_line.push(b'\n');
+            fs::write(root.join("objects/info/alternates"), alt_line)
+                .map_err(|e| format!("git custody: write alternates failed: {e}"))?;
+            None
+        };
 
         copy_regular(&common.join("info/exclude"), &root.join("info/exclude"))?;
         copy_regular(
@@ -1547,26 +1570,29 @@ impl Custody {
             &root.join("info/attributes"),
         )?;
         copy_regular(&common.join("shallow"), &root.join("shallow"))?;
-        copy_regular(&gitdir.join("index"), &root.join("index"))?;
-        copy_regular(
-            &gitdir.join("info/sparse-checkout"),
-            &root.join("info/sparse-checkout"),
-        )?;
-        if let Ok(entries) = fs::read_dir(&gitdir) {
-            let mut shared: Vec<String> = entries
-                .filter_map(|e| e.ok())
-                .filter_map(|e| e.file_name().into_string().ok())
-                .filter(|n| n.starts_with("sharedindex."))
-                .collect();
-            shared.sort();
-            for name in shared {
-                copy_regular(&gitdir.join(&name), &root.join(&name))?;
+        if copy_index {
+            copy_regular(&gitdir.join("index"), &root.join("index"))?;
+            copy_regular(
+                &gitdir.join("info/sparse-checkout"),
+                &root.join("info/sparse-checkout"),
+            )?;
+            if let Ok(entries) = fs::read_dir(&gitdir) {
+                let mut shared: Vec<String> = entries
+                    .filter_map(|e| e.ok())
+                    .filter_map(|e| e.file_name().into_string().ok())
+                    .filter(|n| n.starts_with("sharedindex."))
+                    .collect();
+                shared.sort();
+                for name in shared {
+                    copy_regular(&gitdir.join(&name), &root.join(&name))?;
+                }
             }
         }
         Ok(Self {
             _tmp: tmp,
             git_dir: root,
             work_tree: top,
+            shared_objects_dir,
             pairs,
             cwd: repo.to_path_buf(),
         })
@@ -1593,6 +1619,27 @@ impl Custody {
     ) -> Result<GitOutput, String> {
         let mut all_blanks = self.pairs.clone();
         all_blanks.extend(extra_blanks.iter().cloned());
-        run_git_raw(&self.lead(), args, &all_blanks)
+        if let Some(obj_dir) = &self.shared_objects_dir {
+            let git = git_binary()?;
+            let mut cmd = Command::new(git);
+            cmd.args(self.lead())
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .env_clear()
+                .envs(custody_env(&all_blanks))
+                .env("GIT_OBJECT_DIRECTORY", obj_dir);
+            let out = cmd
+                .output()
+                .map_err(|err| format!("git failed to run: {err}"))?;
+            Ok(GitOutput {
+                code: out.status.code().unwrap_or(1),
+                stdout: out.stdout,
+                stderr: out.stderr,
+            })
+        } else {
+            run_git_raw(&self.lead(), args, &all_blanks)
+        }
     }
 }

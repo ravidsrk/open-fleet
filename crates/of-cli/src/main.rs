@@ -17,6 +17,18 @@ use of_ledgers::egress::{
     GrantsArgs as EgGrantsArgs, VerifyArgs as EgVerifyArgs, WriteArgs as EgWriteArgs,
 };
 use of_mcp::{serve_stdio, OpenFleetMcpServer};
+use of_verify::diff_scope::{run_cli as diff_scope_run, DiffScopeArgs};
+use of_verify::dispatch_sign::{
+    cmd_sign as ds_sign, cmd_sign_transcript as ds_sign_transcript, cmd_verify as ds_verify,
+    gen_key as ds_gen_key, SignArgs as DsSignArgs, SignTranscriptArgs as DsSignTranscriptArgs,
+    VerifyArgs as DsVerifyArgs,
+};
+use of_verify::inventory::{
+    cmd_check as inv_check, cmd_receipt as inv_receipt, cmd_sign as inv_sign,
+    cmd_write as inv_write, ReceiptArgs as InvReceiptArgs,
+};
+use of_verify::proof_status::{run_cli as proof_status_run, ProofStatusArgs};
+use of_verify::quarantine::{run_cli as quarantine_run, QuarantineArgs};
 use std::env;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -152,6 +164,120 @@ enum DecisionsCmd {
 }
 
 #[derive(Subcommand)]
+enum DispatchSignCmd {
+    /// Generate an Ed25519 keypair (seed off-repo at 0600, pubkey at <out>.pub).
+    #[command(name = "gen-key")]
+    GenKey {
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long = "in-repo-ok")]
+        in_repo_ok: bool,
+    },
+    /// Sign a dispatch record.
+    Sign {
+        #[arg(long)]
+        key: Option<PathBuf>,
+        #[arg(long = "manifest-id", allow_hyphen_values = true)]
+        manifest_id: String,
+        #[arg(long = "contract-digest", allow_hyphen_values = true)]
+        contract_digest: String,
+        #[arg(long = "unit-class", allow_hyphen_values = true)]
+        unit_class: String,
+        #[arg(long, allow_hyphen_values = true)]
+        lighting: Option<String>,
+        #[arg(long = "nc-path", allow_hyphen_values = true)]
+        nc_path: Vec<String>,
+        #[arg(long = "nc-command", allow_hyphen_values = true)]
+        nc_command: Option<String>,
+        #[arg(long = "nc-artifact-sha256", allow_hyphen_values = true)]
+        nc_artifact_sha256: Option<String>,
+        #[arg(long = "no-gh")]
+        no_gh: bool,
+        #[arg(long, allow_hyphen_values = true)]
+        lane: Option<String>,
+        #[arg(long = "execute-nc")]
+        execute_nc: bool,
+        #[arg(long = "allow-static-nc")]
+        allow_static_nc: bool,
+        #[arg(long = "base-sha", allow_hyphen_values = true)]
+        base_sha: Option<String>,
+        #[arg(long, allow_hyphen_values = true)]
+        profile: Option<String>,
+        #[arg(long = "parent-profile", allow_hyphen_values = true)]
+        parent_profile: Option<String>,
+    },
+    /// Verify a dispatch record and monotonic privilege narrowing.
+    Verify {
+        #[arg(allow_hyphen_values = true)]
+        record_pos: Option<String>,
+        #[arg(long, alias = "envelope", allow_hyphen_values = true)]
+        record: Option<String>,
+        #[arg(long, allow_hyphen_values = true)]
+        pubkey: Option<String>,
+        #[arg(long)]
+        key: Option<PathBuf>,
+        #[arg(long, allow_hyphen_values = true)]
+        profile: Option<String>,
+        #[arg(long = "parent-profile", allow_hyphen_values = true)]
+        parent_profile: Option<String>,
+    },
+    /// Sign a verify.py verdict object (re-hashing toolchain.files beside the signer).
+    #[command(name = "sign-transcript")]
+    SignTranscript {
+        #[arg(long)]
+        key: Option<PathBuf>,
+        #[arg(long)]
+        transcript: PathBuf,
+        #[arg(long)]
+        out: Option<PathBuf>,
+        #[arg(long = "scripts-dir", hide = true)]
+        scripts_dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum InventoryCmd {
+    /// Re-hash every listed path and rewrite the block in place.
+    Write {
+        report: PathBuf,
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+        #[arg(long)]
+        key: Option<PathBuf>,
+    },
+    /// Re-hash every listed path that exists (or at --at REV) and optionally verify signature.
+    Check {
+        report: PathBuf,
+        #[arg(long, allow_hyphen_values = true)]
+        at: Option<String>,
+        #[arg(long)]
+        pubkey: Option<PathBuf>,
+    },
+    /// Sign the entry set with the coordinator's Ed25519 key.
+    Sign {
+        report: PathBuf,
+        #[arg(long)]
+        key: PathBuf,
+    },
+    /// Write the v1 retention receipt for a signed inventory.
+    Receipt {
+        report: PathBuf,
+        #[arg(long)]
+        key: PathBuf,
+        #[arg(long, allow_hyphen_values = true)]
+        unit: String,
+        #[arg(long = "source-revision", allow_hyphen_values = true)]
+        source_revision: String,
+        #[arg(long = "log-index", allow_hyphen_values = true)]
+        log_index: i64,
+        #[arg(long = "entry-uuid", allow_hyphen_values = true)]
+        entry_uuid: String,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
 enum Commands {
     /// Diff-scoped floor guard: block suppressed checkers, skipped tests, deleted assertions, lowered thresholds, and guard-surface edits.
     Floor {
@@ -233,6 +359,52 @@ enum Commands {
         repo: PathBuf,
         #[arg(long)]
         json: bool,
+    },
+    /// Classify the changed surface into SCOPE_* review flags, overlap specs, or predict 3-way merges.
+    #[command(name = "diff-scope")]
+    DiffScope {
+        #[arg(long, allow_hyphen_values = true)]
+        base: Option<String>,
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        #[arg(long)]
+        strict: bool,
+        #[arg(long)]
+        overlap: Option<PathBuf>,
+        #[arg(long = "predict-merge", num_args = 2, value_names = ["BASE", "BRANCH"], allow_hyphen_values = true)]
+        predict_merge: Option<Vec<String>>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check the catalog or one mission against runtime/quarantine.json (fail-closed off-switch).
+    Quarantine {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long, conflicts_with = "mission")]
+        catalog: bool,
+        #[arg(long, allow_hyphen_values = true)]
+        mission: Option<String>,
+    },
+    /// Coordinator out-of-band Ed25519 dispatch-record & transcript signer.
+    #[command(name = "dispatch-sign")]
+    DispatchSign {
+        #[command(subcommand)]
+        sub: DispatchSignCmd,
+    },
+    /// Regenerate, check, Ed25519-sign, and issue v1 retention receipts for run integrity inventories.
+    Inventory {
+        #[command(subcommand)]
+        sub: InventoryCmd,
+    },
+    /// Proof-posture reporter and CI lens over the mission catalog.
+    #[command(name = "proof-status")]
+    ProofStatus {
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        check: bool,
+        #[arg(long)]
+        root: Option<PathBuf>,
     },
     /// Start the native zero-Python MCP JSON-RPC 2.0 stdio server.
     Mcp {
@@ -659,6 +831,135 @@ fn run() -> i32 {
                 );
             }
             0
+        }
+        Commands::DiffScope {
+            base,
+            repo,
+            strict,
+            overlap,
+            predict_merge,
+            json,
+        } => {
+            let pm = predict_merge.and_then(|v| {
+                if v.len() == 2 {
+                    Some((v[0].clone(), v[1].clone()))
+                } else {
+                    None
+                }
+            });
+            diff_scope_run(&DiffScopeArgs {
+                base,
+                repo,
+                strict,
+                overlap,
+                predict_merge: pm,
+                json,
+            })
+        }
+        Commands::Quarantine {
+            root,
+            catalog,
+            mission,
+        } => quarantine_run(&QuarantineArgs {
+            root,
+            catalog,
+            mission,
+        }),
+        Commands::DispatchSign { sub } => match sub {
+            DispatchSignCmd::GenKey { out, in_repo_ok } => ds_gen_key(&out, in_repo_ok),
+            DispatchSignCmd::Sign {
+                key,
+                manifest_id,
+                contract_digest,
+                unit_class,
+                lighting,
+                nc_path,
+                nc_command,
+                nc_artifact_sha256,
+                no_gh,
+                lane,
+                execute_nc,
+                allow_static_nc,
+                base_sha,
+                profile,
+                parent_profile,
+            } => ds_sign(&DsSignArgs {
+                key,
+                manifest_id,
+                contract_digest,
+                unit_class,
+                lighting,
+                nc_paths: if nc_path.is_empty() {
+                    None
+                } else {
+                    Some(nc_path)
+                },
+                nc_command,
+                nc_artifact_sha256,
+                no_gh,
+                lane,
+                execute_nc,
+                allow_static_nc,
+                base_sha,
+                profile,
+                parent_profile,
+            }),
+            DispatchSignCmd::Verify {
+                record_pos,
+                record,
+                pubkey,
+                key,
+                profile,
+                parent_profile,
+            } => ds_verify(&DsVerifyArgs {
+                record_ref: record.or(record_pos),
+                pubkey_ref: pubkey,
+                key_ref: key,
+                profile,
+                parent_profile,
+            }),
+            DispatchSignCmd::SignTranscript {
+                key,
+                transcript,
+                out,
+                scripts_dir,
+            } => ds_sign_transcript(&DsSignTranscriptArgs {
+                key,
+                transcript,
+                out,
+                scripts_dir,
+            }),
+        },
+        Commands::Inventory { sub } => match sub {
+            InventoryCmd::Write {
+                report,
+                dry_run,
+                key,
+            } => inv_write(&report, dry_run, key.as_deref()),
+            InventoryCmd::Check { report, at, pubkey } => {
+                inv_check(&report, at.as_deref(), pubkey.as_deref())
+            }
+            InventoryCmd::Sign { report, key } => inv_sign(&report, &key),
+            InventoryCmd::Receipt {
+                report,
+                key,
+                unit,
+                source_revision,
+                log_index,
+                entry_uuid,
+                out,
+            } => inv_receipt(&InvReceiptArgs {
+                report,
+                key,
+                unit,
+                source_revision,
+                log_index,
+                entry_uuid,
+                out,
+            }),
+        },
+        Commands::ProofStatus { json, check, root } => {
+            proof_status_run(&ProofStatusArgs { json, check, root })
         }
         Commands::Mcp { root, repo } => {
             let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
