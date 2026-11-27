@@ -1,0 +1,100 @@
+name: release-engine
+
+on:
+  push:
+    tags:
+      - "engine-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset: open-fleet-linux-x64
+            ext: ""
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            asset: open-fleet-linux-arm64
+            ext: ""
+          - os: macos-14
+            target: aarch64-apple-darwin
+            asset: open-fleet-darwin-arm64
+            ext: ""
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            asset: open-fleet-darwin-x64
+            ext: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: open-fleet-windows-x64.exe
+            ext: ".exe"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build release binary
+        env:
+          TARGET: ${{ matrix.target }}
+          ASSET: ${{ matrix.asset }}
+          EXT: ${{ matrix.ext }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup target add "$TARGET"
+          cargo build --release --locked --target "$TARGET" -p of-cli
+          mkdir -p dist
+          cp "target/$TARGET/release/open-fleet$EXT" "dist/$ASSET"
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd dist && sha256sum "$ASSET" > "$ASSET.sha256")
+          else
+            (cd dist && shasum -a 256 "$ASSET" > "$ASSET.sha256")
+          fi
+          cat "dist/$ASSET.sha256"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: engine-${{ matrix.asset }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/engine-v')
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish GitHub Release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="$(tr -d ' \t\r\n' < ENGINE_VERSION)"
+          if [ "$TAG_NAME" != "engine-v$VERSION" ]; then
+            echo "::error::tag $TAG_NAME does not match ENGINE_VERSION ($VERSION)"
+            exit 1
+          fi
+          ls -la dist/
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" dist/* --clobber
+          else
+            gh release create "$TAG_NAME" dist/* --title "open-fleet engine v$VERSION" --generate-notes
+          fi

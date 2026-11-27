@@ -1,0 +1,61 @@
+name: rust-engine
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - name: Check Rust toolchain
+        run: |
+          set -euo pipefail
+          rustc --version
+          cargo --version
+          rustup component add rustfmt clippy
+      - name: Format check
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+      - name: Clippy lint
+        run: |
+          set -euo pipefail
+          cargo clippy --workspace --all-targets -- -D warnings
+      - name: Cargo unit tests
+        run: |
+          set -euo pipefail
+          cargo test --workspace --locked
+      - name: Build release binary
+        run: |
+          set -euo pipefail
+          cargo build --release --locked -p of-cli
+          ls -lh target/release/open-fleet
+          target/release/open-fleet --version
+      - name: Run adversarial floor_guard parity oracle against Rust binary
+        run: |
+          set -euo pipefail
+          python3 -I scripts/rust_floor_oracle.py
+      - name: Smoke test launcher and CLI packaging
+        run: |
+          set -euo pipefail
+          scripts/open-fleet --version
+          node cli/bin/open-fleet.js --version
+          scripts/open-fleet doctor --json
+          TMP_HOME="$(mktemp -d)"
+          trap 'rm -rf "$TMP_HOME"' EXIT
+          scripts/open-fleet init --harness claude,cursor,codex,gemini --home "$TMP_HOME" --json
+          test -L "$TMP_HOME/.claude/skills/ship-it"
+          test -f "$TMP_HOME/.claude/settings.json"

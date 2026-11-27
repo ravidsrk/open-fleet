@@ -1,0 +1,31 @@
+{
+  "name": "@open-fleet/cli",
+  "version": "0.1.0",
+  "description": "Native Rust CLI for open-fleet autonomous software engineering missions and floor guards",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ravidsrk/open-fleet.git",
+    "directory": "cli"
+  },
+  "homepage": "https://github.com/ravidsrk/open-fleet",
+  "bugs": {
+    "url": "https://github.com/ravidsrk/open-fleet/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "open-fleet": "bin/open-fleet.js"
+  },
+  "files": [
+    "bin/open-fleet.js"
+  ],
+  "optionalDependencies": {
+    "@open-fleet/cli-darwin-arm64": "0.1.0",
+    "@open-fleet/cli-darwin-x64": "0.1.0",
+    "@open-fleet/cli-linux-arm64": "0.1.0",
+    "@open-fleet/cli-linux-x64": "0.1.0",
+    "@open-fleet/cli-windows-x64": "0.1.0"
+  }
+}

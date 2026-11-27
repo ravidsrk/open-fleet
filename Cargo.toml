@@ -1,0 +1,47 @@
+# The open-fleet Rust engine: one Cargo workspace next to the canonical Markdown catalog.
+# `cargo build --release -p of-cli` produces the static `open-fleet` binary that launchers
+# (`scripts/open-fleet`, `cli/bin/open-fleet.js`) and agent hooks execute. See docs/ENGINE.md.
+[workspace]
+resolver = "2"
+members = [
+    "crates/of-common",
+    "crates/of-floor",
+    "crates/of-install",
+    "crates/of-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/ravidsrk/open-fleet"
+publish = false
+
+[workspace.dependencies]
+of-common = { path = "crates/of-common" }
+of-floor = { path = "crates/of-floor" }
+of-install = { path = "crates/of-install" }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+clap = { version = "4", features = ["derive"] }
+ed25519-dalek = "2"
+hex = "0.4"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+toml = "0.8"
+unicode-normalization = "0.1"
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"

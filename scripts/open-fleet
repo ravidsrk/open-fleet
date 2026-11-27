@@ -1,0 +1,106 @@
+#!/usr/bin/env sh
+# Thin POSIX launcher for the open-fleet native Rust binary.
+#
+# Resolution order:
+#   1. $OPEN_FLEET_BIN (explicit override)
+#   2. <repo>/target/release/open-fleet (local workspace build)
+#   3. $HOME/.open-fleet/bin/<ENGINE_VERSION>/open-fleet (cached release binary)
+#   4. Download open-fleet-<os>-<arch> + .sha256 from GitHub Releases, verify SHA-256,
+#      cache atomically, and exec.
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
+VERSION_FILE="$REPO_ROOT/ENGINE_VERSION"
+
+if [ -n "${OPEN_FLEET_BIN:-}" ]; then
+  exec "$OPEN_FLEET_BIN" "$@"
+fi
+
+LOCAL_RELEASE="$REPO_ROOT/target/release/open-fleet"
+if [ -x "$LOCAL_RELEASE" ]; then
+  exec "$LOCAL_RELEASE" "$@"
+fi
+
+if [ ! -f "$VERSION_FILE" ]; then
+  echo "open-fleet: ENGINE_VERSION missing at $VERSION_FILE" >&2
+  exit 2
+fi
+VERSION="$(tr -d ' \t\r\n' < "$VERSION_FILE")"
+if [ -z "$VERSION" ]; then
+  echo "open-fleet: ENGINE_VERSION is empty" >&2
+  exit 2
+fi
+
+CACHE_DIR="${OPEN_FLEET_CACHE_DIR:-${HOME:-/tmp}/.open-fleet/bin}/$VERSION"
+CACHED_BIN="$CACHE_DIR/open-fleet"
+if [ -x "$CACHED_BIN" ]; then
+  exec "$CACHED_BIN" "$@"
+fi
+
+OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+ARCH="$(uname -m)"
+case "$OS" in
+  darwin) OS="darwin" ;;
+  linux) OS="linux" ;;
+  *)
+    echo "open-fleet: unsupported OS '$OS'; build from source with 'cargo build --release -p of-cli'" >&2
+    exit 2
+    ;;
+esac
+case "$ARCH" in
+  x86_64|amd64) ARCH="x64" ;;
+  arm64|aarch64) ARCH="arm64" ;;
+  *)
+    echo "open-fleet: unsupported arch '$ARCH'; build from source with 'cargo build --release -p of-cli'" >&2
+    exit 2
+    ;;
+esac
+
+REPO_SLUG="${OPEN_FLEET_RELEASE_REPO:-ravidsrk/open-fleet}"
+ASSET="open-fleet-${OS}-${ARCH}"
+BASE_URL="${OPEN_FLEET_RELEASE_URL:-https://github.com/${REPO_SLUG}/releases/download/engine-v${VERSION}}"
+
+fetch() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --proto '=https' --tlsv1.2 "$1" -o "$2"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$2" "$1"
+  else
+    echo "open-fleet: need curl or wget to download release binary" >&2
+    exit 2
+  fi
+}
+
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    echo "open-fleet: need sha256sum or shasum to verify release binary" >&2
+    exit 2
+  fi
+}
+
+mkdir -p "$CACHE_DIR"
+TMP_BIN="$CACHE_DIR/.open-fleet.tmp.$$"
+TMP_SHA="$CACHE_DIR/.open-fleet.sha256.tmp.$$"
+trap 'rm -f "$TMP_BIN" "$TMP_SHA"' EXIT
+
+fetch "${BASE_URL}/${ASSET}" "$TMP_BIN"
+fetch "${BASE_URL}/${ASSET}.sha256" "$TMP_SHA"
+
+EXPECTED="$(awk '{print $1}' "$TMP_SHA" | tr '[:upper:]' '[:lower:]')"
+ACTUAL="$(sha256_file "$TMP_BIN" | tr '[:upper:]' '[:lower:]')"
+if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ]; then
+  echo "open-fleet: SHA-256 verification failed for ${ASSET} (expected ${EXPECTED:-<empty>}, got ${ACTUAL:-<empty>})" >&2
+  exit 2
+fi
+
+chmod 0755 "$TMP_BIN"
+mv "$TMP_BIN" "$CACHED_BIN"
+rm -f "$TMP_SHA"
+trap - EXIT
+
+exec "$CACHED_BIN" "$@"
