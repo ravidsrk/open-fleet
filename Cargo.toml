@@ -7,11 +7,14 @@ members = [
     "crates/of-common",
     "crates/of-floor",
     "crates/of-install",
+    "crates/of-ledgers",
+    "crates/of-catalog",
+    "crates/of-mcp",
     "crates/of-cli",
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/ravidsrk/open-fleet"
@@ -21,6 +24,9 @@ publish = false
 of-common = { path = "crates/of-common" }
 of-floor = { path = "crates/of-floor" }
 of-install = { path = "crates/of-install" }
+of-ledgers = { path = "crates/of-ledgers" }
+of-catalog = { path = "crates/of-catalog" }
+of-mcp = { path = "crates/of-mcp" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4", features = ["derive"] }
 ed25519-dalek = "2"

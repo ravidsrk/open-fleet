@@ -11,7 +11,10 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
+of-catalog.workspace = true
 of-common.workspace = true
 of-floor.workspace = true
 of-install.workspace = true
+of-ledgers.workspace = true
+of-mcp.workspace = true
 serde_json.workspace = true

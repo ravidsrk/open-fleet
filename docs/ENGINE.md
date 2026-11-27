@@ -23,16 +23,24 @@ crates/
                               guard surface + base-ref signed waiver resolution)
   of-install/                 Multi-harness detector, skill installer, atomic Claude hook
                               merger, and fast `doctor` diagnostics
+  of-ledgers/                 Native cryptographic ledgers: hash-chained `egress` receipts
+                              and `decisions` validation + Ed25519 human grant signing
+  of-catalog/                 Native YAML-frontmatter catalog discovery, certification
+                              rollup, and TF-IDF mission intent router
+  of-mcp/                     Zero-Python JSON-RPC 2.0 stdio MCP server (jsonl + LSP framing)
   of-cli/                     The `open-fleet` binary: native verbs + strangler-fig delegation
 ```
 
-## Build, Test, and Oracle Gate
+## Build, Test, and Oracle Gates
 
 ```bash
 cargo build --release -p of-cli        # target/release/open-fleet
 cargo test --workspace                 # Rust unit + integration tests
 cargo clippy --workspace --all-targets -- -D warnings
-python3 -I scripts/rust_floor_oracle.py  # runs test_floor_guard.py end-to-end against the Rust binary
+python3 -I scripts/rust_floor_oracle.py      # 103 end-to-end floor_guard CLI tests
+python3 -I scripts/rust_egress_oracle.py     # 58 end-to-end egress CLI tests
+python3 -I scripts/rust_decisions_oracle.py  # 94 end-to-end decisions CLI tests
+python3 -I scripts/rust_product_oracle.py    # catalog, intent router & stdio MCP parity
 ```
 
 ## Strangler-Fig Migration Roadmap
@@ -40,10 +48,10 @@ python3 -I scripts/rust_floor_oracle.py  # runs test_floor_guard.py end-to-end a
 | Wave | Native Crates | Replaces | Oracle Gate |
 |---|---|---|---|
 | **Wave 1 (landed)** | `of-common`, `of-floor`, `of-install`, `of-cli` | `floor_guard.py`, `open_fleet/setup.py`, thin launchers + release pipeline | End-to-end CLI suite from `tests/test_floor_guard.py` (103 hermetic-repo tests) via `scripts/rust_floor_oracle.py` |
-| **Wave 1.5 (next)** | `of-hook` | `runtime/scripts/deny-hook.sh` (6.8k LOC -> ~2ms native pre-tool hook) | `tests/test_deny_hook.py`, `tests/test_trajectory_evals.py`, `tests/test_adversarial_security.py` |
-| **Wave 2** | `of-ledgers`, `of-verify` | `egress.py`, `decisions.py`, `events.py`, `verify.py`, `negative_control.py` | `bench/vf-bench`, `tests/test_verify.py`, `tests/test_events.py`, `tests/test_decisions.py`, `tests/test_egress.py` |
-| **Wave 3** | `of-mcp`, `of-ui`, `of-catalog` | `open_fleet/{mcp_server,ui_server,catalog,cli}.py` | `tests/test_product_cli.py`, `tests/test_product_mcp.py`, `tests/test_product_ui.py` |
-| **Deferred / Kept** | — | `merge_queue.py`, `posix.py`, `eval.py`, `ablation.py` remain in Python; `skills/`, `playbooks/`, `runtime/*.md` stay canonical Markdown | Existing Python suites |
+| **Wave 2A + 3 (landed)** | `of-ledgers`, `of-catalog`, `of-mcp` | `egress.py`, `decisions.py`, `open_fleet/catalog.py`, `open_fleet/mcp_server.py` | `scripts/rust_egress_oracle.py` (58 tests), `scripts/rust_decisions_oracle.py` (94 tests), `scripts/rust_product_oracle.py` (catalog + router + stdio MCP) |
+| **Wave 1.5 (next)** | `of-hook` | `runtime/scripts/deny-hook.sh` (6.8k LOC -> native pre-tool hook) | `tests/test_deny_hook.py`, `tests/test_deny_hook_conformance.py`, `tests/test_deny_hook_multi_harness.py`, `tests/test_trajectory_evals.py` |
+| **Wave 2B** | `of-verify` | `events.py`, `verify.py` | `bench/vf-bench`, `tests/test_verify.py`, `tests/test_events.py` |
+| **Deferred / Kept** | — | `merge_queue.py`, `posix.py`, `ui_server.py`, `eval.py`, `ablation.py` remain in Python; `skills/`, `playbooks/`, `runtime/*.md` stay canonical Markdown | Existing Python suites |
 
 ## Distribution Channels
 

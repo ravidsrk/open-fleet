@@ -74,9 +74,48 @@ open-fleet init [--harness claude|cursor|codex|gemini|opencode|antigravity|all]
 - With `--with-hooks` (default on `init`), atomically merges the native `open-fleet floor` Stop/TaskCompleted guard into Claude Code `settings.json` without clobbering existing user hooks.
 - Exits `0` on success, `2` on usage or unreadable source/target errors.
 
-### Strangler-Fig Pass-Through Verbs (Waves 2–4)
+### `open-fleet egress` (native hash-chained receipts)
+
+```text
+open-fleet egress [--ledger PATH] write --sink S --host H --payload-class C --consent G [--bytes N] [--payload-file F] [--payload-sha256 HEX] [--ts ISO]
+open-fleet egress [--ledger PATH] verify [--expect-head SHA] [--expect-ancestor SHA]... [--allow-empty]
+open-fleet egress [--ledger PATH] head
+open-fleet egress [--ledger PATH] grants [--json] [--expect-head SHA] [--expect-ancestor SHA]...
+```
+
+- Exact parity with `runtime/scripts/egress.py` (canonical JSON v2 + v1 prefix migration, SHA-256 `id` + `prev` chaining, linked-worktree back-link proof, `O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK`, `flock`, `fsync`, mode `0600`).
+- Exit codes: `0` ok, `2` usage, `3` fail-closed/tamper, `4` no receipts (`verify` without `--allow-empty`).
+
+### `open-fleet decisions` (native governance ledger & Ed25519 grants)
+
+```text
+open-fleet decisions [--file PATH] [--doors PATH] [--pin-ref REF] append --id ID --class mechanical|taste|one-way --answer A --why W [--task T] [--source human:<name>] [--grant-sig HEX] [--ts ISO]
+open-fleet decisions [--file PATH] [--pin-ref REF] active [--json]
+open-fleet decisions [--file PATH] tally --lens LENS [--json]
+open-fleet decisions [--file PATH] [--doors PATH] [--pin-ref REF] check [--since YYYY-MM-DD] [--base REF]
+open-fleet decisions grant-keygen --out PATH [--in-repo-ok]
+open-fleet decisions sign-grant --key PATH --id ID --answer A --why W [--task T] [--source human:<name>] [--ts ISO]
+```
+
+- Exact parity with `runtime/scripts/decisions.py` using native `ed25519-dalek` signing and verification.
+- Exit codes: `0` ok, `1` validation/custody refusal, `2` could not run / usage.
+
+### `open-fleet missions | route | show | certification | overview | mcp` (native catalog & zero-Python MCP server)
+
+```text
+open-fleet missions [--proof external-run|self-run|doctrine-only] [--category CAT] [--repo DIR] [--json]
+open-fleet route <goal>... [--top-k 5] [--repo DIR] [--json]
+open-fleet show <mission> [--body] [--repo DIR] [--json]
+open-fleet certification [--provider NAME] [--repo DIR] [--json]
+open-fleet overview [--repo DIR] [--json]
+open-fleet mcp [--root DIR] [--repo DIR]
+```
+
+- `open-fleet mcp` serves MCP JSON-RPC 2.0 over stdio (both newline-delimited JSON-RPC and `Content-Length` LSP framing, protocol versions `2025-03-26` and `2024-11-05`) with zero Python startup overhead for native tools (`fleet_doctor`, `fleet_route_mission`, `fleet_list_missions`, `fleet_get_mission`, `fleet_floor_check`, `fleet_certification`, `fleet_decisions`, `fleet_egress_verify`), resources, and prompts.
+
+### Strangler-Fig Pass-Through Verbs (Remaining Waves)
 
 Until ported natively into `crates/`, the following verbs cleanly locate the repository root and
 exec the canonical Python/shell implementation with identical arguments and exit codes:
 - `open-fleet hook ...` — supports native `--mode floor` now; passes through full pre-tool shell policy to `runtime/scripts/deny-hook.sh` (Wave 1.5).
-- `open-fleet verify|egress|decisions|events|mcp|ui|missions|run|queue ...` — passes through to `python3 -m open_fleet` or `runtime/scripts/<tool>.py` (Waves 2–3).
+- `open-fleet verify|events|ui|demo|queue|ci-check|solo-review ...` — passes through to `python3 -m open_fleet` or `runtime/scripts/<tool>.py`.

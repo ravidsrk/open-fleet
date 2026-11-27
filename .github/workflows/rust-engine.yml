@@ -44,10 +44,13 @@ jobs:
           cargo build --release --locked -p of-cli
           ls -lh target/release/open-fleet
           target/release/open-fleet --version
-      - name: Run adversarial floor_guard parity oracle against Rust binary
+      - name: Run adversarial parity oracles against Rust binary
         run: |
           set -euo pipefail
           python3 -I scripts/rust_floor_oracle.py
+          python3 -I scripts/rust_egress_oracle.py
+          python3 -I scripts/rust_decisions_oracle.py
+          python3 -I scripts/rust_product_oracle.py
       - name: Smoke test launcher and CLI packaging
         run: |
           set -euo pipefail

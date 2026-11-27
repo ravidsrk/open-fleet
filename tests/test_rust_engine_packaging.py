@@ -21,7 +21,15 @@ class RustEnginePackaging(unittest.TestCase):
         self.assertEqual(cargo["workspace"]["package"]["version"], version)
         self.assertEqual(
             cargo["workspace"]["members"],
-            ["crates/of-common", "crates/of-floor", "crates/of-install", "crates/of-cli"],
+            [
+                "crates/of-common",
+                "crates/of-floor",
+                "crates/of-install",
+                "crates/of-ledgers",
+                "crates/of-catalog",
+                "crates/of-mcp",
+                "crates/of-cli",
+            ],
         )
         self.assertTrue((ROOT / "Cargo.lock").is_file(), "Cargo.lock must be committed")
 
