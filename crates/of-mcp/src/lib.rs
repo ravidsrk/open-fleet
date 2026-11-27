@@ -157,7 +157,7 @@ impl OpenFleetMcpServer {
             }),
             json!({
                 "name": "fleet_diff_scope",
-                "description": "Run runtime/scripts/diff_scope.py to inspect changed paths and determine triggered risk review lenses.",
+                "description": "Classify changed paths natively into SCOPE_* review lenses (no Python required).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -166,6 +166,27 @@ impl OpenFleetMcpServer {
                         "repo": {"type": "string"}
                     },
                     "required": ["base"]
+                }
+            }),
+            json!({
+                "name": "fleet_quarantine_check",
+                "description": "Check the catalog or one mission (with transitive playbook closure) against runtime/quarantine.json natively.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "mission": {"type": "string", "description": "Optional mission name; omit to check the whole catalog"},
+                        "root": {"type": "string"}
+                    }
+                }
+            }),
+            json!({
+                "name": "fleet_proof_status",
+                "description": "Summarize every mission's proof tier (doctrine-only / self-run / external-run) and verify proof_evidence containment natively.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "root": {"type": "string"}
+                    }
                 }
             }),
             json!({
@@ -605,26 +626,78 @@ impl OpenFleetMcpServer {
                         .and_then(|v| v.as_str())
                         .map(PathBuf::from)
                         .unwrap_or_else(|| self.repo.clone());
-                    let script = self.root.join("runtime/scripts/diff_scope.py");
-                    let mut cmd_args = vec![
-                        "-I".to_string(),
-                        script.display().to_string(),
-                        "--repo".to_string(),
-                        repo.display().to_string(),
-                        "--base".to_string(),
-                        base.to_string(),
-                        "--json".to_string(),
-                    ];
-                    if args
+                    let strict = args
                         .get("strict")
                         .and_then(|v| v.as_bool())
-                        .unwrap_or(false)
-                    {
-                        cmd_args.push("--strict".to_string());
+                        .unwrap_or(false);
+                    let (code, payload) =
+                        of_verify::diff_scope::scope_to_json(&repo, Some(base), strict);
+                    is_error = code != 0;
+                    payload
+                }
+            }
+            "fleet_quarantine_check" => {
+                let root = args
+                    .get("root")
+                    .and_then(|v| v.as_str())
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| self.root.clone());
+                let mission = args
+                    .get("mission")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty());
+                let (entries, errors, present) = of_verify::quarantine::load_quarantine(&root);
+                if !errors.is_empty() {
+                    is_error = true;
+                    json!({"ok": false, "present": present, "errors": errors, "violations": []})
+                } else if !present {
+                    json!({"ok": true, "present": false, "violations": []})
+                } else {
+                    let view_res = match mission {
+                        Some(m) => of_verify::quarantine::mission_view(&root, m),
+                        None => of_verify::quarantine::catalog_view(&root).map(|mut v| {
+                            v.missions.clear();
+                            v
+                        }),
+                    };
+                    match view_res {
+                        Ok(v) => {
+                            let found = of_verify::quarantine::violations(&entries, &v);
+                            is_error = !found.is_empty();
+                            json!({
+                                "ok": found.is_empty(),
+                                "present": true,
+                                "violations": found,
+                            })
+                        }
+                        Err(err) => {
+                            is_error = true;
+                            json!({"ok": false, "present": true, "errors": [err], "violations": []})
+                        }
                     }
-                    let res = self.run_helper("python3", &cmd_args, &repo);
-                    is_error = !res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-                    res
+                }
+            }
+            "fleet_proof_status" => {
+                let root = args
+                    .get("root")
+                    .and_then(|v| v.as_str())
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| self.root.clone());
+                let skills_dir = root.join("skills");
+                if !skills_dir.is_dir() {
+                    is_error = true;
+                    json!({"error": format!("no skills/ directory under {}", root.display())})
+                } else {
+                    let records = of_verify::proof_status::collect(&skills_dir, &root);
+                    let rollup = of_verify::proof_status::rollup(&records);
+                    let failures = of_verify::proof_status::check_failures(&records);
+                    is_error = !failures.is_empty();
+                    json!({
+                        "ok": failures.is_empty(),
+                        "rollup": rollup,
+                        "missions": of_verify::proof_status::json_records(&records),
+                    })
                 }
             }
             "fleet_run_demo" => {

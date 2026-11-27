@@ -270,6 +270,144 @@ pub fn clause_refs(body: &str) -> Vec<String> {
     refs.into_iter().collect()
 }
 
+pub fn is_valid_name(name: &str) -> bool {
+    name_re().is_match(name)
+}
+
+pub fn compose_clause_backticks(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for caps in compose_clause_re().captures_iter(text) {
+        let clause = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+        for bt in backtick_re().captures_iter(clause) {
+            if let Some(m) = bt.get(1) {
+                out.push(m.as_str().to_string());
+            }
+        }
+    }
+    out
+}
+
+pub fn explicit_protocol_refs(text: &str) -> BTreeSet<String> {
+    let mut refs: BTreeSet<String> = compose_clause_backticks(text).into_iter().collect();
+    for stem in bare_md_stems(text) {
+        refs.insert(stem);
+    }
+    refs
+}
+
+fn relative_link_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"\[([^\]]*)\]\(([A-Za-z0-9_./:-]+)(#[^)]*)?\)").expect("regex"))
+}
+
+fn word_cand_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"[a-z0-9]+(?:-[a-z0-9]+)*").expect("regex"))
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+pub fn deferred_words(text: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for caps in deferred_re().captures_iter(text) {
+        let para = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+        for m in word_cand_re().find_iter(para) {
+            let start = m.start();
+            let end = m.end();
+            let prev_bad = para[..start]
+                .chars()
+                .next_back()
+                .map(|c| is_word_char(c) || matches!(c, '.' | '/' | '-'))
+                .unwrap_or(false);
+            if prev_bad {
+                continue;
+            }
+            let tail = &para[end..];
+            let next_bad = tail
+                .chars()
+                .next()
+                .map(|c| is_word_char(c) || matches!(c, '/' | '-'))
+                .unwrap_or(false);
+            if next_bad {
+                continue;
+            }
+            if let Some(after_md) = tail.strip_prefix(".md") {
+                let md_boundary = after_md
+                    .chars()
+                    .next()
+                    .map(|c| !is_word_char(c))
+                    .unwrap_or(true);
+                if md_boundary {
+                    continue;
+                }
+            }
+            out.insert(m.as_str().to_string());
+        }
+    }
+    out
+}
+
+pub fn protocol_mentions(text: &str) -> BTreeSet<String> {
+    let mut names = explicit_protocol_refs(text);
+    for bt in backtick_re().captures_iter(text) {
+        if let Some(m) = bt.get(1) {
+            names.insert(m.as_str().to_string());
+        }
+    }
+    for caps in relative_link_re().captures_iter(text) {
+        let target = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+        if target.starts_with("http:")
+            || target.starts_with("https:")
+            || target.starts_with("mailto:")
+            || target.starts_with('#')
+            || target.starts_with('/')
+            || target.starts_with("../")
+            || target.contains(':')
+        {
+            continue;
+        }
+        let base = target.rsplit('/').next().unwrap_or(target);
+        let stem = match base.rsplit_once('.') {
+            Some((s, _)) if !s.is_empty() => s,
+            _ => base,
+        };
+        names.insert(stem.to_string());
+    }
+    for w in deferred_words(text) {
+        names.insert(w);
+    }
+    names.into_iter().filter(|n| is_valid_name(n)).collect()
+}
+
+pub fn protocol_closure<T, E, R, F>(
+    text: &str,
+    mut resolve: R,
+    mut read: F,
+) -> Result<BTreeMap<String, T>, E>
+where
+    R: FnMut(&str) -> Option<T>,
+    F: FnMut(&T) -> Result<String, E>,
+{
+    let mut found: BTreeMap<String, T> = BTreeMap::new();
+    let mut pending: Vec<String> = vec![text.to_string()];
+    while let Some(doc_text) = pending.pop() {
+        let mentions = protocol_mentions(&doc_text);
+        for name in mentions {
+            if found.contains_key(&name) {
+                continue;
+            }
+            if let Some(doc) = resolve(&name) {
+                let body = read(&doc)?;
+                found.insert(name, doc);
+                pending.push(body);
+            }
+        }
+    }
+    Ok(found)
+}
+
 pub fn deferred_declared(body: &str) -> Vec<String> {
     let mut refs: BTreeSet<String> = BTreeSet::new();
     for caps in deferred_re().captures_iter(body) {

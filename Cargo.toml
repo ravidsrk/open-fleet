@@ -9,12 +9,13 @@ members = [
     "crates/of-install",
     "crates/of-ledgers",
     "crates/of-catalog",
+    "crates/of-verify",
     "crates/of-mcp",
     "crates/of-cli",
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/ravidsrk/open-fleet"
@@ -26,6 +27,7 @@ of-floor = { path = "crates/of-floor" }
 of-install = { path = "crates/of-install" }
 of-ledgers = { path = "crates/of-ledgers" }
 of-catalog = { path = "crates/of-catalog" }
+of-verify = { path = "crates/of-verify" }
 of-mcp = { path = "crates/of-mcp" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4", features = ["derive"] }

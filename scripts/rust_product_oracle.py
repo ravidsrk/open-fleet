@@ -130,6 +130,12 @@ class RustCatalogAndMcpOracle(unittest.TestCase):
             {"jsonrpc": "2.0", "id": 9, "method": "prompts/list"},
             {"jsonrpc": "2.0", "id": 10, "method": "prompts/get",
              "params": {"name": "mission/review-it", "arguments": {"goal": "Check PR #42"}}},
+            {"jsonrpc": "2.0", "id": 11, "method": "tools/call",
+             "params": {"name": "fleet_quarantine_check", "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 12, "method": "tools/call",
+             "params": {"name": "fleet_proof_status", "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 13, "method": "tools/call",
+             "params": {"name": "fleet_diff_scope", "arguments": {"base": "HEAD"}}},
         ]
         wire = "\n".join(json.dumps(r) for r in requests) + "\n"
         proc = subprocess.run(
@@ -138,7 +144,7 @@ class RustCatalogAndMcpOracle(unittest.TestCase):
         )
         responses = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
         by_id = {r["id"]: r for r in responses}
-        self.assertEqual(len(responses), 10)  # notification emits no response
+        self.assertEqual(len(responses), 13)  # notification emits no response
         self.assertEqual(by_id[1]["result"]["serverInfo"]["name"], "open-fleet")
         self.assertEqual(by_id[1]["result"]["protocolVersion"], "2025-03-26")
         self.assertEqual(by_id[2]["result"], {})
@@ -147,6 +153,7 @@ class RustCatalogAndMcpOracle(unittest.TestCase):
         self.assertTrue({
             "fleet_doctor", "fleet_route_mission", "fleet_list_missions", "fleet_get_mission",
             "fleet_floor_check", "fleet_certification", "fleet_decisions", "fleet_egress_verify",
+            "fleet_diff_scope", "fleet_quarantine_check", "fleet_proof_status",
         }.issubset(tool_names))
 
         route_out = by_id[4]["result"]["structuredContent"]
@@ -170,6 +177,18 @@ class RustCatalogAndMcpOracle(unittest.TestCase):
         prompt_text = by_id[10]["result"]["messages"][0]["content"]["text"]
         self.assertIn("review-it", prompt_text)
         self.assertIn("PR #42", prompt_text)
+
+        q_out = by_id[11]["result"]["structuredContent"]
+        self.assertTrue(q_out["ok"])
+        self.assertEqual(q_out["violations"], [])
+
+        ps_out = by_id[12]["result"]["structuredContent"]
+        self.assertTrue(ps_out["ok"])
+        self.assertGreaterEqual(ps_out["rollup"]["total"], 22)
+
+        ds_out = by_id[13]["result"]["structuredContent"]
+        self.assertIn("flags", ds_out)
+        self.assertIn("BACKEND", ds_out["flags"])
 
     def test_native_mcp_stdio_lsp_content_length_framing(self):
         req = json.dumps({"jsonrpc": "2.0", "id": 99, "method": "ping"}).encode("utf-8")

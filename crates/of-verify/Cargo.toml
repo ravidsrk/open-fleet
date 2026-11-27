@@ -1,0 +1,20 @@
+[package]
+name = "of-verify"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+chrono.workspace = true
+ed25519-dalek.workspace = true
+getrandom = "0.2"
+hex.workspace = true
+libc = "0.2"
+of-catalog = { path = "../of-catalog" }
+of-common = { path = "../of-common" }
+of-install = { path = "../of-install" }
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
