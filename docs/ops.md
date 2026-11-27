@@ -558,12 +558,14 @@ environment holds.
    clones install; the marketplace installs the `dist` branch (`"ref": "dist"`). Versioned
    publication is separate — `release.yml` (the GitHub Release) and
    `publish-dist.yml` (the `dist` branch) run on a `v*` tag push or a
-   manual run naming an existing tag, and a tag exists only for an exact
+   manual run naming an existing tag, while `release-engine.yml` (the
+   native Rust engine binaries and `.sha256` checksums) publishes on an
+   `engine-v*` tag push; a tag exists only for an exact
    cut the maintainer authorized (Tag and record provenance, above). So an
    untagged bad merge is undone by the revert alone; a published bad
    release is never re-tagged or deleted — revert on `main`, then publish
-   a new version through that same authorization, whose tag re-runs both
-   workflows. A bad merge is undone the way it landed. Regenerate badges
+   a new version through that same authorization, whose tag re-runs the
+   publishing workflows. A bad merge is undone the way it landed. Regenerate badges
    (`python3 scripts/gen-badges.py`) if the revert changes counts.
    Rehearsed on a scratch clone: 2026-09-01
    ([transcript](completion/evidence/P0-rollback-rehearsal.txt)) and

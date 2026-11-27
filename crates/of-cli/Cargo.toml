@@ -1,0 +1,17 @@
+[package]
+name = "of-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "open-fleet"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+of-common.workspace = true
+of-floor.workspace = true
+of-install.workspace = true
+serde_json.workspace = true

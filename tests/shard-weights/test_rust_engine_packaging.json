@@ -1,0 +1,4 @@
+{
+  "seconds": 0.3,
+  "measured": "2026-11-27: one run of tests.test_rust_engine_packaging took ~0.2s locally (stdlib-only packaging + optional smoke check)"
+}
