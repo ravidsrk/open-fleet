@@ -196,7 +196,9 @@ pub fn run_cli(args: &ProofStatusArgs) -> i32 {
         Some(r) => fs::canonicalize(r).unwrap_or_else(|_| r.clone()),
         None => {
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            of_install::find_catalog_root(&cwd).unwrap_or(cwd)
+            of_install::resolve_catalog_root(&cwd)
+                .map(|(p, _)| p)
+                .unwrap_or(cwd)
         }
     };
     let skills_dir = root.join("skills");

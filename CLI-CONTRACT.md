@@ -70,8 +70,8 @@ open-fleet init [--harness claude|cursor|codex|gemini|opencode|antigravity|all]
                 [--with-hooks] [--dry-run] [--json]
 ```
 
-- Installs canonical `skills/` into each selected harness's native skills directory.
-- With `--with-hooks` (default on `init`), atomically merges the native `open-fleet floor` Stop/TaskCompleted guard into Claude Code `settings.json` without clobbering existing user hooks.
+- Installs canonical `skills/` into each selected harness's native skills directory (works standalone zero-clone via the compile-time embedded catalog materialized atomically to `~/.open-fleet/catalog/<version>-<sha12>/`; an enclosing checkout or `OPEN_FLEET_ROOT` always takes precedence).
+- With `--with-hooks` (default on `init`), atomically merges BOTH the native `open-fleet floor --quiet` (`Stop`/`TaskCompleted`) AND `open-fleet hook --mode deny` (`PreToolUse`) guards into Claude Code `settings.json` without clobbering existing user hooks.
 - Exits `0` on success, `2` on usage or unreadable source/target errors.
 
 ### `open-fleet egress` (native hash-chained receipts)

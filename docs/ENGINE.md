@@ -21,8 +21,10 @@ crates/
                               DECISIONS ledger parser + native Ed25519 grant verification
   of-floor/                   Native `floor_guard` engine (all 6 rules + structural TOML/INI
                               guard surface + base-ref signed waiver resolution)
-  of-install/                 Multi-harness detector, skill installer, atomic Claude hook
-                              merger, and fast `doctor` diagnostics
+  of-install/                 Compile-time embedded canonical catalog (`build.rs` + atomic
+                              `~/.open-fleet/catalog/<ver>-<sha12>/` materialization), multi-harness
+                              detector, skill installer, dual `floor` + `deny` Claude hook merger,
+                              and fast `doctor` diagnostics
   of-ledgers/                 Native cryptographic & telemetry ledgers: hash-chained `egress`
                               receipts, `decisions` Ed25519 grant signing, and append-only
                               `events` ledger + WIP-curve derivation (with bundled SQLite)
@@ -74,10 +76,12 @@ python3 -I scripts/rust_product_oracle.py        # catalog, router, sessions, so
 | **Wave 3B (landed)** | `of-verify`, `of-mcp`, `of-cli` | `preflight.py`, `chain_check.py`, `open_fleet/sessions.py`, `solo_review.py`, `ci_action.py`, `readiness.py` | `rust_preflight_oracle.py` (36), `rust_chain_check_oracle.py` (11), `rust_product_oracle.py` (8) |
 | **Wave 2B-2 (landed)** | `of-verify`, `of-ledgers`, `of-mcp` | `events.py`, `run_report.py`, `verify.py` (`_verify_sig.py`, `_verify_diff.py`) | `rust_events_oracle.py` (98), `rust_run_report_oracle.py` (85), `rust_verify_oracle.py` (VF-Bench + CLI) |
 | **Wave 1.5 (landed)** | `of-hook` | `runtime/scripts/deny-hook.sh` (6.8k LOC -> native pre-tool hook) | `scripts/rust_deny_hook_oracle.py` (398 tests across `test_deny_hook`, `test_deny_hook_multi_harness`, `test_deny_hook_conformance`, `test_trajectory_evals`) |
+| **Phase A (landed)** | `of-install`, `of-cli`, `of-verify` | Compile-time embedded canonical catalog (`~/.open-fleet/catalog/<ver>-<sha12>/`), zero-clone standalone binary, dual `floor` + `deny` Claude hooks in `init`, `scripts/install-engine.sh`, `open-fleet.rb` Homebrew formula, gated npm release job | `scripts/rust_product_oracle.py` (standalone isolated temp-dir suite) + `tests/test_rust_engine_packaging.py` |
 | **Deferred / Kept** | — | `merge_queue.py`, `posix.py`, `eval.py`, `ablation.py` remain in Python; `skills/`, `playbooks/`, `runtime/*.md` stay canonical Markdown | Existing Python suites |
 
 ## Distribution Channels
 
-- **GitHub Releases (`engine-v*`):** Pre-built stripped static binaries + `.sha256` checksums for `darwin-arm64`, `darwin-x64`, `linux-arm64`, `linux-x64`, and `windows-x64` (`.github/workflows/release-engine.yml`).
-- **npm (`cli/`):** `npx open-fleet` resolves the matching `@open-fleet/cli-<os>-<arch>` optional package or falls back to a SHA-256-verified download cached in `~/.open-fleet/bin/<version>/`.
+- **Curl-pipe zero-Python installer (`scripts/install-engine.sh`):** `curl -fsSL https://raw.githubusercontent.com/ravidsrk/open-fleet/main/scripts/install-engine.sh | sh` downloads the platform binary + `.sha256` checksum, verifies SHA-256 fail-closed, and installs `~/.local/bin/open-fleet` (no git clone, no Python, no Rust required).
+- **GitHub Releases (`engine-v*`) & Homebrew formula (`open-fleet.rb`):** Pre-built stripped static binaries + `.sha256` checksums for `darwin-arm64`, `darwin-x64`, `linux-arm64`, `linux-x64`, and `windows-x64`, plus a generated `open-fleet.rb` Homebrew formula attached to every release (`.github/workflows/release-engine.yml`).
+- **npm (`cli/`):** `npx @open-fleet/cli` resolves the matching `@open-fleet/cli-<os>-<arch>` optional package or falls back to a SHA-256-verified download cached in `~/.open-fleet/bin/<version>/` (auto-published when `NPM_TOKEN` is configured).
 - **Thin shell launcher (`scripts/open-fleet`):** Zero-dependency POSIX launcher usable directly inside skill scripts and CI without Python or Rust installed.

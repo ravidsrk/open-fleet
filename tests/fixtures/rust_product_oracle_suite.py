@@ -354,3 +354,109 @@ class RustCatalogAndMcpOracle(unittest.TestCase):
         self.assertIn("schema", by_id[6]["result"]["structuredContent"])
         self.assertTrue(by_id[7]["result"]["isError"])
         self.assertEqual(by_id[7]["result"]["structuredContent"]["exit_code"], 2)
+
+    def test_standalone_zero_clone_binary_in_isolated_temp_dir(self):
+        import shutil
+
+        with tempfile.TemporaryDirectory(prefix="of-standalone-") as tmp:
+            tmp_path = Path(tmp)
+            bin_dir = tmp_path / "bin"
+            work_dir = tmp_path / "empty-project"
+            home_dir = tmp_path / "home"
+            bin_dir.mkdir()
+            work_dir.mkdir()
+            home_dir.mkdir()
+            standalone_bin = bin_dir / BINARY.name
+            shutil.copy2(BINARY, standalone_bin)
+            standalone_bin.chmod(0o755)
+
+            env = {
+                k: v for k, v in os.environ.items()
+                if k not in ("OPEN_FLEET_ROOT", "ORCA_FLEET_ROOT", "CLAUDE_PLUGIN_ROOT", "OPEN_FLEET_CACHE_DIR")
+            }
+            env["HOME"] = str(home_dir)
+
+            doc = subprocess.run(
+                [str(standalone_bin), "doctor", "--repo", str(work_dir), "--json"],
+                cwd=str(work_dir), env=env, capture_output=True, text=True, check=True,
+            )
+            doc_json = json.loads(doc.stdout)
+            self.assertEqual(doc_json["catalog_source"], "embedded")
+            self.assertGreaterEqual(doc_json["missions_count"], 22)
+            self.assertGreaterEqual(doc_json["embedded_catalog_files"], 100)
+            self.assertEqual(len(doc_json["embedded_catalog_sha256"]), 64)
+            self.assertTrue(doc_json["ready"])
+            self.assertTrue(doc_json["catalog_root"].startswith(str(home_dir / ".open-fleet" / "catalog")))
+
+            missions = json.loads(
+                subprocess.run(
+                    [str(standalone_bin), "missions", "--repo", str(work_dir), "--json"],
+                    cwd=str(work_dir), env=env, capture_output=True, text=True, check=True,
+                ).stdout
+            )
+            self.assertGreaterEqual(len(missions), 22)
+
+            routed = json.loads(
+                subprocess.run(
+                    [str(standalone_bin), "route", "--repo", str(work_dir), "--json", "Review this PR read-only"],
+                    cwd=str(work_dir), env=env, capture_output=True, text=True, check=True,
+                ).stdout
+            )
+            self.assertEqual(routed["matches"][0]["mission"], "review-it")
+
+            init_res = json.loads(
+                subprocess.run(
+                    [str(standalone_bin), "init", "--repo", str(work_dir), "--home", str(home_dir),
+                     "--harness", "claude,cursor", "--json"],
+                    cwd=str(work_dir), env=env, capture_output=True, text=True, check=True,
+                ).stdout
+            )
+            self.assertTrue(init_res["ok"])
+            self.assertEqual(init_res["catalog_source"], "embedded")
+            self.assertTrue(init_res["targets"][0]["hook_wired"])
+            self.assertTrue(init_res["targets"][0]["deny_hook_wired"])
+            settings = json.loads((home_dir / ".claude" / "settings.json").read_text(encoding="utf-8"))
+            self.assertIn("Stop", settings["hooks"])
+            self.assertIn("TaskCompleted", settings["hooks"])
+            self.assertIn("PreToolUse", settings["hooks"])
+            self.assertIn("hook --mode deny", settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"])
+
+            doc2 = json.loads(
+                subprocess.run(
+                    [str(standalone_bin), "doctor", "--repo", str(work_dir), "--json"],
+                    cwd=str(work_dir), env=env, capture_output=True, text=True, check=True,
+                ).stdout
+            )
+            self.assertTrue(doc2["claude_floor_hook_wired"])
+            self.assertTrue(doc2["claude_deny_hook_wired"])
+
+            # Standalone MCP server & preflight & session benchmark with zero repo checkout
+            mcp_wire = "\n".join([
+                json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+                json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                            "params": {"name": "fleet_list_missions", "arguments": {}}}),
+            ]) + "\n"
+            mcp_proc = subprocess.run(
+                [str(standalone_bin), "mcp", "--repo", str(work_dir)],
+                cwd=str(work_dir), env=env, input=mcp_wire,
+                capture_output=True, text=True, check=True, timeout=30,
+            )
+            mcp_by_id = {r["id"]: r for r in (json.loads(ln) for ln in mcp_proc.stdout.splitlines() if ln.strip())}
+            self.assertGreaterEqual(len(mcp_by_id[1]["result"]["tools"]), 23)
+            self.assertFalse(mcp_by_id[2]["result"]["isError"])
+
+            subprocess.run(["git", "init", "-q", "-b", "main", str(work_dir)], env=env, check=True)
+            pref = subprocess.run(
+                [str(standalone_bin), "preflight", "--runtime", "posix", "--mission", "review-it",
+                 "--mode", "readonly", "--json"],
+                cwd=str(work_dir), env=env, capture_output=True, text=True, check=True,
+            )
+            self.assertTrue(json.loads(pref.stdout)["ok"])
+
+            bench = json.loads(
+                subprocess.run(
+                    [str(standalone_bin), "session", "benchmark", "--repo", str(work_dir), "--json"],
+                    cwd=str(work_dir), env=env, capture_output=True, text=True, check=True,
+                ).stdout
+            )
+            self.assertTrue(bench["all_within_ceiling"])

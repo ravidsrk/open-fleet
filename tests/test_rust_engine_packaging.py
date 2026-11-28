@@ -75,6 +75,19 @@ class RustEnginePackaging(unittest.TestCase):
         self.assertIn("sha256", js_text.lower())
         self.assertIn("OPEN_FLEET_BIN", js_text)
 
+        installer = ROOT / "scripts" / "install-engine.sh"
+        self.assertTrue(installer.is_file(), "missing scripts/install-engine.sh")
+        self.assertTrue(installer.stat().st_mode & stat.S_IXUSR, "scripts/install-engine.sh must be executable")
+        inst_text = installer.read_text(encoding="utf-8")
+        version = (ROOT / "ENGINE_VERSION").read_text(encoding="utf-8").strip()
+        self.assertIn(f'DEFAULT_VERSION="{version}"', inst_text)
+        self.assertIn("sha256", inst_text.lower())
+        self.assertIn("OPEN_FLEET_INSTALL_DIR", inst_text)
+
+        release_wf = (ROOT / ".github" / "workflows" / "release-engine.yml").read_text(encoding="utf-8")
+        self.assertIn("open-fleet.rb", release_wf)
+        self.assertIn("publish-npm", release_wf)
+
     def test_docs_and_contract_exist(self):
         contract = (ROOT / "CLI-CONTRACT.md").read_text(encoding="utf-8")
         self.assertIn("open-fleet floor", contract)

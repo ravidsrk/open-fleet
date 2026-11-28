@@ -81,6 +81,54 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Generate Homebrew formula (open-fleet.rb)
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          VERSION="$(tr -d ' \t\r\n' < ENGINE_VERSION)"
+          SHA_DARWIN_ARM64="$(awk '{print $1}' dist/open-fleet-darwin-arm64.sha256)"
+          SHA_DARWIN_X64="$(awk '{print $1}' dist/open-fleet-darwin-x64.sha256)"
+          SHA_LINUX_ARM64="$(awk '{print $1}' dist/open-fleet-linux-arm64.sha256)"
+          SHA_LINUX_X64="$(awk '{print $1}' dist/open-fleet-linux-x64.sha256)"
+          sed 's/^          //' > dist/open-fleet.rb <<EOF
+          class OpenFleet < Formula
+            desc "The proof layer and autonomous fleet engine for coding agents"
+            homepage "https://github.com/${REPO}"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/${REPO}/releases/download/${TAG_NAME}/open-fleet-darwin-arm64"
+                sha256 "${SHA_DARWIN_ARM64}"
+              else
+                url "https://github.com/${REPO}/releases/download/${TAG_NAME}/open-fleet-darwin-x64"
+                sha256 "${SHA_DARWIN_X64}"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "https://github.com/${REPO}/releases/download/${TAG_NAME}/open-fleet-linux-arm64"
+                sha256 "${SHA_LINUX_ARM64}"
+              else
+                url "https://github.com/${REPO}/releases/download/${TAG_NAME}/open-fleet-linux-x64"
+                sha256 "${SHA_LINUX_X64}"
+              end
+            end
+
+            def install
+              bin.install Dir["open-fleet-*"].first => "open-fleet"
+            end
+
+            test do
+              assert_match "open-fleet ${VERSION}", shell_output("#{bin}/open-fleet --version")
+            end
+          end
+          EOF
+          cat dist/open-fleet.rb
       - name: Publish GitHub Release assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -98,3 +146,41 @@ jobs:
           else
             gh release create "$TAG_NAME" dist/* --title "open-fleet engine v$VERSION" --generate-notes
           fi
+
+  publish-npm:
+    if: startsWith(github.ref, 'refs/tags/engine-v')
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish @open-fleet/cli and platform packages (when NPM_TOKEN is set)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "NPM_TOKEN secret not configured; skipping npm publish cleanly."
+            exit 0
+          fi
+          printf '//registry.npmjs.org/:_authToken=%s\n' "${NODE_AUTH_TOKEN}" > .npmrc
+          chmod 600 .npmrc
+          trap 'rm -f .npmrc' EXIT
+          for plat in darwin-arm64 darwin-x64 linux-arm64 linux-x64 windows-x64; do
+            ext=""
+            if [ "$plat" = "windows-x64" ]; then
+              ext=".exe"
+            fi
+            pkg_dir="cli/platform-packages/${plat}"
+            mkdir -p "${pkg_dir}/bin"
+            cp "dist/open-fleet-${plat}${ext}" "${pkg_dir}/bin/open-fleet${ext}"
+            chmod 755 "${pkg_dir}/bin/open-fleet${ext}"
+            npm publish "${pkg_dir}" --access public --userconfig "$PWD/.npmrc"
+          done
+          npm publish cli --access public --userconfig "$PWD/.npmrc"
