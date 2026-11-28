@@ -32,6 +32,7 @@ class RustEnginePackaging(unittest.TestCase):
                 "crates/of-ledgers",
                 "crates/of-catalog",
                 "crates/of-verify",
+                "crates/of-hook",
                 "crates/of-mcp",
                 "crates/of-cli",
             ],
@@ -162,6 +163,7 @@ class RustOracleHarnesses(unittest.TestCase):
     def test_all_rust_oracle_scripts_wire_and_filter_cleanly(self):
         oracles = sorted((ROOT / "scripts").glob("rust_*_oracle.py"))
         self.assertGreaterEqual(len(oracles), 11)
+        self.assertGreaterEqual(len(oracles), 15)
         with tempfile.TemporaryDirectory(prefix="of-oracle-stub-") as tmp:
             stub = Path(tmp) / "open-fleet"
             stub.write_text("#!/bin/sh\necho 'Usage: open-fleet floor --base REF'\n", encoding="utf-8")

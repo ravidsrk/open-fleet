@@ -157,9 +157,23 @@ open-fleet events [--log PATH] (emit | ingest-state | ingest-launch | ingest-mer
 - `run-report`: exact parity with `runtime/scripts/run_report.py`: `RUN:` header parsing, manifest containment, inventory re-hashing at pinned commits, signed transcript & signed inventory verification against trusted bases, sound-lane enforcement, and CommonMark-aware WIP-curve checks (`scripts/rust_run_report_oracle.py`, 85 tests). Exits `0` bound, `1` not bound, `2` could-not-run.
 - `events`: exact parity with `runtime/scripts/events.py`: append-only JSONL ledger with `flock` locking, secret redaction, read-only bundled-SQLite `ingest-state` (`rusqlite`, never creates `-wal`/`-shm`), launch/merge-queue/transcript/usage ingestion, exact rational (`Frac`) WIP-curve derivation with `ROUND_HALF_EVEN` formatting, and Markdown/JSON reporting (`scripts/rust_events_oracle.py`, 98 tests). Exits `0` ok, `1` incomplete/mismatch, `2` usage, `3` fail-closed.
 
-### Strangler-Fig Pass-Through Verbs (Remaining Waves)
+### `open-fleet hook --mode deny` / `open-fleet deny-hook` (Wave 1.5 native PreToolUse guardrail)
 
-Until ported natively into `crates/`, the following verbs cleanly locate the repository root and
-exec the canonical Python/shell implementation with identical arguments and exit codes:
-- `open-fleet hook ...` — supports native `--mode floor` now; passes through full pre-tool shell policy to `runtime/scripts/deny-hook.sh` (Wave 1.5).
+```text
+open-fleet deny-hook [--help | --settings <WORKTREE> [--readonly] | --verify-settings <FILE> [--harness NAME] [--boundary DIR] [--readonly]]
+open-fleet hook --mode deny [ARGS...]
+```
+
+- Exact parity with `runtime/scripts/deny-hook.sh` (6,825 LOC) with zero shell/Python startup overhead:
+  - Quote-aware shell lexer, brace expander (`cap=512/4096`), single-pass substitution/heredoc/arithmetic/bracket analyzer, wrapper/launcher/busybox command peeler, nested body & interpreter extractors, 4-round stdin/pipe/heredoc/fd-dup dataflow analyzer.
+  - Full HIGH-tier enforcement (`rm` root/NPR, `git push` with git-2.43 prefix table + F4 per-ref `--force-with-lease` + default-branch resolution, `orca orchestration reset`, unreceipted off-repo egress gate, git/gh alias & exec-config laundering, awk `-f/-E`).
+  - Self-guard over all harness hook configs, `.orca/*-pubkey` trust anchors, and `deny-hook.sh` / `open-fleet` itself; read-only (`ro`) write floor; 32-hop symlink & 64-match glob worktree boundary check; Never-list + 14 ERE regexes.
+  - Native `rusqlite` WAL file-touch conflict recorder (`SCHEMA_VERSION=2` compatible with `LocalStateStore`) with coordinator escalations.
+  - Multi-harness `--settings` & `--verify-settings` across all 11 supported harnesses (`claude`, `codex`, `openhands`, `goose`, `crush`, `hermes`, `opencode`, `omp`, `pi`, `jcode`, `generic`) with SHA-256 identity, C18 interpreter custody walk, and live scrubbed probes.
+- Pinned byte-for-byte via `scripts/rust_deny_hook_oracle.py` (**398/398 tests** across `test_deny_hook.py`, `test_deny_hook_multi_harness.py`, `test_deny_hook_conformance.py`, and `test_trajectory_evals.py`). Exits `0` on allow / Claude-mode JSON verdict, `2` on strict-mode deny / unreadable payload / CLI usage or `--verify-settings` refusal.
+
+### Strangler-Fig Pass-Through Verbs (Deferred / Kept in Python)
+
+The remaining non-hot-path verbs cleanly locate the repository root and exec the canonical Python
+implementation with identical arguments and exit codes:
 - `open-fleet ui|demo|queue|upstream-probe ...` — passes through to `python3 -m open_fleet` or `runtime/scripts/<tool>.py`.

@@ -670,7 +670,8 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Run a guardrail hook (`floor` runs natively; `deny` delegates to deny-hook.sh).
+    /// Run a guardrail hook natively (`floor` or `deny`).
+    #[command(disable_help_flag = true)]
     Hook {
         #[arg(long, default_value = "floor")]
         mode: String,
@@ -678,6 +679,12 @@ enum Commands {
         repo: PathBuf,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         rest: Vec<OsString>,
+    },
+    /// Native PreToolUse deny hook (alias for `open-fleet hook --mode deny`).
+    #[command(name = "deny-hook", disable_help_flag = true)]
+    DenyHook {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
     },
     /// Delegate remaining verbs (verify, events, queue, ui, demo, ...) to the catalog Python runtime.
     #[command(external_subcommand)]
@@ -740,23 +747,6 @@ fn delegate_python(subcmd: &[OsString]) -> i32 {
         Ok(st) => st.code().unwrap_or(1),
         Err(err) => {
             eprintln!("open-fleet: failed to launch python delegate for {name:?}: {err}");
-            2
-        }
-    }
-}
-
-fn delegate_deny_hook(repo: &Path, rest: &[OsString]) -> i32 {
-    let Some(root) = of_install::find_catalog_root(repo) else {
-        eprintln!(
-            "open-fleet: hook --mode deny requires the open-fleet catalog (set OPEN_FLEET_ROOT)"
-        );
-        return 2;
-    };
-    let script = root.join("runtime/scripts/deny-hook.sh");
-    match Command::new("bash").arg(script).args(rest).status() {
-        Ok(st) => st.code().unwrap_or(1),
-        Err(err) => {
-            eprintln!("open-fleet: failed to execute deny-hook.sh: {err}");
             2
         }
     }
@@ -1796,12 +1786,13 @@ fn run() -> i32 {
                 quiet: true,
                 json: false,
             }),
-            "deny" => delegate_deny_hook(&repo, &rest),
+            "deny" => of_hook::run_raw(&rest),
             other => {
                 eprintln!("open-fleet hook: unknown --mode {other:?} (expected 'floor' or 'deny')");
                 2
             }
         },
+        Commands::DenyHook { args } => of_hook::run_raw(&args),
         Commands::External(args) => delegate_python(&args),
     }
 }

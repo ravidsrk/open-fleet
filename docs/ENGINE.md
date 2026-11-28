@@ -33,6 +33,10 @@ crates/
                               `quarantine`, `dispatch-sign`, `inventory`, `proof-status`,
                               `preflight`, `chain-check`, progressive `session` state machines,
                               `solo-review`, `ci-check`, and `readiness`
+  of-hook/                    Native PreToolUse deny-hook engine (`open-fleet hook --mode deny` /
+                              `open-fleet deny-hook`): quote-aware shell lexer, brace/heredoc/pipe
+                              analyzer, self-guard, RO write floor, egress receipt gate, SQLite WAL
+                              file-touch recorder, and 11-harness `--settings` / `--verify-settings`
   of-mcp/                     Zero-Python JSON-RPC 2.0 stdio MCP server (23 native tools)
   of-cli/                     The `open-fleet` binary: native verbs + strangler-fig delegation
 ```
@@ -56,6 +60,7 @@ python3 -I scripts/rust_chain_check_oracle.py    # 11 end-to-end chain_check CLI
 python3 -I scripts/rust_events_oracle.py         # 98 end-to-end events ledger + WIP-curve CLI tests
 python3 -I scripts/rust_run_report_oracle.py     # 85 end-to-end run_report proof-binding CLI tests
 python3 -I scripts/rust_verify_oracle.py         # VF-Bench (0% false-done, 0% false-reject) + test_verify CLI tests
+python3 -I scripts/rust_deny_hook_oracle.py      # 398 end-to-end deny-hook, multi-harness, bash-conformance & trajectory tests
 python3 -I scripts/rust_product_oracle.py        # catalog, router, sessions, solo/ci/readiness & 23-tool MCP parity
 ```
 
@@ -68,7 +73,7 @@ python3 -I scripts/rust_product_oracle.py        # catalog, router, sessions, so
 | **Wave 2B-1 (landed)** | `of-verify` (Part 1) | `diff_scope.py`, `quarantine_check.py`, `dispatch-sign.py`, `inventory.py`, `proof_status.py` | `rust_diff_scope_oracle.py` (63), `rust_quarantine_oracle.py` (21), `rust_dispatch_sign_oracle.py` (23), `rust_inventory_oracle.py` (54), `rust_proof_status_oracle.py` (8) |
 | **Wave 3B (landed)** | `of-verify`, `of-mcp`, `of-cli` | `preflight.py`, `chain_check.py`, `open_fleet/sessions.py`, `solo_review.py`, `ci_action.py`, `readiness.py` | `rust_preflight_oracle.py` (36), `rust_chain_check_oracle.py` (11), `rust_product_oracle.py` (8) |
 | **Wave 2B-2 (landed)** | `of-verify`, `of-ledgers`, `of-mcp` | `events.py`, `run_report.py`, `verify.py` (`_verify_sig.py`, `_verify_diff.py`) | `rust_events_oracle.py` (98), `rust_run_report_oracle.py` (85), `rust_verify_oracle.py` (VF-Bench + CLI) |
-| **Wave 1.5 (next)** | `of-hook` | `runtime/scripts/deny-hook.sh` (6.8k LOC -> native pre-tool hook) | `tests/test_deny_hook.py`, `tests/test_deny_hook_conformance.py`, `tests/test_deny_hook_multi_harness.py`, `tests/test_trajectory_evals.py` |
+| **Wave 1.5 (landed)** | `of-hook` | `runtime/scripts/deny-hook.sh` (6.8k LOC -> native pre-tool hook) | `scripts/rust_deny_hook_oracle.py` (398 tests across `test_deny_hook`, `test_deny_hook_multi_harness`, `test_deny_hook_conformance`, `test_trajectory_evals`) |
 | **Deferred / Kept** | — | `merge_queue.py`, `posix.py`, `eval.py`, `ablation.py` remain in Python; `skills/`, `playbooks/`, `runtime/*.md` stay canonical Markdown | Existing Python suites |
 
 ## Distribution Channels
