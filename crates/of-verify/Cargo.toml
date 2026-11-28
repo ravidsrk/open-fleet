@@ -13,8 +13,10 @@ hex.workspace = true
 libc = "0.2"
 of-catalog = { path = "../of-catalog" }
 of-common = { path = "../of-common" }
+of-floor = { path = "../of-floor" }
 of-install = { path = "../of-install" }
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tempfile.workspace = true

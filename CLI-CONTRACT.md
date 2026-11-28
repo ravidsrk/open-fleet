@@ -111,7 +111,7 @@ open-fleet overview [--repo DIR] [--json]
 open-fleet mcp [--root DIR] [--repo DIR]
 ```
 
-- `open-fleet mcp` serves MCP JSON-RPC 2.0 over stdio (both newline-delimited JSON-RPC and `Content-Length` LSP framing, protocol versions `2025-03-26` and `2024-11-05`) with zero Python startup overhead for native tools (`fleet_doctor`, `fleet_route_mission`, `fleet_list_missions`, `fleet_get_mission`, `fleet_floor_check`, `fleet_certification`, `fleet_decisions`, `fleet_egress_verify`, `fleet_diff_scope`, `fleet_quarantine_check`, `fleet_proof_status`), resources, and prompts.
+- `open-fleet mcp` serves MCP JSON-RPC 2.0 over stdio (both newline-delimited JSON-RPC and `Content-Length` LSP framing, protocol versions `2025-03-26` and `2024-11-05`) with zero Python startup overhead for all 20 native tools (`fleet_doctor`, `fleet_route_mission`, `fleet_list_missions`, `fleet_get_mission`, `fleet_floor_check`, `fleet_certification`, `fleet_decisions`, `fleet_egress_verify`, `fleet_diff_scope`, `fleet_quarantine_check`, `fleet_proof_status`, `fleet_preflight`, `fleet_chain_check`, `fleet_session_start`, `fleet_session_list`, `fleet_session_packet`, `fleet_session_approve_gate`, `fleet_session_advance`, `fleet_solo_review`, `fleet_readiness`), resources, and prompts.
 
 ### `open-fleet diff-scope | quarantine | dispatch-sign | inventory | proof-status` (Wave 2B-1 native verification suite)
 
@@ -129,9 +129,25 @@ open-fleet proof-status [--json] [--check] [--root DIR]
 - `inventory`: exact parity with `runtime/scripts/inventory.py` (`#784` Markdown fence tracking and symlink-free path containment, fenced & table blocks, `--at REV` blob hashing, Ed25519 detached signatures, v1 retention receipts). Exits `0` verified, `1` mismatch/refusal, `2` could not run.
 - `proof-status`: exact parity with `runtime/scripts/proof_status.py` (catalog proof-tier summary, repo-containment check on `proof_evidence`, `--json`, `--check`).
 
+### `open-fleet preflight | chain-check | session | solo-review | ci-check | readiness` (Wave 3B native product & control suite)
+
+```text
+open-fleet preflight [--provider auto|orca|posix] [--mission NAME] [--base REF] [--mode mutate|readonly] [--offline] [--require-gitleaks] [--strict-native-capabilities] [--json]
+open-fleet chain-check (classify <TERMINAL> | gate --allowed CSV <TERMINAL> | audit [--root DIR])
+open-fleet session (start | list | packet | approve | advance | benchmark) ...
+open-fleet solo-review [--base REF] [--repo DIR] [--contract PATH] [--builder HARNESS] [--lighting auto|dark|lit] [--packet-out PATH] [--json]
+open-fleet ci-check [--base REF] [--repo DIR] [--strict-scope] [--fail-on-risk-lenses] [--workflow-snippet] [--json]
+open-fleet readiness [--repo DIR] [--check-cert] [--probes] [--json]
+```
+
+- `preflight`: exact parity with `runtime/scripts/preflight.py` (provider resolution, capabilities matrix verification, quarantine check, canonical BASE != default branch check, fork-point & same-tip diagnostics; unknown/usage flags exit `1`, failed invariants exit `2`).
+- `chain-check`: exact parity with `runtime/scripts/chain_check.py` (fail-closed degraded terminal classification, chain boundary gate, full catalog terminal audit).
+- `session`: native progressive (<5K-token/phase) mission state machines with atomic JSON writes, enforced human one-way doors, receipt checks, and context-savings benchmark (`session benchmark`).
+- `solo-review`, `ci-check`, `readiness`: native in-process composition over `of-floor` and `of-verify::diff_scope` (zero Python startup on the core floor + scope + blind-packet + readiness paths; delegates only optional `--manifest` verification until Wave 2B-2).
+
 ### Strangler-Fig Pass-Through Verbs (Remaining Waves)
 
 Until ported natively into `crates/`, the following verbs cleanly locate the repository root and
 exec the canonical Python/shell implementation with identical arguments and exit codes:
 - `open-fleet hook ...` — supports native `--mode floor` now; passes through full pre-tool shell policy to `runtime/scripts/deny-hook.sh` (Wave 1.5).
-- `open-fleet verify|events|ui|demo|queue|ci-check|solo-review ...` — passes through to `python3 -m open_fleet` or `runtime/scripts/<tool>.py`.
+- `open-fleet verify|events|run-report|ui|demo|queue ...` — passes through to `python3 -m open_fleet` or `runtime/scripts/<tool>.py`.

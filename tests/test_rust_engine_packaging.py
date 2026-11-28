@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Contract tests for the Wave 1 Rust engine workspace, launcher, and npm packaging."""
+import contextlib
+import importlib.util
+import io
 import json
 import os
 import stat
@@ -8,6 +11,7 @@ import tempfile
 import tomllib
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -112,6 +116,67 @@ class RustEnginePackaging(unittest.TestCase):
             self.assertTrue((Path(tmp) / ".claude" / "skills" / "ship-it").is_symlink())
             self.assertTrue((Path(tmp) / ".cursor" / "skills" / "ship-it").is_symlink())
             self.assertTrue((Path(tmp) / ".claude" / "settings.json").is_file())
+
+
+class RustOracleHarnesses(unittest.TestCase):
+    @staticmethod
+    def _load(path):
+        spec = importlib.util.spec_from_file_location(path.stem, path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_shared_oracle_helper_default_binary_and_runner(self):
+        helper = self._load(ROOT / "scripts" / "_rust_oracle.py")
+        with mock.patch.dict(os.environ, {"OPEN_FLEET_BIN": "/tmp/custom-open-fleet"}):
+            self.assertEqual(helper.default_binary(), Path("/tmp/custom-open-fleet"))
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("OPEN_FLEET_BIN", None)
+            self.assertTrue(str(helper.default_binary()).endswith("open-fleet")
+                            or str(helper.default_binary()).endswith("open-fleet.exe"))
+
+        with tempfile.TemporaryDirectory(prefix="of-oracle-unit-") as tmp:
+            stub = Path(tmp) / "open-fleet"
+            stub.write_text("#!/bin/sh\necho '--base'\n", encoding="utf-8")
+            stub.chmod(0o755)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                rc_missing = helper.run_oracle(
+                    "unit_oracle", "desc", lambda b, s, a: 0, ["--bin", str(Path(tmp) / "absent")]
+                )
+                rc_abort = helper.run_oracle(
+                    "unit_oracle", "desc", lambda b, s, a: None, ["--bin", str(stub)]
+                )
+                rc_empty = helper.run_oracle(
+                    "unit_oracle", "desc", lambda b, s, a: 0, ["--bin", str(stub)]
+                )
+                rc_ok = helper.run_oracle(
+                    "unit_oracle", "desc", lambda b, s, a: 0, ["--bin", str(stub)],
+                    require_nonempty=False,
+                )
+            self.assertEqual(rc_missing, 2)
+            self.assertEqual(rc_abort, 1)
+            self.assertEqual(rc_empty, 1)
+            self.assertEqual(rc_ok, 0)
+
+    def test_all_rust_oracle_scripts_wire_and_filter_cleanly(self):
+        oracles = sorted((ROOT / "scripts").glob("rust_*_oracle.py"))
+        self.assertGreaterEqual(len(oracles), 11)
+        with tempfile.TemporaryDirectory(prefix="of-oracle-stub-") as tmp:
+            stub = Path(tmp) / "open-fleet"
+            stub.write_text("#!/bin/sh\necho 'Usage: open-fleet floor --base REF'\n", encoding="utf-8")
+            stub.chmod(0o755)
+            missing = Path(tmp) / "no-such-bin"
+            for oracle_path in oracles:
+                with self.subTest(oracle=oracle_path.name):
+                    mod = self._load(oracle_path)
+                    buf = io.StringIO()
+                    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                        rc_missing = mod.main(["--bin", str(missing)])
+                        rc_dry = mod.main(["--bin", str(stub), "-k", "__no_such_test_pattern__"])
+                    self.assertEqual(rc_missing, 2)
+                    self.assertEqual(rc_dry, 1)
+                    self.assertIn("running 0 end-to-end CLI tests", buf.getvalue())
 
 
 if __name__ == "__main__":

@@ -7,109 +7,50 @@ if (__name__ == "__main__" and not getattr(sys.flags, "safe_path", False) and sy
              == sys.modules["os"].path.dirname(sys.modules["os"].path.realpath(__file__)))):
     del sys.path[0]
 
-import argparse
-import ast
 import importlib.util
-import os
 import subprocess
-import time
-import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+_SPEC = importlib.util.spec_from_file_location("_rust_oracle", Path(__file__).resolve().with_name("_rust_oracle.py"))
+_O = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(_O)
 
 
-def load_module(name, path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+def _rewrite(binary, target, cmd):
+    if isinstance(cmd, (list, tuple)):
+        if len(cmd) >= 2 and str(cmd[1]) == target:
+            return [str(binary), "inventory", *cmd[2:]]
+        if len(cmd) >= 3 and cmd[1] == "-I" and str(cmd[2]) == target:
+            return [str(binary), "inventory", *cmd[3:]]
+    return cmd
 
 
-def default_binary():
-    env_bin = os.environ.get("OPEN_FLEET_BIN")
-    if env_bin:
-        return Path(env_bin)
-    ext = ".exe" if os.name == "nt" else ""
-    return ROOT / "target" / "release" / f"open-fleet{ext}"
+def _build(binary, suite, args):
+    test_path = _O.ROOT / "tests" / "test_inventory.py"
+    allowed = _O.collect_ast_methods(
+        test_path,
+        skip_classes=("InventoryFenceAndSymlinkHardening",),
+        predicate=lambda _c, m, _q, s: (
+            "mock.patch" not in s and "test_script_shape" not in m
+            and any(k in s for k in ("run_inv(", "subprocess.run", "self._signed_fenced"))
+        ),
+    )
+    mod = _O.load_module("test_inventory_oracle", test_path)
+    real_run = subprocess.run
+    mod.run_inv = lambda *a: real_run(
+        [str(binary), "inventory", *[str(x) for x in a]], capture_output=True, text=True)
+    mod.subprocess.run = lambda cmd, *a, **kw: real_run(_rewrite(binary, str(mod.INVENTORY), cmd), *a, **kw)
+    return _O.add_module_tests(
+        suite, mod,
+        skip_classes=("InventoryBase", "InventorySigningFixture"),
+        allowed_methods=allowed,
+        pattern=args.pattern,
+    )
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--bin", dest="binary", default=str(default_binary()))
-    ap.add_argument("-v", "--verbose", action="store_true")
-    ap.add_argument("-k", dest="pattern", default=None)
-    args = ap.parse_args(argv)
-
-    binary = Path(args.binary).resolve()
-    if not binary.is_file():
-        print(f"rust_inventory_oracle: binary not found at {binary}", file=sys.stderr)
-        return 2
-
-    test_path = ROOT / "tests" / "test_inventory.py"
-    source = test_path.read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    cli_methods = set()
-    for node in tree.body:
-        if isinstance(node, ast.ClassDef):
-            if node.name in ("InventoryFenceAndSymlinkHardening",):
-                continue
-            for item in node.body:
-                if isinstance(item, ast.FunctionDef) and item.name.startswith("test_"):
-                    qual = f"{node.name}.{item.name}"
-                    seg = ast.get_source_segment(source, item) or ""
-                    if "mock.patch" in seg or "test_script_shape" in item.name:
-                        continue
-                    if any(k in seg for k in ("run_inv(", "subprocess.run", "self._signed_fenced")):
-                        cli_methods.add(qual)
-
-    mod = load_module("test_inventory_oracle", test_path)
-    real_run = subprocess.run
-
-    def rust_run_inv(*inv_args):
-        return real_run(
-            [str(binary), "inventory", *[str(a) for a in inv_args]],
-            capture_output=True, text=True,
-        )
-
-    def patched_run(cmd, *a, **kw):
-        if isinstance(cmd, (list, tuple)) and len(cmd) >= 2 and str(cmd[1]) == str(mod.INVENTORY):
-            cmd = [str(binary), "inventory", *cmd[2:]]
-        elif (isinstance(cmd, (list, tuple)) and len(cmd) >= 3
-              and cmd[1] == "-I" and str(cmd[2]) == str(mod.INVENTORY)):
-            cmd = [str(binary), "inventory", *cmd[3:]]
-        return real_run(cmd, *a, **kw)
-
-    mod.run_inv = rust_run_inv
-    mod.subprocess.run = patched_run
-
-    loader = unittest.TestLoader()
-    suite = unittest.TestSuite()
-    selected = 0
-    for attr_name in dir(mod):
-        obj = getattr(mod, attr_name)
-        if not (isinstance(obj, type) and issubclass(obj, unittest.TestCase)):
-            continue
-        if attr_name in ("InventoryBase", "InventorySigningFixture"):
-            continue
-        for method_name in loader.getTestCaseNames(obj):
-            qual = f"{attr_name}.{method_name}"
-            if qual not in cli_methods:
-                continue
-            if args.pattern and args.pattern not in qual:
-                continue
-            suite.addTest(obj(method_name))
-            selected += 1
-
-    print(f"rust_inventory_oracle: running {selected} end-to-end CLI tests against {binary}")
-    t0 = time.monotonic()
-    runner = unittest.TextTestRunner(verbosity=2 if args.verbose else 1)
-    result = runner.run(suite)
-    dt = time.monotonic() - t0
-    print(f"rust_inventory_oracle: {result.testsRun} run, {len(result.failures)} failed, "
-          f"{len(result.errors)} errors in {dt:.2f}s")
-    return 0 if result.wasSuccessful() and selected > 0 else 1
+    return _O.run_oracle("rust_inventory_oracle", __doc__, _build, argv)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

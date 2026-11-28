@@ -478,7 +478,7 @@ dependencies = [
 
 [[package]]
 name = "of-catalog"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "regex",
  "serde",
@@ -487,7 +487,7 @@ dependencies = [
 
 [[package]]
 name = "of-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "clap",
  "of-catalog",
@@ -502,7 +502,7 @@ dependencies = [
 
 [[package]]
 name = "of-common"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "chrono",
  "ed25519-dalek",
@@ -518,7 +518,7 @@ dependencies = [
 
 [[package]]
 name = "of-floor"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "of-common",
  "regex",
@@ -530,7 +530,7 @@ dependencies = [
 
 [[package]]
 name = "of-install"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "hex",
  "of-common",
@@ -541,7 +541,7 @@ dependencies = [
 
 [[package]]
 name = "of-ledgers"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "chrono",
  "ed25519-dalek",
@@ -558,7 +558,7 @@ dependencies = [
 
 [[package]]
 name = "of-mcp"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "of-catalog",
  "of-common",
@@ -572,7 +572,7 @@ dependencies = [
 
 [[package]]
 name = "of-verify"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "chrono",
  "ed25519-dalek",
@@ -581,11 +581,13 @@ dependencies = [
  "libc",
  "of-catalog",
  "of-common",
+ "of-floor",
  "of-install",
  "regex",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
 ]
 
 [[package]]
