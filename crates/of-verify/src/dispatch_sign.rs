@@ -524,21 +524,49 @@ fn find_scripts_dir(explicit: Option<&Path>) -> Option<PathBuf> {
     None
 }
 
+fn current_engine_binary_sha256() -> Option<String> {
+    let exe = env::current_exe().ok()?;
+    let bytes = fs::read(&exe).ok()?;
+    Some(hex::encode(Sha256::digest(&bytes)))
+}
+
 pub fn toolchain_mismatch(
     record: &Map<String, Value>,
     scripts_dir: Option<&Path>,
 ) -> Option<String> {
-    let files = record
-        .get("toolchain")
-        .and_then(|v| v.as_object())
-        .and_then(|t| t.get("files"))
-        .and_then(|f| f.as_object());
+    let tc = record.get("toolchain").and_then(|v| v.as_object());
+    let signed_bin_sha = tc
+        .and_then(|t| t.get("engine_binary_sha256"))
+        .and_then(|v| v.as_str());
+
+    let mut bin_verified = false;
+    if let Some(s_bin) = signed_bin_sha {
+        let Some(here_bin) = current_engine_binary_sha256() else {
+            return Some(
+                "open-fleet binary cannot be re-hashed beside this signer, so toolchain.engine_binary_sha256 cannot be verified".to_string(),
+            );
+        };
+        if s_bin != here_bin {
+            let s_pre = &s_bin[..s_bin.len().min(12)];
+            let h_pre = &here_bin[..here_bin.len().min(12)];
+            return Some(format!(
+                "verdict toolchain.engine_binary_sha256 pins {s_pre}…, not this open-fleet binary ({h_pre}…) — a different verifier binary produced it"
+            ));
+        }
+        bin_verified = true;
+    }
+
+    let dir = find_scripts_dir(scripts_dir);
+    if scripts_dir.is_none() && dir.is_none() && bin_verified {
+        return None;
+    }
+
+    let files = tc.and_then(|t| t.get("files")).and_then(|f| f.as_object());
     let Some(files) = files else {
         return Some(
             "verdict object names no toolchain.files — which verifier produced it is unknown; sign only a verdict object you produced (h409 O-2.4)".to_string(),
         );
     };
-    let dir = find_scripts_dir(scripts_dir);
     for &name in TOOLCHAIN_FILES {
         let signed = files.get(name).and_then(|v| v.as_str());
         let Some(ref sd) = dir else {

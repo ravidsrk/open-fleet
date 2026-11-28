@@ -576,3 +576,161 @@ class RustCatalogAndMcpOracle(unittest.TestCase):
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     proc.wait(timeout=5)
+
+    def test_v1_binary_bound_transcript_status_and_mcp_print_config(self):
+        import hashlib
+        import shutil
+        import sqlite3
+
+        with tempfile.TemporaryDirectory(prefix="of-v1-") as tmp:
+            tmp_path = Path(tmp)
+            bin_dir = tmp_path / "bin"
+            work_dir = tmp_path / "app"
+            home_dir = tmp_path / "home"
+            keys_dir = tmp_path / "keys"
+            for d in (bin_dir, work_dir, home_dir, keys_dir):
+                d.mkdir()
+            standalone_bin = bin_dir / BINARY.name
+            shutil.copy2(BINARY, standalone_bin)
+            standalone_bin.chmod(0o755)
+            bin_sha = hashlib.sha256(standalone_bin.read_bytes()).hexdigest()
+
+            env = {
+                k: v for k, v in os.environ.items()
+                if k not in ("OPEN_FLEET_ROOT", "ORCA_FLEET_ROOT", "CLAUDE_PLUGIN_ROOT",
+                             "OPEN_FLEET_CACHE_DIR", "OPEN_FLEET_BIN", "OPEN_FLEET_SCRIPTS_DIR")
+            }
+            env["HOME"] = str(home_dir)
+            env["GIT_CONFIG_GLOBAL"] = os.devnull
+            env["GIT_CONFIG_NOSYSTEM"] = "1"
+            env["GIT_AUTHOR_NAME"] = "T"
+            env["GIT_AUTHOR_EMAIL"] = "t@t.invalid"
+            env["GIT_COMMITTER_NAME"] = "T"
+            env["GIT_COMMITTER_EMAIL"] = "t@t.invalid"
+
+            # 1. Doctor reports engine == "rust" and embedded catalog
+            doc = json.loads(
+                subprocess.run(
+                    [str(standalone_bin), "doctor", "--repo", str(work_dir), "--json"],
+                    cwd=str(work_dir), env=env, capture_output=True, text=True, check=True,
+                ).stdout
+            )
+            self.assertEqual(doc["engine"], "rust")
+            self.assertEqual(doc["catalog_source"], "embedded")
+
+            # 2. Native read-only SQLite `open-fleet status --json`
+            orca_dir = work_dir / ".orca"
+            orca_dir.mkdir()
+            db_path = orca_dir / "runtime.db"
+            conn = sqlite3.connect(db_path)
+            conn.executescript("""
+                CREATE TABLE runs (id TEXT, status TEXT);
+                CREATE TABLE tasks (id TEXT, status TEXT);
+                CREATE TABLE dispatches (dispatch_id TEXT, state TEXT);
+                CREATE TABLE gates (id TEXT, status TEXT);
+                CREATE TABLE mq_entries (id TEXT, state TEXT);
+                INSERT INTO runs VALUES ('r1', 'active');
+                INSERT INTO tasks VALUES ('t1', 'completed'), ('t2', 'ready');
+                INSERT INTO dispatches VALUES ('d1', 'running');
+                INSERT INTO gates VALUES ('g1', 'open');
+                INSERT INTO mq_entries VALUES ('m1', 'QUEUED');
+            """)
+            conn.commit()
+            conn.close()
+
+            st = json.loads(
+                subprocess.run(
+                    [str(standalone_bin), "status", "--repo", str(work_dir), "--json"],
+                    cwd=str(work_dir), env=env, capture_output=True, text=True, check=True,
+                ).stdout
+            )
+            self.assertEqual(st["engine"], "rust")
+            rs = st["workspace"]["runtime_state"]
+            self.assertTrue(rs["db_exists"])
+            self.assertEqual(rs["summary"]["runs"], 1)
+            self.assertEqual(rs["summary"]["tasks_total"], 2)
+            self.assertEqual(rs["summary"]["active_dispatches"], 1)
+            self.assertEqual(rs["summary"]["open_gates"], 1)
+            self.assertEqual(rs["summary"]["queued_merges"], 1)
+
+            # 3. Native `open-fleet mcp --print-config`
+            claude_cfg = subprocess.run(
+                [str(standalone_bin), "mcp", "--print-config", "claude"],
+                cwd=str(work_dir), env=env, capture_output=True, text=True, check=True,
+            ).stdout
+            self.assertIn("mcpServers", claude_cfg)
+            codex_cfg = subprocess.run(
+                [str(standalone_bin), "mcp", "--print-config", "codex"],
+                cwd=str(work_dir), env=env, capture_output=True, text=True, check=True,
+            ).stdout
+            self.assertIn("[mcp_servers.open-fleet]", codex_cfg)
+
+            # 4. Standalone binary-bound transcript provenance & sign-transcript tamper check
+            subprocess.run(["git", "init", "-q", "-b", "main", str(work_dir)], env=env, check=True)
+            spec = work_dir / "spec.md"
+            spec.write_text("# Spec\n\n- AC-1: works\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(work_dir), "add", "spec.md"], env=env, check=True)
+            subprocess.run(["git", "-C", str(work_dir), "commit", "-qm", "spec"], env=env, check=True)
+            base_sha = subprocess.run(
+                ["git", "-C", str(work_dir), "rev-parse", "HEAD"],
+                env=env, capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            (work_dir / "docs").mkdir()
+            (work_dir / "docs" / "review.md").write_text("# Review\n\nAC-1 verified.\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(work_dir), "add", "docs/review.md"], env=env, check=True)
+            subprocess.run(["git", "-C", str(work_dir), "commit", "-qm", "report"], env=env, check=True)
+            head = subprocess.run(
+                ["git", "-C", str(work_dir), "rev-parse", "HEAD"],
+                env=env, capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            digest = "sha256:" + hashlib.sha256(spec.read_bytes()).hexdigest()
+            manifest = work_dir / "manifest.json"
+            manifest.write_text(json.dumps({
+                "unit": "review-it",
+                "unit_class": "report-only",
+                "base_sha": base_sha,
+                "head_sha": head,
+                "contract": {"source": "spec.md", "digest": digest, "criterion_ids": ["AC-1"]},
+                "criteria": [{"id": "AC-1", "text": "works", "addressed": True}],
+                "pr": {"number": 0, "url": "", "reviewed_sha": head},
+                "claim": "done",
+            }), encoding="utf-8")
+
+            key_path = keys_dir / "coord.key"
+            subprocess.run(
+                [str(standalone_bin), "dispatch-sign", "gen-key", "--out", str(key_path)],
+                cwd=str(work_dir), env=env, capture_output=True, text=True, check=True,
+            )
+            tr_raw = tmp_path / "verdict.json"
+            vf = subprocess.run(
+                [str(standalone_bin), "verify", "--manifest", str(manifest),
+                 "--contract-source", "spec.md", "--contract-digest", digest,
+                 "--unit-class", "report-only", "--no-gh",
+                 "--transcript-out", str(tr_raw)],
+                cwd=str(work_dir), env=env, capture_output=True, text=True,
+            )
+            self.assertEqual(vf.returncode, 0, vf.stderr)
+            verdict = json.loads(tr_raw.read_text(encoding="utf-8"))
+            self.assertEqual(verdict["toolchain"]["engine"], "rust")
+            self.assertEqual(verdict["toolchain"]["engine_binary_sha256"], bin_sha)
+
+            tr_signed = tmp_path / "verdict.signed.json"
+            signed = subprocess.run(
+                [str(standalone_bin), "dispatch-sign", "sign-transcript",
+                 "--key", str(key_path), "--transcript", str(tr_raw), "--out", str(tr_signed)],
+                cwd=str(work_dir), env=env, capture_output=True, text=True,
+            )
+            self.assertEqual(signed.returncode, 0, signed.stderr)
+            self.assertTrue(tr_signed.is_file())
+
+            # Tampering engine_binary_sha256 must fail closed
+            verdict["toolchain"]["engine_binary_sha256"] = "0" * 64
+            tr_bad = tmp_path / "verdict.bad.json"
+            tr_bad.write_text(json.dumps(verdict), encoding="utf-8")
+            bad = subprocess.run(
+                [str(standalone_bin), "dispatch-sign", "sign-transcript",
+                 "--key", str(key_path), "--transcript", str(tr_bad)],
+                cwd=str(work_dir), env=env, capture_output=True, text=True,
+            )
+            self.assertNotEqual(bad.returncode, 0)
+            self.assertIn("engine_binary_sha256", bad.stderr)

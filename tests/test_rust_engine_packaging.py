@@ -97,6 +97,8 @@ class RustEnginePackaging(unittest.TestCase):
         engine_doc = (ROOT / "docs" / "ENGINE.md").read_text(encoding="utf-8")
         self.assertIn("of-floor", engine_doc)
         self.assertIn("scripts/rust_floor_oracle.py", engine_doc)
+        self.assertIn("engine_binary_sha256", engine_doc)
+        self.assertIn("v1.0.0", engine_doc)
 
     def test_compiled_binary_smoke_if_present(self):
         ext = ".exe" if os.name == "nt" else ""

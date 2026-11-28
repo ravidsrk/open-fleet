@@ -199,6 +199,7 @@ pub fn discover_missions(catalog_root: &Path) -> Vec<String> {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DoctorReport {
+    pub engine: &'static str,
     pub engine_version: String,
     pub binary_path: String,
     pub binary_sha256: Option<String>,
@@ -324,6 +325,7 @@ pub fn doctor(repo: &Path, engine_version: &str) -> DoctorReport {
     let ready = git_path.is_some() && missions_count > 0;
 
     DoctorReport {
+        engine: "rust",
         engine_version: engine_version.to_string(),
         binary_path: exe.to_string_lossy().into_owned(),
         binary_sha256: exe_sha,
