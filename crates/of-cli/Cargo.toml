@@ -14,6 +14,7 @@ clap.workspace = true
 of-catalog.workspace = true
 of-common.workspace = true
 of-floor.workspace = true
+of-hook.workspace = true
 of-install.workspace = true
 of-ledgers.workspace = true
 of-mcp.workspace = true
