@@ -131,4 +131,30 @@ runs:
         else
           ROOT_DIR="$(cd "$OF_ACTION_PATH/../../.." && pwd -P)"
         fi
-        python3 -I "$ROOT_DIR/open_fleet/ci_action.py" --root "$ROOT_DIR" --repo "$OF_REPO"
+        OF_BIN=""
+        if [ "${OPEN_FLEET_ENGINE:-}" != "python" ]; then
+          if [ -n "${OPEN_FLEET_BIN:-}" ] && [ -x "${OPEN_FLEET_BIN:-}" ]; then
+            OF_BIN="$OPEN_FLEET_BIN"
+          elif command -v open-fleet >/dev/null 2>&1; then
+            OF_BIN="$(command -v open-fleet)"
+          elif [ -x "$ROOT_DIR/target/release/open-fleet" ]; then
+            OF_BIN="$ROOT_DIR/target/release/open-fleet"
+          fi
+        fi
+        if [ -n "$OF_BIN" ]; then
+          args=(ci-check --base "$OF_BASE_REF" --repo "$OF_REPO")
+          case "${OF_RUN_FLOOR_GUARD,,}" in 0|false|no|off) args+=(--skip-floor) ;; esac
+          case "${OF_RUN_DIFF_SCOPE,,}" in 0|false|no|off) args+=(--skip-scope) ;; esac
+          case "${OF_STRICT_SCOPE,,}" in 1|true|yes|on) args+=(--strict-scope) ;; esac
+          case "${OF_FAIL_ON_RISK_LENSES,,}" in 1|true|yes|on) args+=(--fail-on-risk-lenses) ;; esac
+          [ -n "$OF_MANIFEST" ] && args+=(--manifest "$OF_MANIFEST")
+          [ -n "$OF_CONTRACT_SOURCE" ] && args+=(--contract-source "$OF_CONTRACT_SOURCE")
+          [ -n "$OF_CONTRACT_DIGEST" ] && args+=(--contract-digest "$OF_CONTRACT_DIGEST")
+          case "${OF_EXECUTE_NC,,}" in 1|true|yes|on) args+=(--execute-nc) ;; esac
+          [ -n "$OF_NC_COMMAND" ] && args+=(--nc-command "$OF_NC_COMMAND")
+          case "${OF_ALLOW_STATIC_NC,,}" in 1|true|yes|on) args+=(--allow-static-nc) ;; esac
+          case "${OF_NO_GH,,}" in 1|true|yes|on) args+=(--no-gh) ;; esac
+          OPEN_FLEET_ROOT="$ROOT_DIR" "$OF_BIN" "${args[@]}"
+        else
+          python3 -I "$ROOT_DIR/open_fleet/ci_action.py" --root "$ROOT_DIR" --repo "$OF_REPO"
+        fi

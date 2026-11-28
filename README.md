@@ -74,7 +74,23 @@ Each **mission** is a complete engineering workflow: a coordinator decomposes yo
 
 ## Quick start
 
-**Unified CLI, MCP server & Mission Control UI** (Python 3.11+ stdlib only, zero external dependencies — see [CLI, MCP & Mission Control](docs/cli-and-mcp.md)):
+**Standalone Rust engine (zero Python, zero git clone — embeds the full mission catalog):**
+
+```bash
+# Install the SHA-256-verified static binary (~8 MB, macOS & Linux)
+curl -fsSL https://raw.githubusercontent.com/ravidsrk/open-fleet/main/scripts/install-engine.sh | sh
+# Or via npm (no global install):  npx @open-fleet/cli init --harness claude,cursor
+
+open-fleet doctor                       # check binary, git, embedded catalog, harnesses & hooks
+open-fleet init --harness claude,cursor # install all missions + wire native floor & deny hooks
+open-fleet demo                         # see independent verification catch a gamed manifest live
+open-fleet route "review PR #42"        # pick the right mission + copy-ready launch prompt
+open-fleet ui --port 8765               # launch native Mission Control cockpit (zero Python)
+```
+
+Pre-built binaries, SHA-256 checksums, and a Homebrew formula (`open-fleet.rb`) ship on every [`engine-v*` release](https://github.com/ravidsrk/open-fleet/releases); see [The Rust Engine](docs/ENGINE.md) and [CLI Contract](CLI-CONTRACT.md).
+
+**From a git checkout (Python 3.11+ stdlib CLI / development):**
 
 ```bash
 git clone https://github.com/ravidsrk/open-fleet.git && cd open-fleet

@@ -1,4 +1,7 @@
-//! `open-fleet` — native Rust engine binary with strangler-fig delegation for not-yet-ported verbs.
+//! `open-fleet` — native Rust engine binary with standalone zero-clone catalog,
+//! native Mission Control UI, proof demo, MCP server, verification & hook engines.
+
+mod ui;
 
 use clap::{Parser, Subcommand};
 use of_catalog::{
@@ -25,6 +28,7 @@ use of_verify::ci_check::{
     render_step_summary as ci_render_summary, render_workflow_snippet as ci_render_snippet,
     run_ci_verify, CiCheckArgs,
 };
+use of_verify::demo::run_negative_control_demo;
 use of_verify::diff_scope::{run_cli as diff_scope_run, DiffScopeArgs};
 use of_verify::dispatch_sign::{
     cmd_sign as ds_sign, cmd_sign_transcript as ds_sign_transcript, cmd_verify as ds_verify,
@@ -463,6 +467,7 @@ enum Commands {
         json: bool,
     },
     /// Summarize provider & harness certification tiers.
+    #[command(alias = "certify")]
     Certification {
         #[arg(long)]
         provider: Option<String>,
@@ -686,7 +691,21 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<OsString>,
     },
-    /// Delegate remaining verbs (verify, events, queue, ui, demo, ...) to the catalog Python runtime.
+    /// Launch the native zero-Python Mission Control web dashboard.
+    Ui {
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        #[arg(long, default_value_t = 8765)]
+        port: u16,
+        #[arg(long)]
+        repo: Option<PathBuf>,
+    },
+    /// Run the standalone zero-Python negative-control proof demo (self-scorer vs independent verifier).
+    Demo {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delegate remaining catalog-only verbs (queue, upstream-probe) to the Python runtime.
     #[command(external_subcommand)]
     External(Vec<OsString>),
 }
@@ -1589,6 +1608,48 @@ fn run() -> i32 {
             }) {
                 Ok(res) => {
                     let ok = res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+                    if let Ok(out_path) = env::var("GITHUB_OUTPUT") {
+                        let out_trimmed = out_path.trim();
+                        if !out_trimmed.is_empty() {
+                            let lenses: Vec<&str> = res
+                                .get("triggered_lenses")
+                                .and_then(|v| v.as_array())
+                                .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+                                .unwrap_or_default();
+                            let fg_st = res["floor_guard"]["status"].as_str().unwrap_or("skipped");
+                            let ds_st = res["diff_scope"]["status"].as_str().unwrap_or("skipped");
+                            let vf_st = res["verify"]["status"].as_str().unwrap_or("skipped");
+                            if let Ok(mut fh) = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(out_trimmed)
+                            {
+                                use std::io::Write as _;
+                                let _ = writeln!(
+                                    fh,
+                                    "overall-ok={}",
+                                    if ok { "true" } else { "false" }
+                                );
+                                let _ = writeln!(fh, "floor-guard-status={fg_st}");
+                                let _ = writeln!(fh, "diff-scope-status={ds_st}");
+                                let _ = writeln!(fh, "verify-status={vf_st}");
+                                let _ = writeln!(fh, "triggered-lenses={}", lenses.join(","));
+                            }
+                        }
+                    }
+                    if let Ok(sum_path) = env::var("GITHUB_STEP_SUMMARY") {
+                        let sum_trimmed = sum_path.trim();
+                        if !sum_trimmed.is_empty() {
+                            if let Ok(mut fh) = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(sum_trimmed)
+                            {
+                                use std::io::Write as _;
+                                let _ = writeln!(fh, "{}", ci_render_summary(&res));
+                            }
+                        }
+                    }
                     if json {
                         if let Ok(s) = serde_json::to_string_pretty(&res) {
                             println!("{s}");
@@ -1800,6 +1861,38 @@ fn run() -> i32 {
             }
         },
         Commands::DenyHook { args } => of_hook::run_raw(&args),
+        Commands::Ui { host, port, repo } => {
+            let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let target_repo = repo.unwrap_or(cwd);
+            let catalog_root = match require_catalog(&target_repo) {
+                Ok(r) => r,
+                Err(code) => return code,
+            };
+            ui::serve_ui(catalog_root, target_repo, &host, port, ENGINE_VERSION)
+        }
+        Commands::Demo { json } => {
+            let res = run_negative_control_demo();
+            let ok = res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+            if json {
+                if let Ok(s) = serde_json::to_string_pretty(&res) {
+                    println!("{s}");
+                }
+            } else {
+                if let Some(out) = res.get("stdout").and_then(|v| v.as_str()) {
+                    print!("{out}");
+                }
+                if let Some(err) = res.get("stderr").and_then(|v| v.as_str()) {
+                    if !err.is_empty() {
+                        eprintln!("{err}");
+                    }
+                }
+            }
+            if ok {
+                0
+            } else {
+                1
+            }
+        }
         Commands::External(args) => delegate_python(&args),
     }
 }

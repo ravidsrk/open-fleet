@@ -172,8 +172,17 @@ open-fleet hook --mode deny [ARGS...]
   - Multi-harness `--settings` & `--verify-settings` across all 11 supported harnesses (`claude`, `codex`, `openhands`, `goose`, `crush`, `hermes`, `opencode`, `omp`, `pi`, `jcode`, `generic`) with SHA-256 identity, C18 interpreter custody walk, and live scrubbed probes.
 - Pinned byte-for-byte via `scripts/rust_deny_hook_oracle.py` (**398/398 tests** across `test_deny_hook.py`, `test_deny_hook_multi_harness.py`, `test_deny_hook_conformance.py`, and `test_trajectory_evals.py`). Exits `0` on allow / Claude-mode JSON verdict, `2` on strict-mode deny / unreadable payload / CLI usage or `--verify-settings` refusal.
 
+### `open-fleet ui | demo` (Phase B native Mission Control server & proof demo)
+
+```text
+open-fleet ui [--host 127.0.0.1] [--port 8765] [--repo DIR]
+open-fleet demo [--json]
+```
+
+- `open-fleet ui`: serves the Mission Control HTML cockpit (from the checkout or compile-time embedded `open_fleet/ui_assets/index.html`) plus all `/api/*` JSON & `/api/events/stream` SSE endpoints over stdlib `TcpListener` with zero Python runtime and zero external HTTP crate dependencies.
+- `open-fleet demo`: runs the head-to-head negative-control scope-shrink trap natively in an ephemeral temp repo (`selfscore: GREEN (exit 0)` vs independent `open-fleet verify` `RED (exit 2)` naming dropped `AC-2`), zero Python and zero repo clone required.
+
 ### Strangler-Fig Pass-Through Verbs (Deferred / Kept in Python)
 
-The remaining non-hot-path verbs cleanly locate the repository root and exec the canonical Python
-implementation with identical arguments and exit codes:
-- `open-fleet ui|demo|queue|upstream-probe ...` — passes through to `python3 -m open_fleet` or `runtime/scripts/<tool>.py`.
+The remaining catalog-only developer utilities cleanly locate the repository root and exec the canonical Python implementation:
+- `open-fleet queue|upstream-probe ...` — passes through to `runtime/scripts/<tool>.py`.

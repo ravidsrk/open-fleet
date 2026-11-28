@@ -64,6 +64,16 @@ HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 _abs() { case "$1" in /*) printf '%s\n' "$1" ;; "") : ;; *) printf '%s/%s\n' "$(pwd)" "$1" ;; esac; }
 GIT_BIN=$(_abs "$(command -v git 2>/dev/null || true)")
 PY_BIN=$(_abs "$(command -v python3 2>/dev/null || true)")
+SETSID_BIN=$(_abs "$(command -v setsid 2>/dev/null || true)")
+OF_BIN=""
+if [ "${OPEN_FLEET_ENGINE:-}" != "python" ]; then
+  if [ -n "${OPEN_FLEET_BIN:-}" ] && [ -x "${OPEN_FLEET_BIN:-}" ]; then
+    OF_BIN=$(_abs "$OPEN_FLEET_BIN")
+  else
+    _of_cand=$(command -v open-fleet 2>/dev/null || true)
+    [ -n "$_of_cand" ] && [ -x "$_of_cand" ] && OF_BIN=$(_abs "$_of_cand")
+  fi
+fi
 EVENT=""
 if [ "${1:-}" = "--event" ]; then
   EVENT="${2:-}"
@@ -350,29 +360,51 @@ case "$PROVENANCE" in
           "auditor re-running verify.py with the coordinator's real key — docs/verify-gate.md#trust-boundary." >&2 ;;
 esac
 
-# Any nonzero from verify.py (2 = invariant failed, 1 = usage/dep) is a BLOCK: an un-runnable or
+# Any nonzero from the verifier (2 = invariant failed, 1 = usage/dep) is a BLOCK: an un-runnable or
 # failing verifier is never a green light. Capture the REAL exit in the else branch — `$?` after a
-# bare `fi` is the if-statement's status (0 when the condition fails with no else), not verify.py's.
-if [ -z "$PY_BIN" ]; then
-  echo "verify-gate: python3 not on PATH — cannot run the verifier, BLOCKING (fail-closed)" >&2
-  exit 2
+# bare `fi` is the if-statement's status (0 when the condition fails with no else), not verify's.
+# Never run a worker-writable `open-fleet` binary located inside the target repository ($TOP).
+if [ -n "$OF_BIN" ] && [ -n "${TOP:-}" ]; then
+  case "$OF_BIN" in
+    "$TOP"|"$TOP"/*) OF_BIN="" ;;
+  esac
 fi
-# Claude Code cancels a command hook at its timeout (600 s by default) and DISCARDS its output, and
-# on Stop / TaskCompleted only exit 2 blocks — so a verifier still replaying the negative control
-# (up to 3 × 600 s) when the host gave up let the turn end: fail-OPEN. The gate therefore bounds
-# the verifier itself, below the host's limit (hooks/hooks.json and the snippet set 2400 s): at
-# the deadline the verifier is stopped and the gate BLOCKS (2026-10-26 review).
-# -I (W3-01): without it the interpreter puts $HERE at sys.path[0], ahead of the stdlib, and a
-# committed runtime/scripts/json.py became the verifier's `json` — a RED verdict turned GREEN,
-# bound by no toolchain hash. verify.py drops that entry itself too; -I also keeps PYTHON* env
-# and the user site out of the verdict.
-"$PY_BIN" -I -c 'import os, sys
+if [ -n "$OF_BIN" ]; then
+  if [ -n "$SETSID_BIN" ]; then
+    "$SETSID_BIN" "$OF_BIN" verify "$@" &
+  elif [ -n "$PY_BIN" ]; then
+    "$PY_BIN" -I -c 'import os, sys
+try:
+    os.setsid()
+except OSError:
+    pass
+os.execv(sys.argv[1], sys.argv[1:])' "$OF_BIN" verify "$@" &
+  else
+    "$OF_BIN" verify "$@" &
+  fi
+  _vpid=$!
+else
+  if [ -z "$PY_BIN" ]; then
+    echo "verify-gate: python3 not on PATH — cannot run the verifier, BLOCKING (fail-closed)" >&2
+    exit 2
+  fi
+  # Claude Code cancels a command hook at its timeout (600 s by default) and DISCARDS its output, and
+  # on Stop / TaskCompleted only exit 2 blocks — so a verifier still replaying the negative control
+  # (up to 3 × 600 s) when the host gave up let the turn end: fail-OPEN. The gate therefore bounds
+  # the verifier itself, below the host's limit (hooks/hooks.json and the snippet set 2400 s): at
+  # the deadline the verifier is stopped and the gate BLOCKS (2026-10-26 review).
+  # -I (W3-01): without it the interpreter puts $HERE at sys.path[0], ahead of the stdlib, and a
+  # committed runtime/scripts/json.py became the verifier's `json` — a RED verdict turned GREEN,
+  # bound by no toolchain hash. verify.py drops that entry itself too; -I also keeps PYTHON* env
+  # and the user site out of the verdict.
+  "$PY_BIN" -I -c 'import os, sys
 try:
     os.setsid()
 except OSError:
     pass
 os.execv(sys.argv[1], sys.argv[1:])' "$PY_BIN" -I "$HERE/verify.py" "$@" &
-_vpid=$!
+  _vpid=$!
+fi
 _waited=0
 while kill -0 "$_vpid" 2>/dev/null; do
   if [ "$_waited" -ge "$GATE_TIMEOUT" ]; then

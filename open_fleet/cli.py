@@ -651,5 +651,64 @@ def main(argv: list[str] | None = None) -> int:
     return 2
 
 
+def _resolve_native_engine(root: Path) -> Path | None:
+    """Locate the native Rust `open-fleet` binary unless OPEN_FLEET_ENGINE=python."""
+    if os.environ.get("OPEN_FLEET_ENGINE", "").strip().lower() == "python":
+        return None
+    ext = ".exe" if os.name == "nt" else ""
+    explicit = os.environ.get("OPEN_FLEET_BIN", "").strip()
+    if explicit:
+        cand = Path(explicit).expanduser()
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return cand
+    local = root / "target" / "release" / f"open-fleet{ext}"
+    if local.is_file() and os.access(local, os.X_OK):
+        return local
+    return None
+
+
+_NATIVE_DIRECT_VERBS = frozenset({
+    "floor",
+    "verify",
+    "preflight",
+    "solo-review",
+    "ci-check",
+    "readiness",
+    "session",
+    "ui",
+    "demo",
+    "init",
+    "overview",
+    "certification",
+    "egress",
+    "decisions",
+    "diff-scope",
+    "quarantine",
+    "dispatch-sign",
+    "inventory",
+    "proof-status",
+    "chain-check",
+    "events",
+    "run-report",
+    "hook",
+    "deny-hook",
+})
+
+
+def _maybe_exec_native(argv: list[str]) -> int | None:
+    """Delegate matching CLI invocations directly to the native Rust engine binary."""
+    if not argv or argv[0] not in _NATIVE_DIRECT_VERBS:
+        return None
+    root = find_catalog_root()
+    native = _resolve_native_engine(root)
+    if native is None:
+        return None
+    env = dict(os.environ)
+    env.setdefault("OPEN_FLEET_ROOT", str(root))
+    proc = subprocess.run([str(native), *argv], env=env)
+    return proc.returncode
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    _native_rc = _maybe_exec_native(sys.argv[1:])
+    sys.exit(_native_rc if _native_rc is not None else main())

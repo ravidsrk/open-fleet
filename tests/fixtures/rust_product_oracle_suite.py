@@ -460,3 +460,119 @@ class RustCatalogAndMcpOracle(unittest.TestCase):
                 ).stdout
             )
             self.assertTrue(bench["all_within_ceiling"])
+
+    def test_native_demo_ui_and_standalone_deny_settings(self):
+        import shutil
+        from urllib.request import Request, urlopen
+
+        with tempfile.TemporaryDirectory(prefix="of-phase-b-") as tmp:
+            tmp_path = Path(tmp)
+            bin_dir = tmp_path / "bin"
+            work_dir = tmp_path / "app"
+            home_dir = tmp_path / "home"
+            bin_dir.mkdir()
+            work_dir.mkdir()
+            home_dir.mkdir()
+            standalone_bin = bin_dir / BINARY.name
+            shutil.copy2(BINARY, standalone_bin)
+            standalone_bin.chmod(0o755)
+
+            env = {
+                k: v for k, v in os.environ.items()
+                if k not in ("OPEN_FLEET_ROOT", "ORCA_FLEET_ROOT", "CLAUDE_PLUGIN_ROOT",
+                             "OPEN_FLEET_CACHE_DIR", "OPEN_FLEET_BIN", "OPEN_FLEET_DENY_HOOK")
+            }
+            env["HOME"] = str(home_dir)
+
+            # 1. Standalone zero-Python negative-control proof demo
+            demo = subprocess.run(
+                [str(standalone_bin), "demo", "--json"],
+                cwd=str(work_dir), env=env, capture_output=True, text=True, check=True, timeout=60,
+            )
+            demo_json = json.loads(demo.stdout)
+            self.assertTrue(demo_json["ok"])
+            self.assertEqual(demo_json["engine"], "rust")
+            self.assertTrue(demo_json["self_score_green"])
+            self.assertTrue(demo_json["verifier_caught_gamed_manifest"])
+            self.assertEqual(demo_json["verifier_exit"], 2)
+            self.assertEqual(demo_json["dropped_criterion"], "AC-2")
+
+            # 2. Standalone deny-hook --settings -> --verify-settings round-trip (native binary command)
+            settings_out = subprocess.run(
+                [str(standalone_bin), "deny-hook", "--settings", str(work_dir)],
+                cwd=str(work_dir), env=env, capture_output=True, text=True, check=True,
+            )
+            settings_doc = json.loads(settings_out.stdout)
+            hook_cmd = settings_doc["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+            self.assertIn("deny-hook", hook_cmd)
+            settings_file = tmp_path / "claude-settings.json"
+            settings_file.write_text(settings_out.stdout, encoding="utf-8")
+            ver = subprocess.run(
+                [str(standalone_bin), "deny-hook", "--verify-settings", str(settings_file),
+                 "--harness", "claude", "--boundary", str(work_dir)],
+                cwd=str(work_dir), env=env, capture_output=True, text=True, check=True,
+            )
+            self.assertEqual(ver.returncode, 0)
+
+            # 3. Standalone zero-Python Mission Control HTTP + SSE server (`open-fleet ui --port 0`)
+            proc = subprocess.Popen(
+                [str(standalone_bin), "ui", "--host", "127.0.0.1", "--port", "0", "--repo", str(work_dir)],
+                cwd=str(work_dir), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            try:
+                banner = proc.stdout.readline().strip()
+                self.assertIn("http://127.0.0.1:", banner, f"unexpected ui banner: {banner!r}")
+                base_url = banner.split("http://", 1)[1].strip()
+                base = f"http://{base_url}"
+
+                with urlopen(f"{base}/", timeout=10) as resp:
+                    self.assertEqual(resp.status, 200)
+                    html = resp.read().decode("utf-8")
+                    self.assertIn("open-fleet Mission Control", html)
+
+                with urlopen(f"{base}/api/health", timeout=10) as resp:
+                    health = json.loads(resp.read().decode("utf-8"))
+                    self.assertTrue(health["ok"])
+                    self.assertEqual(health["engine"], "rust")
+
+                with urlopen(f"{base}/api/overview", timeout=10) as resp:
+                    ov = json.loads(resp.read().decode("utf-8"))
+                    self.assertGreaterEqual(ov["catalog"]["mission_count"], 22)
+                    self.assertGreaterEqual(len(ov["mcp_tools"]), 23)
+
+                with urlopen(f"{base}/api/setup/preview?host=codex&runtime=auto", timeout=10) as resp:
+                    setup = json.loads(resp.read().decode("utf-8"))
+                    self.assertEqual(setup["host"], "codex")
+                    self.assertIn("mcp_servers.open-fleet", setup["mcp"]["content"])
+
+                req = Request(
+                    f"{base}/api/route",
+                    data=json.dumps({"goal": "review PR #99"}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(req, timeout=10) as resp:
+                    routed = json.loads(resp.read().decode("utf-8"))
+                    self.assertEqual(routed["matches"][0]["mission"], "review-it")
+
+                req_nc = Request(
+                    f"{base}/api/demo/negative-control",
+                    data=b"{}",
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(req_nc, timeout=30) as resp:
+                    nc = json.loads(resp.read().decode("utf-8"))
+                    self.assertTrue(nc["verifier_caught_gamed_manifest"])
+                    self.assertEqual(nc["engine"], "rust")
+
+                with urlopen(f"{base}/api/events/stream", timeout=10) as resp:
+                    sse = resp.read().decode("utf-8")
+                    self.assertIn("event: snapshot", sse)
+            finally:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
