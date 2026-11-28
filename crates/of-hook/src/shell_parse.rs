@@ -2852,10 +2852,7 @@ fn check_root_owned_safe_binary(real: &Path) -> bool {
         return false;
     }
     let euid = unsafe { libc::geteuid() };
-    if euid != 0 && (st.uid() == euid || pst.uid() == euid) {
-        return false;
-    }
-    true
+    !(euid != 0 && (st.uid() == euid || pst.uid() == euid))
 }
 
 #[cfg(not(unix))]
@@ -3128,10 +3125,7 @@ fn stage_writes_egress(st: &Stage) -> bool {
         "cp" | "mv" | "ln" | "install" | "tee" | "touch" | "dd" | "chmod" | "python" | "python3"
     ) && st.ws[1..].iter().any(|w| w.contains("egress.py"))
     {
-        if matches!(head, "python" | "python3") && st.ws.len() >= 2 && st.ws[1] != "-c" {
-            return false;
-        }
-        return true;
+        return !(matches!(head, "python" | "python3") && st.ws.len() >= 2 && st.ws[1] != "-c");
     }
     false
 }
