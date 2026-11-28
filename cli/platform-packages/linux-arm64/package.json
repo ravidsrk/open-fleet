@@ -1,6 +1,6 @@
 {
   "name": "@open-fleet/cli-linux-arm64",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "open-fleet native binary for Linux arm64",
   "license": "MIT",
   "os": [

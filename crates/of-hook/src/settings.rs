@@ -204,13 +204,16 @@ pub fn run_settings(args: &[OsString]) -> i32 {
     };
 
     let cfg = HookConfig::from_env();
-    let Some(self_path) = cfg.dh_self.or(cfg.current_exe) else {
+    let command_str = if let Some(dh_self) = cfg.dh_self {
+        shlex_quote(&dh_self.to_string_lossy())
+    } else if let Some(exe) = cfg.current_exe {
+        format!("{} deny-hook", shlex_quote(&exe.to_string_lossy()))
+    } else {
         eprintln!("deny-hook.sh --settings: could not locate canonical deny-hook path");
         return 2;
     };
 
     let wt_str = wt_real.to_string_lossy().into_owned();
-    let self_quoted = shlex_quote(&self_path.to_string_lossy());
 
     let mut env_obj = Map::new();
     env_obj.insert(
@@ -232,7 +235,7 @@ pub fn run_settings(args: &[OsString]) -> i32 {
                 "matcher": "Bash|Edit|Write|NotebookEdit|MultiEdit",
                 "hooks": [{
                     "type": "command",
-                    "command": self_quoted,
+                    "command": command_str,
                 }],
             }],
         },

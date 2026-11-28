@@ -6,6 +6,7 @@
 pub mod base64_codec;
 pub mod chain_check;
 pub mod ci_check;
+pub mod demo;
 pub mod diff_scope;
 pub mod dispatch_sign;
 pub mod inventory;

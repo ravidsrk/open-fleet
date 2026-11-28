@@ -14,7 +14,6 @@ use serde_json::{json, Value};
 use std::env;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 pub const PROTOCOL_VERSION: &str = "2025-03-26";
 pub const SUPPORTED_PROTOCOLS: &[&str] = &["2025-03-26", "2024-11-05"];
@@ -506,32 +505,6 @@ impl OpenFleetMcpServer {
                 "content": {"type": "text", "text": text}
             }]
         }))
-    }
-
-    fn run_helper(&self, program: &str, args: &[String], cwd: &Path) -> Value {
-        let out = Command::new(program)
-            .args(args)
-            .current_dir(cwd)
-            .env("OPEN_FLEET_ROOT", &self.root)
-            .stdin(Stdio::null())
-            .output();
-        match out {
-            Ok(res) => {
-                let code = res.status.code().unwrap_or(1);
-                json!({
-                    "returncode": code,
-                    "ok": code == 0,
-                    "stdout": String::from_utf8_lossy(&res.stdout).into_owned(),
-                    "stderr": String::from_utf8_lossy(&res.stderr).into_owned(),
-                })
-            }
-            Err(err) => json!({
-                "returncode": 127,
-                "ok": false,
-                "stdout": "",
-                "stderr": err.to_string(),
-            }),
-        }
     }
 
     pub fn call_tool(&self, name: &str, arguments: Option<&Value>) -> Result<Value, String> {
@@ -1165,8 +1138,7 @@ impl OpenFleetMcpServer {
                 }
             }
             "fleet_run_demo" => {
-                let demo = self.root.join("evals/demo/negative-control/run.sh");
-                let res = self.run_helper("sh", &[demo.display().to_string()], &self.root);
+                let res = of_verify::demo::run_negative_control_demo();
                 is_error = !res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
                 res
             }
