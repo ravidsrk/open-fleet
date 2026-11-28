@@ -2827,6 +2827,12 @@ fn hash_toolchain_files() -> BTreeMap<String, Value> {
     files
 }
 
+fn current_engine_binary_sha256() -> Option<String> {
+    let exe = env::current_exe().ok()?;
+    let bytes = fs::read(&exe).ok()?;
+    Some(sha256_hex(&bytes))
+}
+
 struct TranscriptInput<'a> {
     args: &'a VerifyArgs,
     exit_code: i32,
@@ -2913,9 +2919,15 @@ fn build_transcript(ctx: &VerifyCtx, input: &TranscriptInput<'_>) -> Map<String,
     rec.insert("fatal".to_string(), json!(fatal));
     rec.insert("notes".to_string(), json!(notes));
     rec.insert("exit".to_string(), json!(exit_code));
+    let engine_bin_sha = current_engine_binary_sha256()
+        .map(Value::String)
+        .unwrap_or(Value::Null);
     rec.insert(
         "toolchain".to_string(),
         json!({
+            "engine": "rust",
+            "engine_version": env!("CARGO_PKG_VERSION"),
+            "engine_binary_sha256": engine_bin_sha,
             "python": format!("rust-{}", env!("CARGO_PKG_VERSION")),
             "git": git_version,
             "verify_sha256": verify_sha,
@@ -3147,17 +3159,21 @@ pub fn evaluate_args(args: &VerifyArgs) -> (i32, Vec<String>, Vec<String>, Optio
         args.repo.as_deref(),
     );
     let toolchain = hash_toolchain_files();
+    let pre_engine_sha = current_engine_binary_sha256();
 
     let mut m = match load_manifest(&args.manifest) {
         Ok(man) => man,
         Err(load_err) => {
             let mut fatal = vec![load_err];
             let post_tc = hash_toolchain_files();
-            let drift: Vec<String> = post_tc
+            let mut drift: Vec<String> = post_tc
                 .iter()
                 .filter(|(k, v)| toolchain.get(*k) != Some(*v))
                 .map(|(k, _)| k.clone())
                 .collect();
+            if current_engine_binary_sha256() != pre_engine_sha {
+                drift.push("open-fleet".to_string());
+            }
             if !drift.is_empty() {
                 fatal.push(format!(
                     "toolchain changed during this run: {drift:?} no longer hash as they did when the verifier started — worker code (the executed control) ran in between, so the verdict was not reached by the verifier a transcript would name; fail-closed (W3-11)"
@@ -3410,11 +3426,14 @@ pub fn evaluate_args(args: &VerifyArgs) -> (i32, Vec<String>, Vec<String>, Optio
     }
 
     let post_tc = hash_toolchain_files();
-    let drift: Vec<String> = post_tc
+    let mut drift: Vec<String> = post_tc
         .iter()
         .filter(|(k, v)| toolchain.get(*k) != Some(*v))
         .map(|(k, _)| k.clone())
         .collect();
+    if current_engine_binary_sha256() != pre_engine_sha {
+        drift.push("open-fleet".to_string());
+    }
     if !drift.is_empty() {
         fatal.push(format!(
             "toolchain changed during this run: {drift:?} no longer hash as they did when the verifier started — worker code (the executed control) ran in between, so the verdict was not reached by the verifier a transcript would name; fail-closed (W3-11)"

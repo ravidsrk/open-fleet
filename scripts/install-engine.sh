@@ -10,7 +10,7 @@
 #   OPEN_FLEET_REPO         GitHub owner/repo (default: ravidsrk/open-fleet)
 set -eu
 
-DEFAULT_VERSION="0.8.0"
+DEFAULT_VERSION="1.0.0"
 VERSION="${OPEN_FLEET_VERSION:-$DEFAULT_VERSION}"
 REPO="${OPEN_FLEET_REPO:-ravidsrk/open-fleet}"
 INSTALL_DIR="${OPEN_FLEET_INSTALL_DIR:-${HOME:-/tmp}/.local/bin}"

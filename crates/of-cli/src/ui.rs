@@ -21,6 +21,7 @@ use of_verify::sessions::{
     StartSessionArgs,
 };
 use of_verify::solo_review::{run_solo_review, SoloReviewArgs};
+use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::fs;
@@ -65,109 +66,15 @@ impl MissionControlApp {
     }
 
     fn read_decisions_summary(&self, limit: usize) -> Value {
-        let path = self.repo.join("docs/DECISIONS.md");
-        if !path.is_file() {
-            return json!({
-                "exists": false,
-                "path": path.to_string_lossy(),
-                "total": 0,
-                "entries": [],
-            });
-        }
-        let entries = read_lines(&path).unwrap_or_default();
-        let total = entries.len();
-        let tail: Vec<Value> = entries
-            .iter()
-            .rev()
-            .take(limit)
-            .map(|(lineno, d)| {
-                json!({
-                    "lineno": lineno,
-                    "ts": d.ts,
-                    "id": d.id,
-                    "class": d.class,
-                    "answer": d.answer,
-                    "why": d.why,
-                    "task_id": d.task_id,
-                })
-            })
-            .collect();
-        json!({
-            "exists": true,
-            "path": path.to_string_lossy(),
-            "total": total,
-            "entries": tail,
-        })
+        read_decisions_summary_for(&self.repo, limit)
     }
 
     fn workspace_status(&self) -> Value {
-        let db_path = self.repo.join(".orca/runtime.db");
-        let events_path = self.repo.join(".orca/events.jsonl");
-        let egress_path = self.repo.join(".orca/egress.jsonl");
-        let count_lines = |p: &Path| -> usize {
-            fs::read_to_string(p)
-                .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
-                .unwrap_or(0)
-        };
-        let decisions = self.read_decisions_summary(30);
-        json!({
-            "repo": self.repo.to_string_lossy(),
-            "runtime_state": {
-                "db_path": db_path.to_string_lossy(),
-                "db_exists": db_path.is_file(),
-                "summary": {
-                    "runs": 0,
-                    "tasks_total": 0,
-                    "active_dispatches": 0,
-                    "open_gates": 0,
-                    "queued_merges": 0,
-                }
-            },
-            "events": {
-                "path": events_path.to_string_lossy(),
-                "count": count_lines(&events_path),
-            },
-            "egress": {
-                "path": egress_path.to_string_lossy(),
-                "count": count_lines(&egress_path),
-            },
-            "decisions": decisions,
-        })
+        read_workspace_status(&self.repo, None)
     }
 
     fn build_mcp_snippet(&self, host: &str, runtime: &str) -> Value {
-        let bin = std::env::current_exe()
-            .ok()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "open-fleet".to_string());
-        let profile = HARNESS_PROFILES
-            .iter()
-            .find(|p| p.id == host)
-            .unwrap_or(&HARNESS_PROFILES[0]);
-        let content = if host == "codex" {
-            format!(
-                "[mcp_servers.open-fleet]\ncommand = \"{bin}\"\nargs = [\"mcp\"]\n[mcp_servers.open-fleet.env]\nOPEN_FLEET_RUNTIME = \"{runtime}\"\n"
-            )
-        } else {
-            serde_json::to_string_pretty(&json!({
-                "mcpServers": {
-                    "open-fleet": {
-                        "command": bin,
-                        "args": ["mcp"],
-                        "env": {
-                            "OPEN_FLEET_RUNTIME": runtime
-                        }
-                    }
-                }
-            }))
-            .unwrap_or_else(|_| "{}".to_string())
-        };
-        json!({
-            "host": host,
-            "config_path": profile.mcp_rel,
-            "content": content,
-            "written": false,
-        })
+        build_mcp_snippet(host, runtime)
     }
 
     pub fn handle_get(
@@ -598,6 +505,146 @@ impl MissionControlApp {
 
         json_resp(404, &json!({"error": format!("not found: {path}")}))
     }
+}
+
+fn query_count(conn: &Connection, sql: &str) -> i64 {
+    conn.query_row(sql, [], |row| row.get::<_, i64>(0))
+        .unwrap_or(0)
+}
+
+pub fn read_decisions_summary_for(repo: &Path, limit: usize) -> Value {
+    let path = repo.join("docs/DECISIONS.md");
+    if !path.is_file() {
+        return json!({
+            "exists": false,
+            "path": path.to_string_lossy(),
+            "total": 0,
+            "entries": [],
+        });
+    }
+    let entries = read_lines(&path).unwrap_or_default();
+    let total = entries.len();
+    let tail: Vec<Value> = entries
+        .iter()
+        .rev()
+        .take(limit)
+        .map(|(lineno, d)| {
+            json!({
+                "lineno": lineno,
+                "ts": d.ts,
+                "id": d.id,
+                "class": d.class,
+                "answer": d.answer,
+                "why": d.why,
+                "task_id": d.task_id,
+            })
+        })
+        .collect();
+    json!({
+        "exists": true,
+        "path": path.to_string_lossy(),
+        "total": total,
+        "entries": tail,
+    })
+}
+
+pub fn read_workspace_status(repo: &Path, db_override: Option<&Path>) -> Value {
+    let db_path = db_override
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| repo.join(".orca/runtime.db"));
+    let db_exists = db_path.is_file();
+    let (runs, tasks_total, active_dispatches, open_gates, queued_merges) = if db_exists {
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        if let Ok(conn) = Connection::open_with_flags(&db_path, flags) {
+            (
+                query_count(&conn, "SELECT COUNT(*) FROM runs"),
+                query_count(&conn, "SELECT COUNT(*) FROM tasks"),
+                query_count(
+                    &conn,
+                    "SELECT COUNT(*) FROM dispatches WHERE lower(coalesce(state, '')) IN ('running', 'active', 'dispatched', 'pending')",
+                ),
+                query_count(
+                    &conn,
+                    "SELECT COUNT(*) FROM gates WHERE lower(coalesce(status, '')) IN ('open', 'pending', 'waiting')",
+                ),
+                query_count(
+                    &conn,
+                    "SELECT COUNT(*) FROM mq_entries WHERE upper(coalesce(state, '')) IN ('QUEUED', 'RUNNING', 'REBASING')",
+                ),
+            )
+        } else {
+            (0, 0, 0, 0, 0)
+        }
+    } else {
+        (0, 0, 0, 0, 0)
+    };
+
+    let events_path = repo.join(".orca/events.jsonl");
+    let egress_path = repo.join(".orca/egress.jsonl");
+    let count_lines = |p: &Path| -> usize {
+        fs::read_to_string(p)
+            .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
+            .unwrap_or(0)
+    };
+    let decisions = read_decisions_summary_for(repo, 30);
+    json!({
+        "repo": repo.to_string_lossy(),
+        "runtime_state": {
+            "db_path": db_path.to_string_lossy(),
+            "db_exists": db_exists,
+            "summary": {
+                "runs": runs,
+                "tasks_total": tasks_total,
+                "active_dispatches": active_dispatches,
+                "open_gates": open_gates,
+                "queued_merges": queued_merges,
+            }
+        },
+        "events": {
+            "path": events_path.to_string_lossy(),
+            "count": count_lines(&events_path),
+        },
+        "egress": {
+            "path": egress_path.to_string_lossy(),
+            "count": count_lines(&egress_path),
+        },
+        "decisions": decisions,
+    })
+}
+
+pub fn build_mcp_snippet(host: &str, runtime: &str) -> Value {
+    let bin = std::env::current_exe()
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "open-fleet".to_string());
+    let profile = HARNESS_PROFILES
+        .iter()
+        .find(|p| p.id == host)
+        .unwrap_or(&HARNESS_PROFILES[0]);
+    let content = if host == "codex" {
+        format!(
+            "[mcp_servers.open-fleet]\ncommand = \"{bin}\"\nargs = [\"mcp\"]\n[mcp_servers.open-fleet.env]\nOPEN_FLEET_RUNTIME = \"{runtime}\"\n"
+        )
+    } else {
+        serde_json::to_string_pretty(&json!({
+            "mcpServers": {
+                "open-fleet": {
+                    "command": bin,
+                    "args": ["mcp"],
+                    "env": {
+                        "OPEN_FLEET_RUNTIME": runtime
+                    }
+                }
+            }
+        }))
+        .unwrap_or_else(|_| "{}".to_string())
+    };
+    json!({
+        "host": host,
+        "config_path": profile.mcp_rel,
+        "content": content,
+        "written": false,
+    })
 }
 
 fn json_resp(status: u16, value: &Value) -> (u16, &'static str, Vec<u8>) {

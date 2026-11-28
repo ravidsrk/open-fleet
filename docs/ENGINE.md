@@ -78,7 +78,18 @@ python3 -I scripts/rust_product_oracle.py        # catalog, router, sessions, so
 | **Wave 1.5 (landed)** | `of-hook` | `runtime/scripts/deny-hook.sh` (6.8k LOC -> native pre-tool hook) | `scripts/rust_deny_hook_oracle.py` (398 tests across `test_deny_hook`, `test_deny_hook_multi_harness`, `test_deny_hook_conformance`, `test_trajectory_evals`) |
 | **Phase A (landed)** | `of-install`, `of-cli`, `of-verify` | Compile-time embedded canonical catalog (`~/.open-fleet/catalog/<ver>-<sha12>/`), zero-clone standalone binary, dual `floor` + `deny` Claude hooks in `init`, `scripts/install-engine.sh`, `open-fleet.rb` Homebrew formula, gated npm release job | `scripts/rust_product_oracle.py` (standalone isolated temp-dir suite) + `tests/test_rust_engine_packaging.py` |
 | **Phase B (landed)** | `of-cli` (`ui`), `of-verify` (`demo`), `of-hook`, `of-mcp` | Native zero-Python `open-fleet ui` (stdlib HTTP/SSE Mission Control), native zero-Python `open-fleet demo` & MCP `fleet_run_demo`, standalone `deny-hook --settings` -> `--verify-settings`, Rust-first cutover in `verify-gate.sh`, `.github/actions/open-fleet-verify`, `open_fleet/cli.py`, and `README.md` | `scripts/rust_product_oracle.py` (10 tests incl. live HTTP/SSE UI, standalone demo & deny-hook round-trip) + `test_verify_gate.py` |
-| **Deferred / Kept** | — | `merge_queue.py`, `posix.py`, `eval.py`, `ablation.py` remain in Python; `skills/`, `playbooks/`, `runtime/*.md` stay canonical Markdown | Existing Python suites |
+| **Phase C (`v1.0.0`, landed)** | `of-verify`, `of-cli`, `of-install` | Binary-bound transcript provenance (`toolchain.engine_binary_sha256` + W3-11 mid-run binary drift check + standalone `dispatch-sign sign-transcript`), native read-only SQLite `open-fleet status` & `ui` workspace state, native `open-fleet mcp --print-config`, `engine: "rust"` attestation in `doctor` | `scripts/rust_product_oracle.py` (11 tests incl. standalone binary-bound transcript signing/tamper refusal, live SQLite status & MCP config) + all 15 parity oracles |
+| **Frozen Reference / Kept** | — | `skills/`, `playbooks/`, `runtime/*.md` stay canonical Markdown; Python reference copies under `runtime/scripts/` & `runtime/providers/` remain intact to satisfy the human-frozen `CONSTRAINTS.md` D1/D8/D9 (`.coveragerc` >= 80%) guard surface until an explicit signed one-way human decision in `docs/DECISIONS.md` migrates D9 coverage to Rust (`cargo-llvm-cov`) | Existing Python suites + `floor_guard.py` |
+
+## Single-Source-of-Truth Status (`v1.0.0`)
+
+Every user-facing verb (`doctor`, `init`, `missions`, `route`, `show`, `status`, `certification`/`certify`, `overview`, `demo`, `ui`, `mcp`, `session`, `solo-review`, `ci-check`, `readiness`, `preflight`, `verify`, `floor`, `egress`, `decisions`, `diff-scope`, `quarantine`, `dispatch-sign`, `inventory`, `proof-status`, `chain-check`, `events`, `run-report`, `hook`, `deny-hook`) and all 24 MCP tools execute **100% natively in the single static `open-fleet` v1.0.0 Rust binary** with zero Python runtime and zero repository clone required.
+
+### Optional Post-v1.0 Legacy Python Retirement Runbook (Human One-Way Gate)
+
+The frozen `CONSTRAINTS.md` D1/D8/D9 contract pins `unittest` and `.coveragerc` (`fail_under = 80` over `scripts/*`, `runtime/scripts/*`, `runtime/providers/*`) under `floor_guard.py`. Removing the legacy Python reference implementations under `runtime/scripts/` requires an explicit signed one-way human decision in `docs/DECISIONS.md` (recorded on `origin/main` via `open-fleet decisions sign-grant`) authorizing:
+1. Updating `CONSTRAINTS.md` D9 to measure Rust coverage (`cargo-llvm-cov`) instead of Python `.coveragerc`.
+2. Retiring the Python reference copies once all historical `validate/vfbench_replay` and `validate/tests` shards bind directly to the `open-fleet` binary.
 
 ## Distribution Channels
 

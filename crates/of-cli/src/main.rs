@@ -641,12 +641,25 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Start the native zero-Python MCP JSON-RPC 2.0 stdio server.
+    /// Start the native zero-Python MCP JSON-RPC 2.0 stdio server (or print host config).
     Mcp {
         #[arg(long)]
         root: Option<PathBuf>,
         #[arg(long)]
         repo: Option<PathBuf>,
+        #[arg(long = "print-config")]
+        print_config: Option<String>,
+        #[arg(long, default_value = "auto")]
+        runtime: String,
+    },
+    /// Show live fleet status (catalog overview, SQLite runtime state, events, egress, decisions).
+    Status {
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        #[arg(long)]
+        db: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
     },
     /// Install open-fleet skills and native hooks into your coding agent harness(es).
     #[command(alias = "install")]
@@ -1717,7 +1730,28 @@ fn run() -> i32 {
                 1
             }
         }
-        Commands::Mcp { root, repo } => {
+        Commands::Mcp {
+            root,
+            repo,
+            print_config,
+            runtime,
+        } => {
+            if let Some(host) = print_config {
+                let valid = HARNESS_PROFILES.iter().any(|p| p.id == host);
+                if !valid {
+                    let ids: Vec<&str> = HARNESS_PROFILES.iter().map(|p| p.id).collect();
+                    eprintln!(
+                        "open-fleet mcp: unknown --print-config host {host:?} (expected one of: {})",
+                        ids.join(", ")
+                    );
+                    return 2;
+                }
+                let snippet = ui::build_mcp_snippet(&host, &runtime);
+                if let Some(c) = snippet.get("content").and_then(|v| v.as_str()) {
+                    println!("{}", c.trim_end());
+                }
+                return 0;
+            }
             let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
             let target_repo = repo.unwrap_or_else(|| cwd.clone());
             let catalog_root = match root {
@@ -1729,6 +1763,83 @@ fn run() -> i32 {
             };
             let server = OpenFleetMcpServer::new(catalog_root, target_repo);
             serve_stdio(&server)
+        }
+        Commands::Status { repo, db, json } => {
+            let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let target_repo = repo.unwrap_or(cwd);
+            let catalog_root = match require_catalog(&target_repo) {
+                Ok(r) => r,
+                Err(code) => return code,
+            };
+            let ov = catalog_overview(&catalog_root);
+            let snap = ui::read_workspace_status(&target_repo, db.as_deref());
+            let payload = serde_json::json!({
+                "engine": "rust",
+                "engine_version": ENGINE_VERSION,
+                "catalog": ov,
+                "workspace": snap,
+            });
+            if json {
+                if let Ok(s) = serde_json::to_string_pretty(&payload) {
+                    println!("{s}");
+                }
+            } else {
+                let rs = &payload["workspace"]["runtime_state"];
+                let sum = &rs["summary"];
+                println!(
+                    "open-fleet status v{} (rust engine) · repo={}",
+                    ENGINE_VERSION,
+                    payload["workspace"]["repo"].as_str().unwrap_or("")
+                );
+                println!(
+                    "Catalog proof:   {} external-run · {} self-run · {} doctrine-only",
+                    payload["catalog"]["proof_counts"]["external-run"]
+                        .as_u64()
+                        .unwrap_or(0),
+                    payload["catalog"]["proof_counts"]["self-run"]
+                        .as_u64()
+                        .unwrap_or(0),
+                    payload["catalog"]["proof_counts"]["doctrine-only"]
+                        .as_u64()
+                        .unwrap_or(0),
+                );
+                println!(
+                    "State DB:        {} ({})",
+                    rs["db_path"].as_str().unwrap_or(""),
+                    if rs["db_exists"].as_bool().unwrap_or(false) {
+                        "present"
+                    } else {
+                        "not initialized yet"
+                    }
+                );
+                println!(
+                    "Active fleet:    {} runs · {} tasks · {} active dispatches · {} open gates · {} queued merges",
+                    sum["runs"].as_i64().unwrap_or(0),
+                    sum["tasks_total"].as_i64().unwrap_or(0),
+                    sum["active_dispatches"].as_i64().unwrap_or(0),
+                    sum["open_gates"].as_i64().unwrap_or(0),
+                    sum["queued_merges"].as_i64().unwrap_or(0),
+                );
+                println!(
+                    "Events / Egress: {} events · {} egress receipts",
+                    payload["workspace"]["events"]["count"]
+                        .as_u64()
+                        .unwrap_or(0),
+                    payload["workspace"]["egress"]["count"]
+                        .as_u64()
+                        .unwrap_or(0),
+                );
+                println!(
+                    "Decisions log:   {} recorded decisions ({})",
+                    payload["workspace"]["decisions"]["total"]
+                        .as_u64()
+                        .unwrap_or(0),
+                    payload["workspace"]["decisions"]["path"]
+                        .as_str()
+                        .unwrap_or(""),
+                );
+            }
+            0
         }
         Commands::Init {
             harness,

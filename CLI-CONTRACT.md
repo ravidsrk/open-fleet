@@ -172,15 +172,19 @@ open-fleet hook --mode deny [ARGS...]
   - Multi-harness `--settings` & `--verify-settings` across all 11 supported harnesses (`claude`, `codex`, `openhands`, `goose`, `crush`, `hermes`, `opencode`, `omp`, `pi`, `jcode`, `generic`) with SHA-256 identity, C18 interpreter custody walk, and live scrubbed probes.
 - Pinned byte-for-byte via `scripts/rust_deny_hook_oracle.py` (**398/398 tests** across `test_deny_hook.py`, `test_deny_hook_multi_harness.py`, `test_deny_hook_conformance.py`, and `test_trajectory_evals.py`). Exits `0` on allow / Claude-mode JSON verdict, `2` on strict-mode deny / unreadable payload / CLI usage or `--verify-settings` refusal.
 
-### `open-fleet ui | demo` (Phase B native Mission Control server & proof demo)
+### `open-fleet ui | demo | status` & Binary-Bound Provenance (Phase B/C `v1.0.0`)
 
 ```text
 open-fleet ui [--host 127.0.0.1] [--port 8765] [--repo DIR]
 open-fleet demo [--json]
+open-fleet status [--repo DIR] [--db PATH] [--json]
+open-fleet mcp [--root DIR] [--repo DIR] [--print-config HARNESS] [--runtime auto]
 ```
 
 - `open-fleet ui`: serves the Mission Control HTML cockpit (from the checkout or compile-time embedded `open_fleet/ui_assets/index.html`) plus all `/api/*` JSON & `/api/events/stream` SSE endpoints over stdlib `TcpListener` with zero Python runtime and zero external HTTP crate dependencies.
 - `open-fleet demo`: runs the head-to-head negative-control scope-shrink trap natively in an ephemeral temp repo (`selfscore: GREEN (exit 0)` vs independent `open-fleet verify` `RED (exit 2)` naming dropped `AC-2`), zero Python and zero repo clone required.
+- `open-fleet status`: inspects the catalog overview plus live read-only `.orca/runtime.db` SQLite tables (`runs`, `tasks`, `dispatches`, `gates`, `mq_entries`), events, egress, and `docs/DECISIONS.md` without creating `-wal`/`-shm` files.
+- **Binary-bound transcripts (`v1.0.0`):** `open-fleet verify --transcript-out ...` binds `toolchain.engine = "rust"`, `toolchain.engine_version`, and `toolchain.engine_binary_sha256` into the signed Ed25519 verdict payload and checks mid-run binary drift (W3-11). `open-fleet dispatch-sign sign-transcript` re-hashes the running binary and refuses mismatches fail-closed, enabling standalone zero-clone signed verification outside any git checkout.
 
 ### Strangler-Fig Pass-Through Verbs (Deferred / Kept in Python)
 
