@@ -97,6 +97,12 @@ fn catalog_roots(explicit_root: Option<&Path>) -> Result<Vec<PathBuf>, String> {
     if let Some(er) = exe_catalog_root() {
         roots.push(er);
     }
+    if roots.is_empty() {
+        if let Ok(mat) = of_install::embedded::materialize_catalog(None, env!("CARGO_PKG_VERSION"))
+        {
+            roots.push(mat);
+        }
+    }
     Ok(roots)
 }
 

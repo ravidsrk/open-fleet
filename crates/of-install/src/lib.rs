@@ -1,5 +1,7 @@
-//! Native multi-harness setup, skill installer, atomic Claude hook merger, and fast `doctor`
-//! diagnostics for `open-fleet`.
+//! Native multi-harness setup, skill installer, atomic Claude hook merger, embedded
+//! standalone catalog materialization, and fast `doctor` diagnostics for `open-fleet`.
+
+pub mod embedded;
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -111,17 +113,42 @@ pub fn which(binary: &str) -> Option<PathBuf> {
     None
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CatalogSource {
+    Checkout,
+    Embedded,
+}
+
+impl CatalogSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CatalogSource::Checkout => "checkout",
+            CatalogSource::Embedded => "embedded",
+        }
+    }
+}
+
+fn is_catalog_dir(dir: &Path) -> bool {
+    if !dir.join("skills").is_dir() || !dir.join("runtime").is_dir() {
+        return false;
+    }
+    dir.join("runtime/providers/capabilities.json").is_file()
+        || dir.join("runtime/quarantine.json").is_file()
+        || !discover_missions(dir).is_empty()
+}
+
 pub fn find_catalog_root(start: &Path) -> Option<PathBuf> {
     if let Ok(explicit) = env::var("OPEN_FLEET_ROOT") {
         let p = PathBuf::from(explicit);
-        if p.join("skills").is_dir() && p.join("runtime").is_dir() {
+        if is_catalog_dir(&p) {
             return Some(p);
         }
     }
     let abs = fs::canonicalize(start).unwrap_or_else(|_| start.to_path_buf());
     let mut cur = Some(abs.as_path());
     while let Some(dir) = cur {
-        if dir.join("skills").is_dir() && dir.join("runtime").is_dir() {
+        if is_catalog_dir(dir) {
             return Some(dir.to_path_buf());
         }
         cur = dir.parent();
@@ -129,13 +156,24 @@ pub fn find_catalog_root(start: &Path) -> Option<PathBuf> {
     if let Ok(exe) = env::current_exe() {
         let mut cur_exe = exe.parent();
         while let Some(dir) = cur_exe {
-            if dir.join("skills").is_dir() && dir.join("runtime").is_dir() {
+            if is_catalog_dir(dir) {
                 return Some(dir.to_path_buf());
             }
             cur_exe = dir.parent();
         }
     }
     None
+}
+
+/// Resolve the open-fleet catalog root, preferring an explicit/checkout directory
+/// (`OPEN_FLEET_ROOT` or enclosing repo) and falling back to materializing the
+/// compile-time embedded catalog under `~/.open-fleet/catalog/<version>-<sha12>/`.
+pub fn resolve_catalog_root(start: &Path) -> Result<(PathBuf, CatalogSource), String> {
+    if let Some(root) = find_catalog_root(start) {
+        return Ok((root, CatalogSource::Checkout));
+    }
+    let materialized = embedded::materialize_catalog(None, env!("CARGO_PKG_VERSION"))?;
+    Ok((materialized, CatalogSource::Embedded))
 }
 
 pub fn discover_missions(catalog_root: &Path) -> Vec<String> {
@@ -167,10 +205,14 @@ pub struct DoctorReport {
     pub git_available: bool,
     pub git_path: Option<String>,
     pub catalog_root: Option<String>,
+    pub catalog_source: String,
+    pub embedded_catalog_files: usize,
+    pub embedded_catalog_sha256: String,
     pub missions_count: usize,
     pub runtime_configured: String,
     pub detected_harnesses: BTreeMap<String, String>,
     pub claude_floor_hook_wired: bool,
+    pub claude_deny_hook_wired: bool,
     pub ready: bool,
 }
 
@@ -212,13 +254,53 @@ fn check_claude_floor_hook(home: &Path) -> bool {
     false
 }
 
+fn is_deny_hook_command(cmd: &str) -> bool {
+    cmd.contains("deny-hook.sh")
+        || (cmd.contains("open-fleet")
+            && (cmd.contains("deny-hook")
+                || (cmd.contains("hook") && cmd.contains("--mode") && cmd.contains("deny"))))
+}
+
+fn check_claude_deny_hook(home: &Path) -> bool {
+    let settings = home.join(".claude/settings.json");
+    let Ok(text) = fs::read_to_string(&settings) else {
+        return false;
+    };
+    let Ok(val) = serde_json::from_str::<Value>(&text) else {
+        return false;
+    };
+    let Some(hooks) = val.get("hooks").and_then(|v| v.as_object()) else {
+        return false;
+    };
+    let Some(entries) = hooks.get("PreToolUse").and_then(|v| v.as_array()) else {
+        return false;
+    };
+    for entry in entries {
+        let Some(inner) = entry.get("hooks").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for h in inner {
+            if let Some(cmd) = h.get("command").and_then(|v| v.as_str()) {
+                if is_deny_hook_command(cmd) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 pub fn doctor(repo: &Path, engine_version: &str) -> DoctorReport {
     let exe = env::current_exe().unwrap_or_else(|_| PathBuf::from("open-fleet"));
     let exe_sha = file_sha256(&exe);
     let git_path = of_common::gitexec::git_binary()
         .ok()
         .map(|p| p.to_string_lossy().into_owned());
-    let catalog = find_catalog_root(repo);
+    let resolved = resolve_catalog_root(repo).ok();
+    let (catalog, catalog_source) = match resolved {
+        Some((p, src)) => (Some(p), src.as_str().to_string()),
+        None => (None, "missing".to_string()),
+    };
     let missions_count = catalog
         .as_deref()
         .map(|c| discover_missions(c).len())
@@ -234,10 +316,12 @@ pub fn doctor(repo: &Path, engine_version: &str) -> DoctorReport {
         }
     }
     let home = env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
     let claude_floor_hook_wired = check_claude_floor_hook(&home);
-    let ready = git_path.is_some();
+    let claude_deny_hook_wired = check_claude_deny_hook(&home);
+    let ready = git_path.is_some() && missions_count > 0;
 
     DoctorReport {
         engine_version: engine_version.to_string(),
@@ -246,10 +330,14 @@ pub fn doctor(repo: &Path, engine_version: &str) -> DoctorReport {
         git_available: git_path.is_some(),
         git_path,
         catalog_root: catalog.map(|p| p.to_string_lossy().into_owned()),
+        catalog_source,
+        embedded_catalog_files: embedded::embedded_file_count(),
+        embedded_catalog_sha256: embedded::EMBEDDED_CATALOG_SHA256.to_string(),
         missions_count,
         runtime_configured,
         detected_harnesses,
         claude_floor_hook_wired,
+        claude_deny_hook_wired,
         ready,
     }
 }
@@ -273,6 +361,7 @@ pub struct HarnessInstallResult {
     pub skills_dir: String,
     pub missions_installed: usize,
     pub hook_wired: bool,
+    pub deny_hook_wired: bool,
     pub settings_path: Option<String>,
 }
 
@@ -283,6 +372,7 @@ pub struct InstallReport {
     pub mode: String,
     pub scope: String,
     pub catalog_root: String,
+    pub catalog_source: String,
     pub targets: Vec<HarnessInstallResult>,
 }
 
@@ -349,6 +439,7 @@ pub fn merge_claude_floor_hooks(
         .ok_or_else(|| "settings.json `hooks` must be a JSON object".to_string())?;
 
     let floor_cmd = format!("{bin_cmd} floor --quiet");
+    let deny_cmd = format!("{bin_cmd} hook --mode deny");
     let mut changed = false;
 
     for event in ["Stop", "TaskCompleted"] {
@@ -379,6 +470,41 @@ pub fn merge_claude_floor_hooks(
                     {
                         "type": "command",
                         "command": floor_cmd,
+                        "timeout": 30
+                    }
+                ]
+            }));
+            changed = true;
+        }
+    }
+
+    {
+        let pre_entries = hooks
+            .entry("PreToolUse")
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .ok_or_else(|| "settings.json `hooks.PreToolUse` must be an array".to_string())?;
+        let already_deny = pre_entries.iter().any(|entry| {
+            entry
+                .get("hooks")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter().any(|h| {
+                        h.get("command")
+                            .and_then(|c| c.as_str())
+                            .map(is_deny_hook_command)
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false)
+        });
+        if !already_deny {
+            pre_entries.push(json!({
+                "matcher": "Bash|Edit|Write|NotebookEdit|MultiEdit",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": deny_cmd,
                         "timeout": 30
                     }
                 ]
@@ -420,8 +546,7 @@ pub fn install(cfg: &InstallConfig) -> Result<InstallReport, String> {
             cfg.scope
         ));
     }
-    let catalog_root = find_catalog_root(&cfg.repo)
-        .ok_or_else(|| "could not locate open-fleet catalog (skills/ + runtime/); pass --repo or set OPEN_FLEET_ROOT".to_string())?;
+    let (catalog_root, catalog_source) = resolve_catalog_root(&cfg.repo)?;
     let missions = discover_missions(&catalog_root);
     if missions.is_empty() {
         return Err(format!(
@@ -507,6 +632,7 @@ pub fn install(cfg: &InstallConfig) -> Result<InstallReport, String> {
             skills_dir: skills_dir.to_string_lossy().into_owned(),
             missions_installed: missions.len(),
             hook_wired,
+            deny_hook_wired: hook_wired,
             settings_path: settings_out,
         });
     }
@@ -517,6 +643,7 @@ pub fn install(cfg: &InstallConfig) -> Result<InstallReport, String> {
         mode: cfg.mode.clone(),
         scope: cfg.scope.clone(),
         catalog_root: catalog_root.to_string_lossy().into_owned(),
+        catalog_source: catalog_source.as_str().to_string(),
         targets,
     })
 }
@@ -551,6 +678,14 @@ mod tests {
                 .len(),
             1
         );
+        assert_eq!(
+            parsed["hooks"]["PreToolUse"].as_array().expect("arr").len(),
+            1
+        );
+        let pre_cmd = parsed["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .expect("pre command");
+        assert!(is_deny_hook_command(pre_cmd));
         let _ = fs::remove_dir_all(&tmp);
     }
 }

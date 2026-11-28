@@ -699,12 +699,12 @@ fn default_home() -> PathBuf {
 }
 
 fn require_catalog(repo: &Path) -> Result<PathBuf, i32> {
-    of_install::find_catalog_root(repo).ok_or_else(|| {
-        eprintln!(
-            "open-fleet: could not locate open-fleet catalog (skills/ + runtime/); pass --repo or set OPEN_FLEET_ROOT"
-        );
-        2
-    })
+    of_install::resolve_catalog_root(repo)
+        .map(|(root, _)| root)
+        .map_err(|err| {
+            eprintln!("open-fleet: could not resolve open-fleet catalog: {err}");
+            2
+        })
 }
 
 fn delegate_python(subcmd: &[OsString]) -> i32 {
@@ -1698,13 +1698,13 @@ fn run() -> i32 {
                     } else {
                         let prefix = if report.dry_run { "[dry-run] " } else { "" };
                         println!(
-                            "{prefix}open-fleet init ({}, {}): catalog {}",
-                            report.scope, report.mode, report.catalog_root
+                            "{prefix}open-fleet init ({}, {}): catalog {} ({})",
+                            report.scope, report.mode, report.catalog_root, report.catalog_source
                         );
                         for t in &report.targets {
                             let hook_note = if t.hook_wired {
                                 format!(
-                                    " + floor hook wired in {}",
+                                    " + floor & deny hooks wired in {}",
                                     t.settings_path.as_deref().unwrap_or("settings.json")
                                 )
                             } else {
@@ -1745,17 +1745,24 @@ fn run() -> i32 {
                     report.git_path.as_deref().unwrap_or("MISSING")
                 );
                 println!(
-                    "  catalog:  {} ({} missions)",
+                    "  catalog:  {} ({}, {} missions, {} embedded files)",
                     report.catalog_root.as_deref().unwrap_or("not found"),
-                    report.missions_count
+                    report.catalog_source,
+                    report.missions_count,
+                    report.embedded_catalog_files
                 );
                 println!("  runtime:  {}", report.runtime_configured);
                 println!(
-                    "  hooks:    claude floor-guard {}",
+                    "  hooks:    claude floor-guard {} · deny-hook {}",
                     if report.claude_floor_hook_wired {
                         "wired"
                     } else {
-                        "not wired (run `open-fleet init --harness claude`)"
+                        "not wired"
+                    },
+                    if report.claude_deny_hook_wired {
+                        "wired"
+                    } else {
+                        "not wired"
                     }
                 );
                 let harnesses: Vec<String> = report.detected_harnesses.keys().cloned().collect();

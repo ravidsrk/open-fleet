@@ -169,7 +169,9 @@ pub fn cmd_audit(root: Option<&Path>) -> i32 {
         Some(r) => r.to_path_buf(),
         None => {
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            of_install::find_catalog_root(&cwd).unwrap_or(cwd)
+            of_install::resolve_catalog_root(&cwd)
+                .map(|(p, _)| p)
+                .unwrap_or(cwd)
         }
     };
     match audit(&resolved) {

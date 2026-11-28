@@ -1,9 +1,15 @@
 {
   "name": "@open-fleet/cli-darwin-x64",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "open-fleet native binary for macOS x64",
   "license": "MIT",
-  "os": ["darwin"],
-  "cpu": ["x64"],
-  "files": ["bin/open-fleet"]
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin/open-fleet"
+  ]
 }
