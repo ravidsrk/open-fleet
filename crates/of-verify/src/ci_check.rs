@@ -1,9 +1,8 @@
 //! Native Rust port of `open_fleet/ci_action.py`:
-//! composable PR verification runner using native `of_floor` + `diff_scope` + optional `verify.py`.
+//! composable PR verification runner using native `of_floor` + `diff_scope` + `verify`.
 
 use crate::diff_scope::scope_to_json;
 use of_floor::{evaluate as eval_floor, FloorConfig};
-use of_install::which;
 use serde_json::{json, Value};
 use std::env;
 use std::fs::OpenOptions;
@@ -144,15 +143,9 @@ pub fn run_ci_verify(args: &CiCheckArgs) -> Result<Value, String> {
     };
 
     let (ver_ok, verify_result) = if !args.manifest.trim().is_empty() {
-        let python = which("python3")
-            .or_else(|| which("python"))
-            .unwrap_or_else(|| PathBuf::from("python3"));
+        let exe = env::current_exe().unwrap_or_else(|_| PathBuf::from("open-fleet"));
         let mut v_cmd = vec![
-            "-I".to_string(),
-            args.root
-                .join("runtime/scripts/verify.py")
-                .display()
-                .to_string(),
+            "verify".to_string(),
             "--manifest".to_string(),
             args.manifest.trim().to_string(),
             "--base".to_string(),
@@ -185,7 +178,7 @@ pub fn run_ci_verify(args: &CiCheckArgs) -> Result<Value, String> {
         if args.no_gh {
             v_cmd.push("--no-gh".to_string());
         }
-        match Command::new(python)
+        match Command::new(exe)
             .args(&v_cmd)
             .current_dir(&args.repo)
             .env("OPEN_FLEET_ROOT", &args.root)

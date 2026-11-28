@@ -110,6 +110,15 @@ pub fn secret_hits(text: &str) -> Vec<&'static str> {
     hits
 }
 
+pub fn redact_secrets(text: &str) -> String {
+    let mut out = text.to_string();
+    for (name, re) in secret_shapes() {
+        let rep = format!("[REDACTED:{name}]");
+        out = re.replace_all(&out, rep.as_str()).into_owned();
+    }
+    out
+}
+
 pub fn is_unicode_cf(ch: char) -> bool {
     let cp = ch as u32;
     matches!(

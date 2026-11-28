@@ -23,15 +23,17 @@ crates/
                               guard surface + base-ref signed waiver resolution)
   of-install/                 Multi-harness detector, skill installer, atomic Claude hook
                               merger, and fast `doctor` diagnostics
-  of-ledgers/                 Native cryptographic ledgers: hash-chained `egress` receipts
-                              and `decisions` validation + Ed25519 human grant signing
+  of-ledgers/                 Native cryptographic & telemetry ledgers: hash-chained `egress`
+                              receipts, `decisions` Ed25519 grant signing, and append-only
+                              `events` ledger + WIP-curve derivation (with bundled SQLite)
   of-catalog/                 Native YAML-frontmatter catalog discovery, certification
                               rollup, and TF-IDF mission intent router
-  of-verify/                  Native verification & control suite: `diff-scope`, `quarantine`,
-                              `dispatch-sign`, `inventory`, `proof-status`, `preflight`,
-                              `chain-check`, progressive `session` state machines, `solo-review`,
-                              `ci-check`, and `readiness`
-  of-mcp/                     Zero-Python JSON-RPC 2.0 stdio MCP server (20 native tools)
+  of-verify/                  Native verification & control suite: `verify` (SHA-bound manifest
+                              verifier + executed negative control), `run-report`, `diff-scope`,
+                              `quarantine`, `dispatch-sign`, `inventory`, `proof-status`,
+                              `preflight`, `chain-check`, progressive `session` state machines,
+                              `solo-review`, `ci-check`, and `readiness`
+  of-mcp/                     Zero-Python JSON-RPC 2.0 stdio MCP server (23 native tools)
   of-cli/                     The `open-fleet` binary: native verbs + strangler-fig delegation
 ```
 
@@ -51,7 +53,10 @@ python3 -I scripts/rust_inventory_oracle.py      # 54 end-to-end inventory CLI t
 python3 -I scripts/rust_proof_status_oracle.py   # 8 end-to-end proof-status CLI tests
 python3 -I scripts/rust_preflight_oracle.py      # 36 end-to-end preflight + capabilities CLI tests
 python3 -I scripts/rust_chain_check_oracle.py    # 11 end-to-end chain_check CLI tests
-python3 -I scripts/rust_product_oracle.py        # catalog, router, sessions, solo/ci/readiness & 20-tool MCP parity
+python3 -I scripts/rust_events_oracle.py         # 98 end-to-end events ledger + WIP-curve CLI tests
+python3 -I scripts/rust_run_report_oracle.py     # 85 end-to-end run_report proof-binding CLI tests
+python3 -I scripts/rust_verify_oracle.py         # VF-Bench (0% false-done, 0% false-reject) + test_verify CLI tests
+python3 -I scripts/rust_product_oracle.py        # catalog, router, sessions, solo/ci/readiness & 23-tool MCP parity
 ```
 
 ## Strangler-Fig Migration Roadmap
@@ -62,8 +67,8 @@ python3 -I scripts/rust_product_oracle.py        # catalog, router, sessions, so
 | **Wave 2A + 3 (landed)** | `of-ledgers`, `of-catalog`, `of-mcp` | `egress.py`, `decisions.py`, `open_fleet/catalog.py`, `open_fleet/mcp_server.py` | `scripts/rust_egress_oracle.py` (58), `scripts/rust_decisions_oracle.py` (94), `scripts/rust_product_oracle.py` |
 | **Wave 2B-1 (landed)** | `of-verify` (Part 1) | `diff_scope.py`, `quarantine_check.py`, `dispatch-sign.py`, `inventory.py`, `proof_status.py` | `rust_diff_scope_oracle.py` (63), `rust_quarantine_oracle.py` (21), `rust_dispatch_sign_oracle.py` (23), `rust_inventory_oracle.py` (54), `rust_proof_status_oracle.py` (8) |
 | **Wave 3B (landed)** | `of-verify`, `of-mcp`, `of-cli` | `preflight.py`, `chain_check.py`, `open_fleet/sessions.py`, `solo_review.py`, `ci_action.py`, `readiness.py` | `rust_preflight_oracle.py` (36), `rust_chain_check_oracle.py` (11), `rust_product_oracle.py` (8) |
-| **Wave 2B-2 (next)** | `of-verify`, `of-ledgers` | `events.py`, `run_report.py`, `verify.py` | `bench/vf-bench`, `tests/test_verify.py`, `tests/test_events.py`, `tests/test_run_report.py` |
-| **Wave 1.5** | `of-hook` | `runtime/scripts/deny-hook.sh` (6.8k LOC -> native pre-tool hook) | `tests/test_deny_hook.py`, `tests/test_deny_hook_conformance.py`, `tests/test_deny_hook_multi_harness.py`, `tests/test_trajectory_evals.py` |
+| **Wave 2B-2 (landed)** | `of-verify`, `of-ledgers`, `of-mcp` | `events.py`, `run_report.py`, `verify.py` (`_verify_sig.py`, `_verify_diff.py`) | `rust_events_oracle.py` (98), `rust_run_report_oracle.py` (85), `rust_verify_oracle.py` (VF-Bench + CLI) |
+| **Wave 1.5 (next)** | `of-hook` | `runtime/scripts/deny-hook.sh` (6.8k LOC -> native pre-tool hook) | `tests/test_deny_hook.py`, `tests/test_deny_hook_conformance.py`, `tests/test_deny_hook_multi_harness.py`, `tests/test_trajectory_evals.py` |
 | **Deferred / Kept** | — | `merge_queue.py`, `posix.py`, `eval.py`, `ablation.py` remain in Python; `skills/`, `playbooks/`, `runtime/*.md` stay canonical Markdown | Existing Python suites |
 
 ## Distribution Channels

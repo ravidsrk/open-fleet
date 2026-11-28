@@ -17,9 +17,8 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.13"
+      # Use ubuntu-latest's root-owned 0755 /usr/bin/python3 (not setup-python's 0775 toolcache
+      # binary) so verify's #750 C19 executable-custody check passes honestly during VF-Bench.
       - name: Check Rust toolchain
         run: |
           set -euo pipefail
@@ -57,6 +56,9 @@ jobs:
           python3 -I scripts/rust_proof_status_oracle.py
           python3 -I scripts/rust_preflight_oracle.py
           python3 -I scripts/rust_chain_check_oracle.py
+          python3 -I scripts/rust_events_oracle.py
+          python3 -I scripts/rust_run_report_oracle.py
+          python3 -I scripts/rust_verify_oracle.py
           python3 -I scripts/rust_product_oracle.py
       - name: Smoke test launcher and CLI packaging
         run: |
