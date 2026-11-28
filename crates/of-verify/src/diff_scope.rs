@@ -614,6 +614,13 @@ fn fnmatchcase_chars(name: &[char], pat: &[char]) -> bool {
     false
 }
 
+pub fn is_test_path(path: &str) -> bool {
+    let low = path.to_ascii_lowercase();
+    path_rules()
+        .iter()
+        .any(|(flag, re)| *flag == "TESTS" && re.is_match(&low))
+}
+
 pub fn fnmatchcase(name: &str, pat: &str) -> bool {
     let nc: Vec<char> = name.chars().collect();
     let pc: Vec<char> = pat.chars().collect();

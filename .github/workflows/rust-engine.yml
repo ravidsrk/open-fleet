@@ -57,6 +57,9 @@ jobs:
           python3 -I scripts/rust_proof_status_oracle.py
           python3 -I scripts/rust_preflight_oracle.py
           python3 -I scripts/rust_chain_check_oracle.py
+          python3 -I scripts/rust_events_oracle.py
+          python3 -I scripts/rust_run_report_oracle.py
+          python3 -I scripts/rust_verify_oracle.py
           python3 -I scripts/rust_product_oracle.py
       - name: Smoke test launcher and CLI packaging
         run: |

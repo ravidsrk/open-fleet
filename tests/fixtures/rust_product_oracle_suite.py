@@ -318,6 +318,22 @@ class RustCatalogAndMcpOracle(unittest.TestCase):
              "params": {"name": "fleet_chain_check", "arguments": {"terminal": "ABANDONED", "allowed": ["ABANDONED", "MIGRATED"]}}},
             {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
              "params": {"name": "fleet_readiness", "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+             "params": {"name": "fleet_run_report_check", "arguments": {
+                 "report": "docs/runs/2026-09-14-clean-sweep-self-run.md",
+                 "mission": "clean-sweep",
+                 "tier": "self-run",
+             }}},
+            {"jsonrpc": "2.0", "id": 6, "method": "tools/call",
+             "params": {"name": "fleet_events_report", "arguments": {
+                 "log": str(ROOT / "tests" / "fixtures" / "events" / "clean-two-waves.jsonl"),
+             }}},
+            {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+             "params": {"name": "fleet_verify_manifest", "arguments": {
+                 "manifest": "nonexistent-manifest.json",
+                 "base": "HEAD",
+                 "no_gh": True,
+             }}},
         ]
         wire = "\n".join(json.dumps(r) for r in reqs) + "\n"
         proc = subprocess.run(
@@ -332,3 +348,9 @@ class RustCatalogAndMcpOracle(unittest.TestCase):
         self.assertTrue(by_id[3]["result"]["isError"])
         self.assertEqual(by_id[3]["result"]["structuredContent"]["class"], "degraded")
         self.assertGreaterEqual(by_id[4]["result"]["structuredContent"]["total_missions"], 22)
+        self.assertFalse(by_id[5]["result"]["isError"])
+        self.assertTrue(by_id[5]["result"]["structuredContent"]["ok"])
+        self.assertFalse(by_id[6]["result"]["isError"])
+        self.assertIn("schema", by_id[6]["result"]["structuredContent"])
+        self.assertTrue(by_id[7]["result"]["isError"])
+        self.assertEqual(by_id[7]["result"]["structuredContent"]["exit_code"], 2)

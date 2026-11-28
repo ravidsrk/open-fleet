@@ -111,7 +111,7 @@ open-fleet overview [--repo DIR] [--json]
 open-fleet mcp [--root DIR] [--repo DIR]
 ```
 
-- `open-fleet mcp` serves MCP JSON-RPC 2.0 over stdio (both newline-delimited JSON-RPC and `Content-Length` LSP framing, protocol versions `2025-03-26` and `2024-11-05`) with zero Python startup overhead for all 20 native tools (`fleet_doctor`, `fleet_route_mission`, `fleet_list_missions`, `fleet_get_mission`, `fleet_floor_check`, `fleet_certification`, `fleet_decisions`, `fleet_egress_verify`, `fleet_diff_scope`, `fleet_quarantine_check`, `fleet_proof_status`, `fleet_preflight`, `fleet_chain_check`, `fleet_session_start`, `fleet_session_list`, `fleet_session_packet`, `fleet_session_approve_gate`, `fleet_session_advance`, `fleet_solo_review`, `fleet_readiness`), resources, and prompts.
+- `open-fleet mcp` serves MCP JSON-RPC 2.0 over stdio (both newline-delimited JSON-RPC and `Content-Length` LSP framing, protocol versions `2025-03-26` and `2024-11-05`) with zero Python startup overhead for all 23 native tools (`fleet_doctor`, `fleet_route_mission`, `fleet_list_missions`, `fleet_get_mission`, `fleet_floor_check`, `fleet_certification`, `fleet_decisions`, `fleet_egress_verify`, `fleet_diff_scope`, `fleet_quarantine_check`, `fleet_proof_status`, `fleet_preflight`, `fleet_chain_check`, `fleet_session_start`, `fleet_session_list`, `fleet_session_packet`, `fleet_session_approve_gate`, `fleet_session_advance`, `fleet_solo_review`, `fleet_readiness`, `fleet_verify_manifest`, `fleet_run_report_check`, `fleet_events_report`), resources, and prompts.
 
 ### `open-fleet diff-scope | quarantine | dispatch-sign | inventory | proof-status` (Wave 2B-1 native verification suite)
 
@@ -143,11 +143,23 @@ open-fleet readiness [--repo DIR] [--check-cert] [--probes] [--json]
 - `preflight`: exact parity with `runtime/scripts/preflight.py` (provider resolution, capabilities matrix verification, quarantine check, canonical BASE != default branch check, fork-point & same-tip diagnostics; unknown/usage flags exit `1`, failed invariants exit `2`).
 - `chain-check`: exact parity with `runtime/scripts/chain_check.py` (fail-closed degraded terminal classification, chain boundary gate, full catalog terminal audit).
 - `session`: native progressive (<5K-token/phase) mission state machines with atomic JSON writes, enforced human one-way doors, receipt checks, and context-savings benchmark (`session benchmark`).
-- `solo-review`, `ci-check`, `readiness`: native in-process composition over `of-floor` and `of-verify::diff_scope` (zero Python startup on the core floor + scope + blind-packet + readiness paths; delegates only optional `--manifest` verification until Wave 2B-2).
+- `solo-review`, `ci-check`, `readiness`: native in-process composition over `of-floor`, `of-verify::diff_scope`, and native `open-fleet verify` (zero Python startup across the entire review/CI/readiness pipeline).
+
+### `open-fleet verify | run-report | events` (Wave 2B-2 native proof verifier, run-report binder & events ledger)
+
+```text
+open-fleet verify --manifest PATH [--contract-source S] [--contract-digest D] [--unit-class C] [--base REF] [--repo OWNER/NAME] [--execute-nc --nc-command CMD | --allow-static-nc] [--lighting lit|dark-eligible] [--lane A|B|0] [--no-gh] [--dispatch-record F --dispatch-pubkey K] [--git-dir DIR] [--evidence-root DIR] [--retention-pubkey K] [--transcript-out F] [--transcript-key K]
+open-fleet run-report [REPORT] [--mission M] [--tier self-run|external-run] [--base REV] [--root DIR] [--json]
+open-fleet events [--log PATH] (emit | ingest-state | ingest-launch | ingest-merge-queue | ingest-transcript | ingest-usage | verify | report | check) ...
+```
+
+- `verify`: exact parity with `runtime/scripts/verify.py` (`_verify_sig.py` + `_verify_diff.py`): fail-closed git/gh custody pinning, denominator & hidden-criterion extraction, oracle-scope enforcement, real-commit/ancestry/base-binding, Ed25519 signed dispatch provenance, content-bound commands ledger, built-in + gitleaks redaction, intent/lighting/reviewer-mode/provenance/retention-receipt checks, isolated 3-phase `clean -> control -> clean` `--execute-nc` runner with `#750 C19` command-grammar & executable identity pinning, and Ed25519 signed transcripts with W3-11 toolchain drift checks. Pinned to **0% false-done and 0% false-reject on VF-Bench** (`scripts/rust_verify_oracle.py`). Exits `0` GREEN, `2` RED/invariant failure, `1` usage/dependency error.
+- `run-report`: exact parity with `runtime/scripts/run_report.py`: `RUN:` header parsing, manifest containment, inventory re-hashing at pinned commits, signed transcript & signed inventory verification against trusted bases, sound-lane enforcement, and CommonMark-aware WIP-curve checks (`scripts/rust_run_report_oracle.py`, 85 tests). Exits `0` bound, `1` not bound, `2` could-not-run.
+- `events`: exact parity with `runtime/scripts/events.py`: append-only JSONL ledger with `flock` locking, secret redaction, read-only bundled-SQLite `ingest-state` (`rusqlite`, never creates `-wal`/`-shm`), launch/merge-queue/transcript/usage ingestion, exact rational (`Frac`) WIP-curve derivation with `ROUND_HALF_EVEN` formatting, and Markdown/JSON reporting (`scripts/rust_events_oracle.py`, 98 tests). Exits `0` ok, `1` incomplete/mismatch, `2` usage, `3` fail-closed.
 
 ### Strangler-Fig Pass-Through Verbs (Remaining Waves)
 
 Until ported natively into `crates/`, the following verbs cleanly locate the repository root and
 exec the canonical Python/shell implementation with identical arguments and exit codes:
 - `open-fleet hook ...` — supports native `--mode floor` now; passes through full pre-tool shell policy to `runtime/scripts/deny-hook.sh` (Wave 1.5).
-- `open-fleet verify|events|run-report|ui|demo|queue ...` — passes through to `python3 -m open_fleet` or `runtime/scripts/<tool>.py`.
+- `open-fleet ui|demo|queue|upstream-probe ...` — passes through to `python3 -m open_fleet` or `runtime/scripts/<tool>.py`.

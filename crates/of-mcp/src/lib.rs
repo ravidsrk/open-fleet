@@ -253,17 +253,48 @@ impl OpenFleetMcpServer {
             }),
             json!({
                 "name": "fleet_verify_manifest",
-                "description": "Run independent SHA-bound evidence verification (runtime/scripts/verify.py) on a unit manifest.",
+                "description": "Run native SHA-bound evidence verification (of_verify::verify) on a unit manifest with zero Python startup.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "manifest": {"type": "string"},
                         "base": {"type": "string"},
                         "repo": {"type": "string"},
+                        "contract_source": {"type": "string"},
+                        "contract_digest": {"type": "string"},
+                        "unit_class": {"type": "string"},
+                        "execute_nc": {"type": "boolean", "default": false},
+                        "nc_command": {"type": "string"},
                         "no_gh": {"type": "boolean", "default": false},
                         "allow_static_nc": {"type": "boolean", "default": false}
                     },
                     "required": ["manifest", "base"]
+                }
+            }),
+            json!({
+                "name": "fleet_run_report_check",
+                "description": "Check whether a run report binds to its RUN header, signed inventory, and signed verifier transcript natively.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "report": {"type": "string"},
+                        "mission": {"type": "string"},
+                        "tier": {"type": "string", "enum": ["self-run", "external-run"], "default": "self-run"},
+                        "base": {"type": "string"},
+                        "root": {"type": "string"}
+                    },
+                    "required": ["report", "mission"]
+                }
+            }),
+            json!({
+                "name": "fleet_events_report",
+                "description": "Derive structured run metrics and WIP curves from an append-only .orca/events.jsonl ledger natively.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "log": {"type": "string"},
+                        "run": {"type": "string"}
+                    }
                 }
             }),
             json!({
@@ -950,28 +981,102 @@ impl OpenFleetMcpServer {
                         .and_then(|v| v.as_str())
                         .map(PathBuf::from)
                         .unwrap_or_else(|| self.repo.clone());
-                    let script = self.root.join("runtime/scripts/verify.py");
-                    let mut cmd_args = vec![
-                        "-I".to_string(),
-                        script.display().to_string(),
-                        "--manifest".to_string(),
-                        manifest.to_string(),
-                        "--base".to_string(),
-                        base.to_string(),
-                    ];
-                    if args.get("no_gh").and_then(|v| v.as_bool()).unwrap_or(false) {
-                        cmd_args.push("--no-gh".to_string());
+                    let m_path = {
+                        let p = PathBuf::from(manifest);
+                        if p.is_absolute() {
+                            p
+                        } else {
+                            repo.join(p)
+                        }
+                    };
+                    let repo_s = repo.display().to_string();
+                    let v_args = of_verify::verify::VerifyArgs {
+                        manifest: m_path.display().to_string(),
+                        base: Some(base.to_string()),
+                        contract_source: args
+                            .get("contract_source")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                        contract_digest: args
+                            .get("contract_digest")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                        unit_class: args
+                            .get("unit_class")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                        execute_nc: args
+                            .get("execute_nc")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false),
+                        nc_command: args
+                            .get("nc_command")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                        no_gh: args.get("no_gh").and_then(|v| v.as_bool()).unwrap_or(false),
+                        allow_static_nc: args
+                            .get("allow_static_nc")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false),
+                        git_dir: Some(repo_s.clone()),
+                        evidence_root: Some(repo_s),
+                        ..Default::default()
+                    };
+                    let (code, payload) = of_verify::verify::verify_manifest_json(&v_args);
+                    is_error = code != 0;
+                    payload
+                }
+            }
+            "fleet_run_report_check" => {
+                let report = args.get("report").and_then(|v| v.as_str()).unwrap_or("");
+                let mission = args.get("mission").and_then(|v| v.as_str()).unwrap_or("");
+                if report.is_empty() || mission.is_empty() {
+                    is_error = true;
+                    json!({"error": "report and mission are required"})
+                } else {
+                    let tier = args
+                        .get("tier")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("self-run");
+                    let base = args.get("base").and_then(|v| v.as_str());
+                    let root = args
+                        .get("root")
+                        .and_then(|v| v.as_str())
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| self.root.clone());
+                    let errors =
+                        of_verify::run_report::check_report(report, mission, tier, &root, base);
+                    is_error = !errors.is_empty();
+                    json!({
+                        "ok": errors.is_empty(),
+                        "report": report,
+                        "mission": mission,
+                        "tier": tier,
+                        "errors": errors,
+                    })
+                }
+            }
+            "fleet_events_report" => {
+                let log = args
+                    .get("log")
+                    .and_then(|v| v.as_str())
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| of_ledgers::events::log_path(None));
+                let run = args.get("run").and_then(|v| v.as_str());
+                match of_ledgers::events::read_log(&log) {
+                    Ok((events, file_sha, head)) => {
+                        match of_ledgers::events::derive(&events, run, &file_sha, &head) {
+                            Ok(report) => report,
+                            Err(err) => {
+                                is_error = true;
+                                json!({"ok": false, "error": format!("{err:?}")})
+                            }
+                        }
                     }
-                    if args
-                        .get("allow_static_nc")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false)
-                    {
-                        cmd_args.push("--allow-static-nc".to_string());
+                    Err(err) => {
+                        is_error = true;
+                        json!({"ok": false, "error": format!("{err:?}")})
                     }
-                    let res = self.run_helper("python3", &cmd_args, &repo);
-                    is_error = !res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-                    res
                 }
             }
             "fleet_diff_scope" => {

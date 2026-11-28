@@ -8,6 +8,7 @@ use of_floor::{evaluate as eval_floor, FloorConfig};
 use of_install::{which, HARNESS_PROFILES};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -344,20 +345,14 @@ pub fn run_solo_review(args: &SoloReviewArgs) -> Result<Value, String> {
         fs::write(&p_out, &blind_prompt).map_err(|e| e.to_string())?;
     }
 
-    // 5. Optional independent verify.py invocation (until Wave 2B-2 ports verify.py)
+    // 5. Optional independent native `open-fleet verify` invocation
     let mut verify_result: Value = Value::Null;
     let mut verify_ok = true;
     let review_mode: &str;
     if !args.manifest.trim().is_empty() {
-        let python = which("python3")
-            .or_else(|| which("python"))
-            .unwrap_or_else(|| PathBuf::from("python3"));
+        let exe = env::current_exe().unwrap_or_else(|_| PathBuf::from("open-fleet"));
         let mut cmd_args = vec![
-            "-I".to_string(),
-            args.root
-                .join("runtime/scripts/verify.py")
-                .display()
-                .to_string(),
+            "verify".to_string(),
             "--manifest".to_string(),
             args.manifest.trim().to_string(),
             "--base".to_string(),
@@ -411,7 +406,7 @@ pub fn run_solo_review(args: &SoloReviewArgs) -> Result<Value, String> {
                 args.transcript_key.trim().to_string(),
             ]);
         }
-        let out = Command::new(python)
+        let out = Command::new(exe)
             .args(&cmd_args)
             .current_dir(&args.repo)
             .env("OPEN_FLEET_ROOT", &args.root)

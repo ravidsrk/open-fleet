@@ -16,6 +16,7 @@ use of_ledgers::egress::{
     cmd_grants as eg_grants, cmd_head as eg_head, cmd_verify as eg_verify, cmd_write as eg_write,
     GrantsArgs as EgGrantsArgs, VerifyArgs as EgVerifyArgs, WriteArgs as EgWriteArgs,
 };
+use of_ledgers::events::run_raw as events_run_raw;
 use of_mcp::{serve_stdio, OpenFleetMcpServer};
 use of_verify::chain_check::{
     cmd_audit as chain_audit, cmd_classify as chain_classify, cmd_gate as chain_gate,
@@ -38,12 +39,14 @@ use of_verify::preflight::run_raw_cli as preflight_run_raw;
 use of_verify::proof_status::{run_cli as proof_status_run, ProofStatusArgs};
 use of_verify::quarantine::{run_cli as quarantine_run, QuarantineArgs};
 use of_verify::readiness::{readiness_report, run_negative_probes};
+use of_verify::run_report::run_raw as run_report_run_raw;
 use of_verify::sessions::{
     advance_session, approve_gate, benchmark_progressive_savings, build_phase_packet,
     list_sessions, load_session, start_session, AdvanceSessionArgs, ApproveGateArgs,
     StartSessionArgs,
 };
 use of_verify::solo_review::{run_solo_review, SoloReviewArgs};
+use of_verify::verify::run_raw as verify_run_raw;
 use std::env;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -527,6 +530,24 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<OsString>,
     },
+    /// Independent SHA-bound evidence manifest verifier (exact parity with runtime/scripts/verify.py).
+    #[command(disable_help_flag = true)]
+    Verify {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
+    /// Run-report proof binding checker (exact parity with runtime/scripts/run_report.py).
+    #[command(name = "run-report", disable_help_flag = true)]
+    RunReport {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
+    /// Append-only run-event ledger, WIP-curve derivation & report check (exact parity with runtime/scripts/events.py).
+    #[command(disable_help_flag = true)]
+    Events {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
     /// Mission-chaining degraded-terminal classifier, gate, and catalog auditor.
     #[command(name = "chain-check")]
     ChainCheck {
@@ -693,8 +714,6 @@ fn delegate_python(subcmd: &[OsString]) -> i32 {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
     let script_map: &[(&str, &str)] = &[
-        ("verify", "runtime/scripts/verify.py"),
-        ("events", "runtime/scripts/events.py"),
         ("queue", "runtime/scripts/merge_queue.py"),
         ("upstream-probe", "runtime/scripts/upstream_probe.py"),
     ];
@@ -1171,6 +1190,9 @@ fn run() -> i32 {
             proof_status_run(&ProofStatusArgs { json, check, root })
         }
         Commands::Preflight { args } => preflight_run_raw(&args),
+        Commands::Verify { args } => verify_run_raw(&args),
+        Commands::RunReport { args } => run_report_run_raw(&args),
+        Commands::Events { args } => events_run_raw(&args),
         Commands::ChainCheck { sub } => match sub {
             ChainCheckCmd::Classify { terminal } => chain_classify(&terminal),
             ChainCheckCmd::Gate { allowed, terminal } => chain_gate(&allowed, &terminal),
